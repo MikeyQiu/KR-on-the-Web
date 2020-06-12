@@ -1,0 +1,2672 @@
+Asynchronous Temporal Fields for Action Recognition
+
+Gunnar A. Sigurdsson1∗ Santosh Divvala2,3 Ali Farhadi2,3 Abhinav Gupta1,3
+1Carnegie Mellon University 2University of Washington 3Allen Institute for Artiﬁcial Intelligence
+github.com/gsig/temporal-fields/
+
+7
+1
+0
+2
+ 
+l
+u
+J
+ 
+4
+2
+ 
+ 
+]
+
+V
+C
+.
+s
+c
+[
+ 
+ 
+2
+v
+1
+7
+3
+6
+0
+.
+2
+1
+6
+1
+:
+v
+i
+X
+r
+a
+
+Abstract
+
+Actions are more than just movements and trajectories:
+we cook to eat and we hold a cup to drink from it. A thor-
+ough understanding of videos requires going beyond ap-
+pearance modeling and necessitates reasoning about the
+sequence of activities, as well as the higher-level constructs
+such as intentions. But how do we model and reason about
+these? We propose a fully-connected temporal CRF model
+for reasoning over various aspects of activities that includes
+objects, actions, and intentions, where the potentials are
+predicted by a deep network. End-to-end training of such
+structured models is a challenging endeavor: For infer-
+ence and learning we need to construct mini-batches con-
+sisting of whole videos, leading to mini-batches with only
+a few videos. This causes high-correlation between data
+points leading to breakdown of the backprop algorithm. To
+address this challenge, we present an asynchronous vari-
+ational inference method that allows efﬁcient end-to-end
+training. Our method achieves a classiﬁcation mAP of
+22.4% on the Charades [43] benchmark, outperforming the
+state-of-the-art (17.2% mAP), and offers equal gains on the
+task of temporal localization.
+
+1. Introduction
+
+Consider the video shown in Figure 1: A man walks
+through a doorway, stands at a table, holds a cup, pours
+something into it, drinks it, puts the cup on the table, and
+ﬁnally walks away. Despite depicting a simple activity,
+the video involves a rich interplay of a sequence of actions
+with underlying goals and intentions. For example, the man
+stands at the table ‘to take a cup’, he holds the cup ‘to drink
+from it’, etc. Thorough understanding of videos requires
+us to model such interplay between activities as well as to
+reason over extensive time scales and multiple aspects of
+actions (objects, scenes, etc).
+
+Most contemporary deep learning based methods have
+treated the problem of video understanding as that of only
+appearance and motion (trajectory) modeling [44, 54, 7,
+
+∗Work was done while Gunnar was an intern at AI2.
+
+Figure 1. Understanding human activities in videos requires jointly
+reasoning about multiple aspects of activities, such as ‘what is hap-
+pening’, ‘how’, and ‘why’. In this paper, we present an end-to-
+end deep structured model over time trained in a stochastic fash-
+ion. The model captures rich semantic aspects of activities, in-
+cluding Intent (why), Category (what), Object (how). The ﬁgure
+shows video frames and annotations used in training from the Cha-
+rades [43] dataset.
+
+28]. While this has fostered interesting progress in this
+domain, these methods still struggle to outperform mod-
+els based on hand-crafted features, such as Dense Trajec-
+tories [57]. Why such a disconnect? We argue that video
+understanding requires going beyond appearance modeling,
+and necessitates reasoning about the activity sequence as
+well as higher-level constructs such as intentions. The re-
+cent emergence of large-scale datasets containing rich se-
+quences of realistic activities [43, 64, 61] comes at a perfect
+time facilitating us to explore such complex reasoning.
+
+But what is the right way to model and reason about tem-
+poral relations and goal-driven behaviour? Over the last
+couple of decades, graphical models such as Conditional
+Random Fields (CRFs) have been the prime vehicles for
+structured reasoning. Therefore, one possible alternative
+is to use ConvNet-based approaches [20] to provide fea-
+tures for a CRF training algorithm. Alternatively, it has
+been shown that integrating CRFs with ConvNet architec-
+tures and training them in an end-to-end manner provides
+substantial improvements in tasks such as segmentation and
+situation recognition [67, 1, 63].
+
+Inspired by these advances, we present a deep-structured
+model that can reason temporally about multiple aspects of
+activities. For each frame, our model infers the activity cate-
+
+gory, object, action, progress, and scene using a CRF, where
+the potentials are predicted by a jointly end-to-end trained
+ConvNet over all predictions in all frames. This CRF has a
+latent node for the intent of the actor in the video and pair-
+wise relationships between all individual frame predictions.
+While our model is intuitive, training it in an end-to-end
+manner is a non-trivial task. Particularly, end-to-end learn-
+ing requires computing likelihoods for individual frames
+and doing joint inference about all connected frames with
+a CRF training algorithm. This is in stark contrast with
+the standard stochastic gradient descent (SGD) training al-
+gorithm (backprop) for deep networks, where we require
+mini-batches with a large number of independent and un-
+correlated samples, not just a few whole videos. In order
+to handle this effectively: (1) we relax the Markov assump-
+tion and choose a fully-connected temporal model, such that
+each frame’s prediction is inﬂuenced by all other frames,
+and (2) we propose an asynchronous method for training
+fully-connected structured models for videos. Speciﬁcally,
+this structure allows for an implementation where the in-
+ﬂuence (messages) from other frames are approximated by
+emphasizing inﬂuence from frames computed in recent it-
+erations. They are more accurate, and show advantage
+over being limited to only neighboring frames.
+In addi-
+tion to being more suitable for stochastic training, fully-
+connected models have shown increased performance on
+various tasks [19, 67].
+
+In summary, our key contributions are: (a) a deep CRF
+based model for structured understanding and comprehen-
+sive reasoning of videos in terms of multiple aspects, such
+as action sequences, objects, and even intentions; (b) an
+asynchronous training framework for expressive temporal
+CRFs that is suitable for end-to-end training of deep net-
+works; and, (c) substantial improvements over state-of-the-
+art, increasing performance from 17.2% mAP to 22.4%
+mAP on the challenging Charades [43] benchmark.
+
+2. Related Work
+
+Understanding activities and actions has an extensive
+history [33, 60, 23, 17, 24, 2, 27, 57, 30, 22].
+Inter-
+estingly, analyzing actions by their appearance has gone
+through multiple iterations. Early success was with hand-
+crafted representations such as Space Time Interest Points
+(STIP) [23], 3D Histogram of Gradient (HOG3D) [17], His-
+togram of Optical Flow (HOF) [24], and Motion Bound-
+ary Histogram [2]. These methods capture and analyze
+local properties of the visual-temporal datastream. In the
+past years, the most prominent hand-crafted representa-
+tions have been from the family of trajectory based ap-
+proaches [27, 57, 30, 22], where the Improved Dense Tra-
+jectories (IDT) [57] representation is in fact on par with
+state-of-the-art on multiple recent datasets [8, 43].
+
+Recently there has been a push towards mid-level rep-
+
+resentations of video [38, 47, 13, 21], that capture beyond
+local properties. However, these approaches still used hand-
+crafted features. With the advent of deep learning, learn-
+ing representations from data has been extensively stud-
+ied [14, 15, 45, 58, 53, 54, 25, 7, 62, 56, 41, 3]. Of these,
+one of the most popular frameworks has been the approach
+of Simonyan et al. [45], who introduced the idea of training
+separate color and optical ﬂow networks to capture local
+properties of the video.
+
+Many of those approaches were designed for short clips
+of individual activities and hence do not generalize well to
+realistic sequences of activities. Capturing the whole in-
+formation of the video in terms of temporal evolution of
+the video stream has been the focus of some recent ap-
+proaches [52, 6, 12, 36, 50, 31]. Moving towards more ex-
+pressive deep networks such as LSTM has become a pop-
+ular method for encoding such temporal information [49,
+Interestingly, while those mod-
+4, 66, 51, 59, 42, 65].
+els move towards more complete understanding of the full
+video stream, they have yet to signiﬁcantly outperform local
+methods [45] on standard benchmarks.
+
+A different direction in understanding comes from rea-
+soning about the complete video stream in a complemen-
+tary direction — Structure. Understanding activities in a
+human-centric fashion encodes our particular experiences
+with the visual world. Understanding activities with em-
+phasis on objects has been a particularly fruitful direc-
+tion [26, 37, 9, 35, 55].
+In a similar vein, some works
+have also tried modeling activities as transformations [59]
+or state changes [5]. Recently, there has been signiﬁcant
+progress in modelling the complete human-centric aspect,
+where image recognition is phrased in terms of objects and
+their roles [63, 10]. Moving beyond appearance and reason-
+ing about the state of agents in the images requires under-
+standing human intentions [16, 32]. This ability to under-
+stand people in terms of beliefs and intents has been tradi-
+tionally studied in psychology as the Theory of mind [34].
+How to exactly model structure of the visual and tem-
+poral world has been the pursuit of numerous ﬁelds. Of
+particular interest is work that combines the representative
+power of deep networks with structured modelling. Train-
+ing such models is often cumbersome due to the differences
+in jointly training deep networks (stochastic sampling) and
+sequential models (consecutive samples) [29, 67]. In this
+work, we focus on fully-connected random ﬁelds, that have
+been popular in image segmentation [19], where image ﬁl-
+tering was used for efﬁcient message passing, and later ex-
+tended to use CNN potentials [40].
+
+3. Proposed Method
+
+Given a video with multiple activities, our goal is to un-
+derstand the video in terms of activities. Understanding
+activities requires reasoning about objects being interacted
+
+Figure 2. An overview of our structured model. The semantic part captures object, action, etc. at each frame, and temporal aspects captures
+those over time. On the left side, we show how for each timepoint in the video, a Two-Stream Network predicts the potentials. Our model
+jointly reasons about multiple aspects of activities in all video frames. The Intent captures groups of activities of the person throughout the
+whole sequence of activities, and ﬁne-grained temporal reasoning is through fully-connected temporal connections.
+
+with, the place where the interaction is happening, what
+happened before and what happens after this current action
+and even the intent of the actor in the video. We incorporate
+all these by formulating a deep Conditional Random Field
+(CRF) over different aspects of the activity over time. That
+is, a video can be interpreted as a graphical model, where
+the components of the activity in each frame are nodes in the
+graph, and the model potentials are the edges in the graph.
+In particular, we create a CRF which predicts activity,
+object, etc., for every frame in the video. For reasoning
+about time, we create a fully-connected temporal CRF, re-
+ferred as Asynchronous Temporal Field in the text. That is,
+unlike a linear-chain CRF for temporal modelling (the dis-
+criminative counterpart to Hidden Markov Models), each
+node depends on the state of every other node in the graph.
+We incorporate intention as another latent variable which
+is connected to all the action nodes. This is an unobserved
+variable that inﬂuences the sequence of activities. This vari-
+able is the common underlying factor that guides and better
+explains the sequence of actions an agent takes. Analysis
+of what structure this latent variable learns is presented in
+the experiments. Our model has three advantages: (1) it ad-
+dresses the problem of long-term interactions; (2) it incor-
+porates reasoning about multiple parts of the activity, such
+as objects and intent; and (3) more interestingly, as we will
+see, it allows for efﬁcient end-to-end training in an asyn-
+chronous stochastic fashion.
+
+3.1. Architecture
+
+can further write Xt = {Ct, Ot, At, Pt, St}, where C is
+the activity category (e.g., ‘drinking from cup’), O cor-
+responds to the object (e.g., ‘cup’), A represents the ac-
+tion (e.g., ‘drink’), P represents the progress of the activity
+{start, middle, end}, and S represents the scene (e.g. ‘Din-
+ing Room’). For clarity in the following derivation we will
+refer to all the associated variables of Xt as a single ran-
+dom variable Xt. A more detailed description of the CRF
+is presented in the appendix.
+
+Mathematically we consider a random ﬁeld {X, I} over
+all the random variables in our model ({X1, . . . , XT , I}).
+Given an input video V ={V1, . . . , VT }, where Vt is a video
+frame, our goal is to estimate the maximum a posteriori la-
+beling of the random ﬁeld by marginalizing over the intent
+I. This can be written as:
+
+x∗ = arg max
+
+P (x, I|V ).
+
+(1)
+
+(cid:88)
+
+I
+
+x
+
+For clarity in notation, we will drop the conditioning
+on V and write P (X, I). We can deﬁne P (X, I) us-
+ing Gibbs distribution as: P (X, I)= 1
+Z(V) exp (−E(x, I))
+where E(x, I) is the Gibbs energy over x.
+In our CRF,
+we model all unary and pairwise cliques between all frames
+{X1, . . . , XT } and the intent I. The Gibbs energy is:
+
+E(x, I) =
+
+φX (xi)
+
++
+
+φXI (xi, I) +
+
+,
+φXX (xi, xj )
+
+(2)
+
+(cid:88)
+
+i
+
+(cid:124)
+
+(cid:123)(cid:122)
+Semantic
+
+(cid:125)
+
+(cid:88)
+
+i
+
+(cid:124)
+
+(cid:88)
+
+i,j
+i(cid:54)=j
+
+(cid:123)(cid:122)
+Temporal
+
+(cid:125)
+
+In this work we encode multiple components of an
+activity. Each video with T frames is represented as
+{X1, . . . , XT , I} where Xt is a set of frame-level random
+variables for time step t and I is an unobserved random
+variable that represent global intent in the entire video. We
+
+where φXX (xi, xj) is the potential between frame i and
+frame j, and φXI(xi, I) is the potential between frame i
+and the intent. For notational clarity φX (xi) incorporates
+all unary and pairwise potentials for Ct, Ot, At, Pt, St. The
+model is best understood in terms of two aspects: Semantic
+
+function µ(xi, xj) are learned from the data, and σ is a
+hyper-parameter chosen by cross-validation.
+
+3.2. Inference
+
+While it is possible to enumerate all variable conﬁg-
+urations in a single frame, doing so for multiple frames
+and their interactions is intractable. Our algorithm uses a
+structured variational approximation to approximate the full
+probability distribution. In particular, we use a mean-ﬁeld
+approximation to make inference and learning tractable.
+With this approximation, we can do inference by keeping
+track of message between frames, and asynchronously train
+one frame at a time (in a mini-batch fashion).
+
+More formally, instead of computing the exact distribu-
+tion P (X, I) presented above, the structured variational ap-
+proximation ﬁnds the distribution Q(X, I) among a given
+family of distributions that best ﬁts the exact distribution in
+terms of KL-divergence. By choosing a family of tractable
+distributions,
+it is possible to make inference involving
+the ideal distribution tractable. Here we use Q(X, I) =
+QI(I) (cid:81)
+i Qi(xi), the structured mean-ﬁeld approximation.
+Minimizing the KL-divergence between those two distribu-
+tions yields the following iterative update equation:
+
+Qi(xi) ∝ exp
+
+φX (xi) + EU ∼QI [φXI (xi, U )]
+
+(cid:26)
+
++
+
++
+
+(cid:88)
+
+j>i
+
+(cid:88)
+
+j<i
+
+(cid:26) (cid:88)
+
+j
+
+EUj ∼Qj [φXX (xi, Uj )]
+
+EUj ∼Qj [φXX (Uj , xi)]
+
+(cid:27)
+
+(cid:27)
+
+(cid:27)
+
+(5)
+
+(6)
+
+QI (I) ∝ exp
+
+EUj ∼Qj [φXI (Uj , I)]
+
+where Qi is marginal distribution with respect to each of
+the frames, and QI is the marginal with respect to the in-
+tent. An algorithmic implementation of this equation is as
+presented in Algorithm 1.
+
+Algorithm 1 Inference for Asynchronous Temporal Fields
+(cid:46) Uniform distribution
+1: Initialize Q
+2: while not converged do
+Visit frame i
+3:
+Get (cid:80)
+4:
+Get (cid:80)
+5:
+Get (cid:80)
+6:
+while not converged do
+7:
+8:
+9:
+10:
+11:
+
+j>i EUj ∼Qj [φXX (xi, Uj )]
+j<i EUj ∼Qj [φXX (Uj , xi)]
+j EUj ∼Qj [φXI (Uj , I)]
+
+Send EU ∼Qi [φXX (x, U )]
+Send EU ∼Qi [φXX (U, x)]
+Send EU ∼Qi [φXI (U, I)]
+
+Update Qi and QI using Eq. 6
+
+Here ‘Get’ and ‘Send’ refer to the message server, and f (x)
+is a message used later by frames in the same video. The
+term message server is used for a central process that keeps
+track of what node in what video sent what message, and
+
+Figure 3. Illustration of the learning algorithm, and the message
+passing structure. Each timepoint that has been processed has a
+message (Blue highlights messages that have recently been com-
+puted). The loss receives a combination of those messages, uses
+those to construct new messages, and updates the network.
+
+aspect, which incorporates the local variables in each frame
+(Ct, Ot, At, Pt, St); and Temporal aspect, which incorpo-
+rates interactions among frames and the intent I. This is
+visualized in Figure 2. We will now explain the semantic,
+and temporal potentials.
+Semantic aspect The frame potential φX (xi) incor-
+porates the interplay between activity category, object,
+action, progress and scene, and could be written ex-
+plicitly as φX (Ct, Ot, At, Pt, St).
+In practice this
+potential
+is composed of unary, pairwise, and tertiary
+potentials directly predicted by a CNN. We found
+predicting only the following terms to be sufﬁcient
+without
+introducing too many additional parameters:
+φX (Ct, Ot, At, Pt, St)=φ(Ot, Pt)+φ(At, Pt)+φ(Ot, St)+
+φ(Ct, Ot, At, Pt) where we only model the assignments
+seen in the training set, and assume others are not possible.
+
+Temporal aspect The temporal aspect of the model is
+both in terms of the frame-intent potentials φXI(xi, I) and
+frame-frame potentials φXX (xi, xj). The frame-intent po-
+tentials are predicted with a CNN from video frames (pixels
+and motion). The pairwise potentials φXX (xi, xj) for two
+time points i and j in our model have the form:
+
+φXX (xi, xj) = µ(xi, xj)
+
+w(m)k(m)(vi, vj),
+
+(3)
+
+(cid:88)
+
+m
+
+where µ models the asymmetric afﬁnity between frames, w
+are kernel weights, and each k(m) is a Gaussian kernel that
+depends on the videoframes vi and vj. In this work we use
+a single kernel that prioritises short-term interactions:
+
+k(vi, vj) = exp
+
+−
+
+(cid:18)
+
+(cid:19)
+
+(j − i)2
+2σ2
+
+(4)
+
+The parameters of the general asymmetric compatibility
+
+Figure 4. Evolution of prediction with increasing messages passes.
+The ﬁrst row shows the initial prediction for the category tidying
+with a broom without any message passing, where darker colors
+correspond to higher likelihood, blue is then an increase in like-
+lihood, and brown decrease. In the ﬁrst message pass, the conﬁ-
+dence of high predictions gets spread around, and eventually in-
+creases the conﬁdence of the whole prediction.
+
+distributes them accordingly when requested. In practice,
+this could be implemented in a multi-machine setup.
+
+3.3. Learning
+
+Training a deep CRF model requires calculating deriva-
+tives of the objective in terms of each of the potentials in
+the model, which in turn requires inference of P (X, I|V ).
+The network is trained to maximize the log-likelihood of
+the data l(X) = log (cid:80)
+I P (x, I|V ). The goal is to update
+the parameters of the model, for which we need gradients
+with respect to the parameters. Similar to SGD, we ﬁnd the
+gradient with respect to one part of the parameters at a time,
+speciﬁcally with respect to one potential in one frame. That
+is, φi
+X (ˆx) instead of φX (ˆx). The partial derivatives of this
+loss with respect to each of the potentials are as follows:
+
+∂l(X)
+∂φi
+X (ˆx)
+
+∂φi
+
+∂l(X)
+XI (ˆx, ˆI)
+∂l(X)
+∂µi(a, b)
+
+=
+
+(cid:80)
+
+(cid:88)
+
+=
+
+j>i
+(cid:88)
+
+j<i
+
+= 1x=ˆx − Qi(ˆx)
+
+(7)
+
+exp (cid:80)
+I exp (cid:80)
+
+j φXI (xj , ˆI)
+
+j φXI (xj , I)
+
+1x=ˆx − Qi(ˆx)QI ( ˆI)
+
+(8)
+
+1x=ak(vi, vj ) − Qi(ˆx)
+
+QI (b)k(vi, vj )
+
++
+
+1x=bk(vj , vi) − Qi(ˆx)
+
+QI (a)k(vi, vj ) (9)
+
+(cid:88)
+
+j>i
+(cid:88)
+
+j<i
+
+X (ˆx) and φi
+
+XI(ˆx, ˆI) is the frame and frame-intent
+where φi
+potentials of frame i, and we use ˆx to distinguish between
+the labels and variables the derivative is taken with respect
+to. µi(a, b) are the parameters of the asymmetric afﬁnity
+kernel with respect to frame i, and 1x=ˆx is a indicator vari-
+able that has the value one if the ground truth label corre-
+sponds to the variable. Complete derivation is presented in
+the appendix. These gradients are used to update the un-
+derlying CNN model. These update equations lead to the
+learning procedure presented in Algorithm 2.
+
+Figure 3 graphically illustrates the learning procedure.
+Since the videos are repeatedly visited throughout the train-
+ing process, we do not have to run multiple message passes
+
+Algorithm 2 Learning for Asynchronous Temporal Fields
+1: Given videos V
+2: while not converged do
+3:
+4:
+5:
+6:
+7:
+8:
+9:
+
+for each example in mini-batch do
+Sample frame v ∈ V ⊆ V
+Get incoming messages
+Update Qi and QI
+Find gradients with Eq. 7-9
+Backprop gradients through CNN
+Send outgoing messages
+
+to calculate each partial gradient. This shares ideas with
+contrastive divergence [11, 39]. Given a single video at test
+time, we visualize in Figure 4 how the predictions changes
+as the distribution converges with multiple messages passes.
+Message Passing The key thing to note is all the in-
+coming messages are of the form M (z)= (cid:80)
+j fj(z) where
+fj is some function from node j;
+for e.g., M (z) =
+(cid:80)
+j EUj ∼Qj [φXI(Uj, z)] = (cid:80)
+j fj(z) from Algorithm 1.
+
+We use the following approximation during training:
+
+M (z)≈
+
+h
+j dj
+
+(cid:80)
+
+(cid:88)
+
+j
+
+djfJ(j)(z),
+
+(10)
+
+where d ∈ [0, 1] is a discount factor, h is a hyperparameter,
+and J(·) is an ordering of the messages in that video based
+on the iteration in which the message was computed. The
+messages are a weighted combination of stored messages.
+
+4. Experimental Results and Analysis
+
+We analyzed the efﬁcacy of our model on the challenging
+tasks of video activity classiﬁcation and temporal localiza-
+tion. In addition, we investigated the different parts of the
+model, and will demonstrate how they operate together.
+Dataset Recent years have witnessed an emergence of
+large-scale datasets containing sequences of common daily
+activities [43, 64, 61]. For our evaluation, we chose the
+Charades dataset [43]. This dataset is a challenging bench-
+mark containing 9,848 videos across 157 action classes with
+66,500 annotated activities, including nouns (objects), verbs
+(actions), and scenes. A unique feature of this dataset is
+the presence of complex co-occurrences of realistic human-
+generated activities making it a perfect test-bed for our anal-
+ysis. We evaluate video classiﬁcation using the evaluation
+criteria and code from [43]. Temporal localization is evalu-
+ated in terms of per-frame classiﬁcation using the provided
+temporal annotations.
+Implementation details We use a VGG16 network [46]
+with additional layers to predict the model potentials (Fig-
+ure 5). We train both a network on RGB frames, and stacks
+of optical ﬂow images, following the two-stream architec-
+ture [45]. The main challenge in training the network is the
+increase in the output layer size. For the larger potentials,
+
+Figure 5. The VGG-16 variant predicts the potentials for both RGB
+and Flow. The network predicts the values of all potentials except
+one (in this ﬁgure we group the frame potentials φX into one layer
+for clarity). The model is trained end-to-end by passing gradients
+from the Asynchronous Temporal Field through the network.
+
+Figure 6. Convergence of our method compared to other meth-
+ods that capture temporal structure. Our asynchronous training
+method contains more diverse batches, has faster and more stable
+convergence, and reaches higher accuracy on the test set.
+
+we used the following structure to go from fc7 to φXI: Lin-
+ear layer (4096 to 100), ReLU, Dropout, Linear layer (100
+to the potential values).
+
+The input to the RGB network is an image of size
+224×224×3 where we crop random location, size, and as-
+pect ratio. We use data augmentation with color jitter and
+PCA lighting noise. The RGB network was pretrained on
+ImageNet. The input to the Flow network is a stack of 10
+consecutive optical ﬂow frames at 24 FPS starting with the
+current frame. Since each optical ﬂow has two channels,
+the input size is 224×224×20 as in [45]. The Flow net-
+work was pretrained on UCF101 [48] as in Sigurdsson et
+al. [43], and random cropped in the same way as RGB.
+
+We follow the training setup in Charades [43] and con-
+sider a frame to have one activity label at a time. Even so,
+our method is still able to reason about other activities in the
+video. Convergence of the model is evaluated using the ap-
+proximate distribution Qi(X) at each frame. The Charades
+dataset has the property that scenes were chosen at random
+for each sequence of activities. For this reason, we found
+reasoning about scenes to reduce the performance, and the
+weight of that term was lowered in the model.
+
+To obtain annotations for action progress pt, we split
+each activity annotation into three equally sized parts. All
+layers of the network are trained with a batch size of 240
+and a learning rate of 10−3 (RGB), 10−5 (Flow). Learn-
+ing rate was reduced by a factor of 10 every 30k iterations
+for RGB, and every 140k iterations for Flow. The value of
+the message decay parameter d was set to d = 0.9, and the
+standard deviation σ in (4) was set to 6.25 sec (150 frames).
+For testing, we sampled 25 equally spaced frames from
+the video and synchronously pass messages between the
+frames until convergence (10 message passes). The pre-
+dictions of the RGB and Flow networks are combined in a
+probabilistic fashion by multiplying their probabilistic pre-
+dictions for each class. More implementation details may
+be found in the appendix. The networks were implemented
+in Torch, and the code is available on project page.
+
+Diverse batches As highlighted in Section 1, the standard
+
+way of sampling batches for temporal models results in high
+correlation between data points leading to a breakdown of
+the SGD. To understand the importance of having many di-
+verse examples from multiple videos, we compare the con-
+vergence of our method to two alternatives using homo-
+geneous batches: CNN+LSTM from Ng et al. [66], and a
+synchronous version of our method, where each batch con-
+tains full videos (only three videos ﬁt into each mini-batch).
+We do synchronous message passing until convergence be-
+fore calculating gradients for backprop. Figure 6 shows that
+our asynchronous training method, containing more diverse
+training batches, has faster and more stable convergence.
+
+4.1. Video Classiﬁcation
+
+Given a video, the task here is to verify whether it con-
+tains one or several of the 157 activity categories. Classiﬁ-
+cation accuracy is measured with the standard mean average
+precision (mAP) criterion, where a prediction is given for
+each video. This task has been shown to be highly challeng-
+ing, with the state-of-the-art non-ensemble methods reach-
+ing an mAP of only 17.2%, particularly as each video in
+this dataset has a sequence of multiple ﬁne-grained activi-
+ties with a real-world long-tailed activity distribution.
+
+We trained our models using the provided training split
+following the procedure outlined in Section 3. To make pre-
+dictions for the whole video, we marginalize out everything
+except the activity category for 25 equidistant frames in the
+video. The score for each activity category is the maxi-
+mum across all frames following the setup from [43]. In our
+analysis, we include the provided non-ensemble baselines
+from [43] as well as the following additional baselines:
+
+Two-Stream++. We reimplemented the network de-
+scribed in [43], which follows Simonyan et al. [46], with
+the same parameters. We added data augmentation and ﬁne-
+tuned all layers of the network. The performance of only
+the RGB stream is included (RGB++). We also consider
+Two-Stream Extended which is the same network, but the
+Flow network was trained for 25 times more iterations than
+the RGB network (two weeks of computation on a Titan X
+
+Approach
+
+Random [43]
+C3D [54]
+AlexNet [20]
+IDT [57]
+Two-Stream [44]
+
+mAP
+
+5.9
+10.9
+11.3
+17.2
+14.3
+
+Approach
+
+RGB++
+Two-Stream++
+Two-Stream+LSTM
+Two-Stream Extended
+Ours (RGB Only)
+Ours
+
+mAP
+
+15.6
+16.8
+17.8
+18.6
+18.3
+22.4
+
+Table 1. Video classiﬁcation results on Charades [43]. The left
+shows the published baselines from [43] and the right show ad-
+ditional new baselines. Our proposed approach outperforms all
+competing methods on this dataset.
+
+Figure 7. The classes with the highest positive and negative dif-
+ference between our method and Two-Stream (no structure). Our
+method does better on many classes, without doing much worse
+on any. In particular, activities that have temporal structure, such
+as Opening/Closing a refrigerator have signiﬁcantly higher perfor-
+mance, since our model can reason jointly about those.
+
+GPU). Combined with the augmentation, we found this to
+non-trivially increase the accuracy.
+
+Two-Stream+LSTM. We followed the method outlined
+in [66] to jointly train a LSTM on top of the two-stream
+network. We trained both an RGB and an Optical Flow net-
+work using the same setup from [43]. The trained networks
+from Two-Stream++ were used to initialize the models.
+
+Table 1 displays the accuracy obtained by our method
+along with the baselines. Our proposed approach obtains
+an mAP of 22.4% substantially outperforming the Two-
+stream Extended baseline at 18.6% mAP, and the IDT base-
+line at 17.2%. Our method reasons over signiﬁcantly larger
+timescales and multiple aspects of the activities. To as-
+certain this, we highlight in Figure 7, the activity classes
+with the highest positive and negative difference between
+our method and the Two-Stream network. It is interesting
+to note that two of those activities are opening and closing a
+refrigerator, that arguably have a signiﬁcant causal structure
+(an open refrigerator was opened at some point), which our
+model harnesses to signiﬁcantly increase the accuracy.
+
+Ablation studies To study the contribution of different
+model parts, we also train ablated versions of our model
+separately choosing the best hyperparameters for each ver-
+sion.
+In addition to our model with only RGB or Flow,
+we also consider dropping φXX (i.e., no sequential informa-
+
+Figure 8. Ablation analysis for our proposed model. Y-axis is
+video classiﬁcation mAP %. Each factor helps in improving
+the overall model performance. φ(P ) indicates dropping the
+‘progress’ term within the semantic factor φX .
+
+Random
+
+RGB
+
+Two-Stream++
+
+Two-Stream
++LSTM
+
+Two-Stream
+Extended
+
+Standard
+Post-processing
+
+2.42
+2.42
+
+7.89
+9.05
+
+8.94
+10.9
+
+9.60
+10.4
+
+9.37
+11.6
+
+Ours
+
+9.69
+12.8
+
+Table 2. Temporal localization results (mAP %) on the Cha-
+rades [43] dataset. Our proposed method outperforms the LSTM
+model, and is also more tractable to train at a large-scale.
+
+tion), φXI (i.e., no intent), both (i.e., only semantic informa-
+tion), and further dropping φX (i.e., dropping all structure).
+Figure 8 shows that semantic reasoning improves over the
+baseline. Further, while both φXI and φXX capture tempo-
+ral information, they are complementary.
+
+4.2. Temporal Localization
+
+To measure the ability of the methods to temporally lo-
+calize and understand when exactly activities happen, we
+adapt the benchmark of [43] to evaluate with the same mAP
+metric but on individual frames. That is, instead of having
+a single prediction per video, evaluation is now split into 25
+equidistant timepoints having zero or more activities, and
+the models make a prediction for each of those∗. We ﬁnd
+this way of evaluating localization robust to annotation am-
+biguity, and informative for challenging datasets. All hyper-
+parameters were kept equal between localization and clas-
+siﬁcation experiments. All baselines are run on 75 frames
+across the video, and then every third frame selected for a
+total of 25 frames. We also considered methods with post-
+processing where the model predictions for the 75 frames
+are averaged across 30 frames to obtain more spatial con-
+sistency, and then 25 frames selected as before.
+
+Table 2 shows that our method outperforms the alterna-
+tives, including the LSTM model which has been shown
+to be a powerful temporal modeling tool, but challenging
+to train on top of a two-stream network due to correla-
+tions between consecutive samples. These results demon-
+strate the our method is tractable way of training end-to-end
+structured models to understand activities.
+Interestingly,
+our method still beneﬁts from adding post-processing, sig-
+niﬁcantly more than the LSTM baseline, likely since our
+method is reasoning on larger time-scales. This suggests
+
+∗This evaluation code has been included as a part of the Charades
+
+dataset (allenai.org/plato/charades/).
+
+Figure 9. Model predictions for a sample video. We see the interplay between categories, objects and actions over time. For example,
+model becomes conﬁdent about the action sit early, which aids the understanding of Sitting in a chair once the chair becomes visible, and
+helps predicting Reading a book. Darker colors represent higher likelihood, and we average predictions to correspond to each frame.
+
+Figure 10. To visualize the learned intent, we cluster videos
+In Cluster 1, the model captures the intent of
+based on intent.
+In Cluster 2, folding clothes is fol-
+get up from lying down.
+lowed by putting them away, and Cluster 3 shows cleaning with
+a broom/vacuum/towel, followed by picking up things.
+
+Figure 11. t-SNE visualization for the learned intent. Each point
+corresponds to a video.
+In a) it is colored based on its activity
+shared by the most of the 10 nearest neighbors (each video has
+multiple actions). In b) videos with 6 annotated intent types are
+emphasized with larger points colored by the type.
+
+that our model could further beneﬁt from joint training with
+additional kernels in the temporal term.
+
+Qualitative visualization A key advantage of our model is
+the structured understanding of videos in terms of multiple
+aspects, such as action sequences, objects, and even inten-
+tions. To visualize this, we display predictions over time
+in Figure 9 for the three most conﬁdent activity categories,
+two most conﬁdent actions, and the most conﬁdent object.
+More examples are presented in the Appendix.
+
+Interpretation of Intent In our model, the intent I is a con-
+tinuous distribution over the latent variables. To get an in-
+sight into how our model learns the intent, we ran a simple
+experiment that clustered videos in the dataset that have the
+most similar inferred intent distributions. The ﬁrst cluster in
+Figure 10 shows the model captures the simple intent that
+the person intends to get up from lying down. In the videos,
+these actions are 10-20 seconds apart, demonstrating that
+the intent helps reason over large time scales.
+
+In order to further analyze the ‘intent’ variable, we plot
+the t-SNE embedding of the intent variable for the videos
+in the test set. We see that there is clear clustering of simi-
+lar videos in Fig. 11a. We also annotated 10 types of intent
+(100 videos total). More details are presented in the Ap-
+pendix. We observe that the intent representation preserves
+some of the intent types in Fig. 11b. Quantitatively, even
+
+without mitigating outliers, the average distance (in 10−3)
+between pairs of videos within an intent type was 6.02 com-
+pared to 7.25 (σ=1.06) for any points, and the difference is
+signiﬁcant for 5 of 10 intent types (p=0.1). This tentatively
+suggest that the intent captures interesting structure in the
+data, and we hope this will encourage future work.
+
+5. Conclusion
+
+In this paper, we have presented a deep-structured model
+using a fully-connected temporal CRF that not only models
+semantic aspects of activities but also reasons about long-
+term temporal relations. We also presented an asynchronous
+stochastic inference algorithm that circumvents a key bot-
+tleneck in the large-scale end-to-end model learning. Using
+our proposed method, we have demonstrated impressive ac-
+tivity classiﬁcation and temporal localization results on a
+challenging dataset of realistic activities.
+Acknowledgements: This work was partly supported by ONR MURI
+N00014-16-1-2007, ONR N00014-13-1-0720, NSF IIS-1338054, NSF-
+1652052, NRI-1637479, Intel via the Intel Science and Technology Center
+for Visual Cloud Systems, Allen Distinguished Investigator Award, gifts
+
+from Google, and the Allen Institute for Artiﬁcial Intelligence. The authors
+would like to thank Mark Yatskar for lending his expertise on deep CRFs,
+and Olga Russakovsky, Christoph Dann, and the anonymous reviewers for
+their invaluable suggestions and advice.
+
+References
+
+[1] L.-C. Chen∗, A. G. Schwing∗, A. L. Yuille, and R. Urtasun.
+Learning Deep Structured Models. In Proc. ICML, 2015. ∗
+equal contribution. 1
+
+[2] N. Dalal, B. Triggs, and C. Schmid. Human detection using
+oriented histograms of ﬂow and appearance. In ECCV, 2006.
+2
+
+[3] C. R. de Souza, A. Gaidon, E. Vig, and A. M. Lpez. Sym-
+pathy for the details: Dense trajectories and hybrid classiﬁ-
+cation architectures for action recognition. In ECCV, 2016.
+2
+
+[4] J. Donahue, L. A. Hendricks, S. Guadarrama, M. Rohrbach,
+S. Venugopalan, K. Saenko, and T. Darrell. Long-term recur-
+rent convolutional networks for visual recognition and de-
+scription. In CVPR, 2015. 2
+
+[5] A. Fathi and J. M. Rehg. Modeling actions through state
+
+changes. In ICCV, 2013. 2
+
+[6] B. Fernando, E. Gavves, M. J. Oramas, A. Ghodrati, and
+T. Tuytelaars. Modeling video evolution for action recogni-
+tion. In CVPR, 2015. 2
+
+[7] G. Gkioxari and J. Malik. Finding action tubes. In CVPR,
+
+2015. 1, 2
+
+[8] A. Gorban, H. Idrees, Y.-G. Jiang, A. Roshan Zamir,
+I. Laptev, M. Shah, and R. Sukthankar. THUMOS chal-
+lenge: Action recognition with a large number of classes.
+http://www.thumos.info/, 2015. 2
+
+[9] A. Gupta, A. Kembhavi, and L. S. Davis. Observing human-
+object interactions: Using spatial and functional compatibil-
+ity for recognition. TPAMI, 2009. 2
+
+[10] S. Gupta and J. Malik. Visual semantic role labeling. CoRR,
+
+/abs/1505.04474, 2015. 2
+
+[11] G. E. Hinton. Training products of experts by minimizing
+contrastive divergence. Neural computation, 14(8):1771–
+1800, 2002. 5
+
+[12] H. Izadinia and M. Shah. Recognizing complex events using
+
+large margin joint low-level event model. ECCV, 2012. 2
+
+[13] A. Jain, A. Gupta, M. Rodriguez, and L. S. Davis. Represent-
+ing videos using mid-level discriminative patches. In CVPR,
+2013. 2
+
+[14] S. Ji, W. Xu, M. Yang, and K. Yu. 3d convolutional neural
+networks for human action recognition. TPAMI, 2013. 2
+[15] A. Karpathy, G. Toderici, S. Shetty, T. Leung, R. Sukthankar,
+and L. Fei-Fei. Large-scale video classiﬁcation with convo-
+lutional neural networks. In CVPR, 2014. 2
+
+[16] K. M. Kitani, B. D. Ziebart, J. A. Bagnell, and M. Hebert.
+
+Activity forecasting. In ECCV, 2012. 2
+
+[17] A. Klaser, M. Marszalek, and C. Schmid. A spatio-temporal
+descriptor based on 3d-gradients. In BMVC, 2008. 2
+[18] D. Koller and N. Friedman. Probabilistic graphical models:
+
+principles and techniques. 2009. 13
+
+[19] P. Kr¨ahenb¨uhl and V. Koltun. Efﬁcient inference in fully
+connected crfs with gaussian edge potentials. In NIPS, 2011.
+2
+
+[20] A. Krizhevsky, I. Sutskever, and G. E. Hinton.
+
+classiﬁcation with deep convolutional neural networks.
+NIPS, 2012. 1, 7
+
+[21] T. Lan, Y. Zhu, A. R. Zamir, and S. Savarese. Action recog-
+nition by hierarchical mid-level action elements. In ICCV,
+2015. 2
+
+Imagenet
+In
+
+[22] Z. Lan, M. Lin, X. Li, A. G. Hauptmann, and B. Raj. Be-
+yond gaussian pyramid: Multi-skip feature stacking for ac-
+tion recognition. In CVPR, 2015. 2
+
+[23] I. Laptev. On space-time interest points. IJCV, 64, 2005. 2
+[24] I. Laptev, M. Marszalek, C. Schmid, and B. Rozenfeld.
+In CVPR,
+
+Learning realistic human actions from movies.
+2008. 2
+
+[25] Q. V. Le, W. Y. Zou, S. Y. Yeung, and A. Y. Ng. Learn-
+ing hierarchical invariant spatio-temporal features for action
+recognition with independent subspace analysis. In CVPR,
+2011. 2
+
+[26] L.-J. Li and L. Fei-Fei. What, where and who? classifying
+
+events by scene and object recognition. In ICCV, 2007. 2
+
+[27] P. Matikainen, M. Hebert, and R. Sukthankar. Trajectons:
+Action recognition through the motion analysis of tracked
+features. In ICCV Workshops, 2009. 2
+
+[28] P. Mettes, J. C. van Gemert, and C. G. Snoek. Spot on:
+Action localization from pointly-supervised proposals.
+In
+ECCV, 2016. 1
+
+[29] V. Mnih, K. Kavukcuoglu, D. Silver, A. Graves,
+I. Antonoglou, D. Wierstra, and M. Riedmiller.
+Play-
+ing atari with deep reinforcement learning. arXiv preprint
+arXiv:1312.5602, 2013. 2
+
+[30] X. Peng, C. Zou, Y. Qiao, and Q. Peng. Action recognition
+
+with stacked ﬁsher vectors. In ECCV, 2014. 2
+
+[31] H. Pirsiavash and D. Ramanan. Parsing videos of actions
+
+with segmental grammars. In CVPR, 2014. 2
+[32] H. Pirsiavash, C. Vondrick, and A. Torralba.
+
+Inferring the
+
+why in images. arXiv preprint arXiv:1406.5472, 2014. 2
+[33] R. Poppe. A survey on vision-based human action recog-
+nition. Image and vision computing, 28(6):976–990, 2010.
+2
+
+[34] D. Premack and G. Woodruff. Does the chimpanzee have a
+theory of mind? Behavioral and brain sciences, 1(04):515–
+526, 1978. 2
+
+[35] A. Prest, C. Schmid, and V. Ferrari. Weakly supervised learn-
+ing of interactions between humans and objects. TPAMI,
+2012. 2
+
+[36] M. Rohrbach, M. Regneri, M. Andriluka, S. Amin,
+M. Pinkal, and B. Schiele. Script data for attribute-based
+recognition of composite activities. ECCV, 2012. 2
+
+[37] M. S. Ryoo and J. Aggarwal. Hierarchical recognition of
+human activities interacting with objects. In CVPR, 2007. 2
+[38] S. Sadanand and J. J. Corso. Action bank: A high-level rep-
+
+resentation of activity in video. In CVPR, 2012. 2
+
+[39] R. Salakhutdinov and G. E. Hinton. Deep boltzmann ma-
+
+chines. In AISTATS, 2009. 5
+
+[40] A. G. Schwing and R. Urtasun. Fully connected deep struc-
+
+tured networks. arXiv preprint arXiv:1503.02351, 2015. 2
+
+[41] Z. Shou, D. Wang, and S.-F. Chang. Temporal action local-
+ization in untrimmed videos via multi-stage cnns. In CVPR,
+2016. 2
+
+[42] G. A. Sigurdsson, X. Chen, and A. Gupta. Learning vi-
+sual storylines with skipping recurrent neural networks. In
+ECCV, 2016. 2
+
+[43] G. A. Sigurdsson, G. Varol, X. Wang, A. Farhadi, I. Laptev,
+and A. Gupta. Hollywood in homes: Crowdsourcing data
+collection for activity understanding. In ECCV, 2016. 1, 2,
+5, 6, 7
+
+[44] K. Simonyan, A. Vedaldi, and A. Zisserman. Deep in-
+side convolutional networks: Visualising image classiﬁca-
+tion models and saliency maps. CoRR, /abs/1312.6034,
+2013. 1, 7
+
+[45] K. Simonyan and A. Zisserman. Two-stream convolutional
+networks for action recognition in videos. In NIPS, 2014. 2,
+5, 6
+
+[46] K. Simonyan and A. Zisserman. Very deep convolutional
+networks for large-scale image recognition. ICLR, 2015. 5,
+6
+
+[47] Y. Song, L.-P. Morency, and R. Davis. Action recognition by
+hierarchical sequence summarization. In CVPR, 2013. 2
+[48] K. Soomro, A. Roshan Zamir, and M. Shah. UCF101: A
+dataset of 101 human actions classes from videos in the wild.
+In CRCV-TR-12-01, 2012. 6
+
+[49] N. Srivastava, E. Mansimov, and R. Salakhutdinov. Unsuper-
+vised learning of video representations using lstms. CoRR,
+/abs/1502.04681, 2015. 2
+
+[50] C. Sun and R. Nevatia. Active: Activity concept transitions
+
+in video event classiﬁcation. ICCV, 2013. 2
+
+[51] L. Sun, K. Jia, D.-Y. Yeung, and B. E. Shi. Human action
+recognition using factorized spatio-temporal convolutional
+networks. In ICCV, 2015. 2
+
+[52] K. Tang, L. Fei-Fei, and D. Koller. Learning latent temporal
+structure for complex event detection. In CVPR, 2012. 2
+[53] G. W. Taylor, R. Fergus, Y. LeCun, and C. Bregler. Convolu-
+tional learning of spatio-temporal features. In ECCV, 2010.
+2
+
+[54] D. Tran, L. Bourdev, R. Fergus, L. Torresani, and M. Paluri.
+Learning spatiotemporal features with 3d convolutional net-
+works. In ICCV, 2015. 1, 2, 7
+
+[55] C. Vondrick, D. Oktay, H. Pirsiavash, and A. Torralba. Pre-
+dicting motivations of actions by leveraging text. In CVPR,
+2016. 2
+
+[56] C. Vondrick, H. Pirsiavash, and A. Torralba. Anticipating
+visual representations from unlabeled video. In CVPR, 2016.
+2
+
+[57] H. Wang and C. Schmid. Action recognition with improved
+
+trajectories. In ICCV, 2013. 1, 2, 7
+
+[58] L. Wang, Y. Qiao, and X. Tang. Action recognition with
+trajectory-pooled deep-convolutional descriptors. In CVPR,
+2015. 2
+
+[59] X. Wang, A. Farhadi, and A. Gupta. Actions ˜ transforma-
+
+tions. In CVPR, 2016. 2
+
+[60] D. Weinland, R. Ronfard, and E. Boyer. A survey of vision-
+based methods for action representation, segmentation and
+recognition. Computer vision and image understanding,
+115(2):224–241, 2011. 2
+
+[61] P. Weinzaepfel, X. Martin, and C. Schmid.
+weakly-supervised action localization.
+arXiv:1605.05197, 2016. 1, 5
+
+Towards
+arXiv preprint
+
+[62] Z. Xu, Y. Yang, and A. G. Hauptmann. A discriminative cnn
+video representation for event detection. CVPR, 2015. 2
+[63] M. Yatskar, L. Zettlemoyer, and A. Farhadi. Situation recog-
+nition: Visual semantic role labeling for image understand-
+ing. CVPR, 2016. 1, 2
+
+[64] S. Yeung, O. Russakovsky, N. Jin, M. Andriluka, G. Mori,
+and L. Fei-Fei. Every moment counts: Dense detailed
+arXiv preprint
+labeling of actions in complex videos.
+arXiv:1507.05738, 2015. 1, 5
+
+[65] S. Yeung, O. Russakovsky, G. Mori, and L. Fei-Fei. End-
+to-end learning of action detection from frame glimpses in
+videos. arXiv preprint arXiv:1511.06984, 2015. 2
+
+[66] J. Yue-Hei Ng, M. Hausknecht, S. Vijayanarasimhan,
+O. Vinyals, R. Monga, and G. Toderici. Beyond short snip-
+pets: Deep networks for video classiﬁcation. In CVPR, 2015.
+2, 6, 7
+
+[67] Z. Zhang, S. Fidler, and R. Urtasun. Instance-level segmen-
+tation with deep densely connected mrfs. In CVPR, 2016. 1,
+2
+
+6. Appendix
+
+This appendix contains the following additional content:
+
+1. Description of the CRF.
+
+2. Derivation of the update equations.
+
+3. Details of the learning algorithm.
+
+4. Additional implementation details.
+
+5. Details about intent analysis.
+
+6. Additional visualizations of output predictions.
+
+6.1. Description of the CRF
+
+We create a CRF which predicts activity, object, etc., for every frame in the video. For reasoning about time, we create
+a fully-connected temporal CRF, referred to as Asynchronous Temporal Field in the text. That is, unlike a linear-chain CRF
+for temporal modelling (the discriminative counterpart to Hidden Markov Models), each node depends on the state of every
+other node in the graph. We incorporate intention as another latent variable which is connected to all the action nodes.
+
+In this work we encode multiple components of an activity. Each video with T frames is represented as {X1, . . . , XT , I}
+where Xt is a set of frame-level random variables for time step t and I is a random variable that represent global intent in the
+entire video. As discussed in the paper, for clarity of derivation Xt includes all frame level variables (Ct, Ot, At, Pt, St)
+
+Mathematically we consider a random ﬁeld {X, I} over all the random variables in our model ({X1, . . . , XT , I}). We
+
+now list the complete description of the CRF.
+
+CRF Variables:
+
+• Random ﬁeld {X, I} = {X1, . . . , XT , I}
+
+• Frame Xt = {Ct, Ot, At, Pt, St}, Xt ∈ X , X = C×O×A×P×S
+
+– Category Ct ∈ C, C = {1, 2, ..., 157} (For each category in the dataset)
+– Object Ot ∈ O, O = {1, 2, ..., 38} (Includes ”No object”)
+– Action At ∈ A, A = {1, 2, ..., 33}
+– Progress Pt ∈ P, P = {1, 2, 3} (Before, Middle, End)
+– Scene St ∈ S, S = {1, 2, ..., 15}
+
+• Intent I ∈ I, I = {1, 2, ..., NI } (NI = 30 in this work)
+
+CRF Potentials:
+
+• φX : X (cid:55)→ R, equivalently: φX : C×O×A×P×S (cid:55)→ R
+
+• φX decomposes as follows: φX (Ct, Ot, At, Pt, St)=φ(Ot, Pt)+φ(At, Pt)+φ(Ot, St)+φ(Ct, Ot, At, Pt)
+
+– φ(Ot, Pt) : O×P (cid:55)→ R
+– φ(At, Pt) : A×P (cid:55)→ R
+– φ(Ot, St) : O×S (cid:55)→ R
+– φ(Ct, Ot, At, Pt) : B (cid:55)→ R, here B is all conﬁgurations of Ct, Ot, At, Pt that exist in the training data.
+
+• φXI : X ×I (cid:55)→ R (speciﬁcally we parametrize this as φXI : O×I (cid:55)→ R)
+
+• φXX : X ×X (cid:55)→ R (speciﬁcally we parametrize this as φXI : O×O (cid:55)→ R)
+
+Figure 12. The model captures interactions between all frames Xt and the intent I, that is, a fully-connected model. Here shown for T = 5.
+We visualize some of the potentials of the model, and where they ﬁt into the graph. All φi
+XI share the same parameters, but we calculate
+the gradients with respect for each of them separately below. For efﬁcient inference, we use a mean-ﬁeld approximation presented below.
+A mean-ﬁeld approximation is a simpler distribution that is ﬁt to the original distribution when needed.
+
+The complete distribution of the model is:
+
+P (X, I) =
+
+exp
+
+φi
+
+X (xi) +
+
+φi
+
+XI(xi, I) +
+
+φi
+
+XX (xi, xj)
+
+(11)
+
+(cid:88)
+
+i
+
+(cid:88)
+
+(cid:88)
+
+i
+
+j(cid:54)=i
+
+1
+Z
+
+
+
+
+
+
+(cid:88)
+
+i
+
+
+
+
+
+
+where φXX (xi, xj) is the potential between frame i and frame j, and φXI(xi, I) is the potential between frame i and the
+intent. For notational clarity φX (xi) incorporates all potentials for Ct, Ot, At, Pt, St. The model is presented in Figure 12.
+
+6.2. Derivation of the Update Equations
+
+Given an input video V ={V1, . . . , VT }, our goal is to estimate the maximum a posteriori labeling of the random ﬁeld
+In the following derivations we omit the
+
+I P (X, I|V ) as discussed in the paper.
+
+by marginalizing over the intent I, (cid:80)
+conditioning on V and write P (X, I) and φ(X, I).
+
+Before we present the update equations and gradients, we deﬁne the following messages which will be used in the ﬁnal
+version of the following equations for clarity in their presentation. Messages are a term used for cached computations sent
+between different functions in a dynamic programming fashion. In the following derivations, X ∗ is used to explicitly denote
+the ground truth used for training. Plain X is used to refer to the variable.
+
+Outgoing Messages (Messages that are calculated from a single frame)
+
+FAj(xj) = EU ∼Qj [µ(xj, U )]
+FBj(xj) = EU ∼Qj [µ(U, xj)]
+
+Hj(I) = EU ∼Qj [φXI(U, I)]
+H ∗
+
+j , I)
+
+j (I) = φXI(x∗
+Kj(xj) = Qj(xj)
+K ∗
+j (xj) = 1xj =x∗
+
+j
+
+(12)
+
+(13)
+
+(14)
+
+(15)
+
+(16)
+
+(17)
+
+Incoming Messages (Messages that are calculated from messages from multiple frames and used for the computation of a
+
+single frame)
+
+FAi(xi) =
+
+FBi(xi) =
+
+EUj ∼Qj [µ(xi, Uj)]K(vi, vj) =
+
+FAj(xi)K(vi, vj)
+
+EUj ∼Qj [µ(Uj, xi)]K(vj, vi) =
+
+FBj(xi)K(vj, vi)
+
+(cid:88)
+
+j>i
+(cid:88)
+
+j<i
+
+(cid:88)
+
+j>i
+(cid:88)
+
+j<i
+(cid:88)
+
+j(cid:54)=i
+(cid:88)
+
+j(cid:54)=i
+(cid:88)
+
+j>i
+(cid:88)
+
+j>i
+(cid:88)
+
+j<i
+(cid:88)
+
+j<i
+
+Hi(I) =
+
+EUj ∼Qj [φXI(Uj, I)] =
+
+Hj(I)
+
+(cid:88)
+
+j(cid:54)=i
+
+H∗
+
+i (I) =
+
+φXI(x∗
+
+j , I) =
+
+H ∗
+
+j (I)
+
+(cid:88)
+
+j(cid:54)=i
+
+KAi(xi) =
+
+Qj(xj)K(xi, xj) =
+
+Kj(xi)
+
+KA∗
+
+i (xi) =
+
+1xj =x∗
+
+j
+
+K(xi, x∗
+
+j ) =
+
+K ∗
+
+j (xi)
+
+KBi(xi) =
+
+Qj(xj)K(xj, xi) =
+
+Kj(xi)
+
+KB∗
+
+i (xi) =
+
+1xj =x∗
+
+j
+
+K(x∗
+
+j , xi) =
+
+K ∗
+
+j (xi)
+
+(cid:88)
+
+j>i
+(cid:88)
+
+j>i
+(cid:88)
+
+j<i
+(cid:88)
+
+j<i
+
+Instead of computing the exact distribution P (X, I) presented above, the structured variational approximation ﬁnds the
+distribution Q(X, I) among a given family of distributions that best ﬁts the exact distribution in terms of KL-divergence. By
+choosing a family of tractable distributions, it is possible to make inference involving the ideal distribution tractable. Here
+we use Q(X, I) = QI(I) (cid:81)
+i Qi(xi), the structured mean-ﬁeld approximation. More details on mean-ﬁeld approximation
+are presented section 11.5 generic update equation for Q (Equation 11.54 in [18]) is:
+
+Q(xi) ∝ exp (cid:8)EX−i∼Q [log P (xi|X−i)](cid:9)
+
+where X−i refers to all variables except xi. Using Eq. 11 along with Eq. 26 we get the following update equations:
+
+Qi(xi) ∝ exp
+
+φX (xi) + EU ∼QI [φXI(xi, U )] +
+
+EUj ∼Qj [φXX (xi, Uj)] +
+
+EUj ∼Qj [φXX (Uj, xi)]
+
+(cid:27)
+
+(cid:88)
+
+j>i
+
+(cid:88)
+
+j<i
+
+(cid:27)
+
+∝ exp
+
+φX (xi) + EU ∼QI [φXI(xi, U )] + FAi(xi) + FBi(xi)
+(cid:27)
+
+QI(I) ∝ exp
+
+EUj ∼Qj [φXI(Uj, I)]
+
+(cid:26)
+
+(cid:26)
+
+(cid:26) (cid:88)
+
+j
+
+(cid:26)
+
+∝ exp
+
+Hi(I) + Hi(I)
+
+(cid:27)
+
+(Here i refers to the frame of interest, but any choice of i holds)
+
+(29)
+
+where Qi is marginal distribution with respect to each of the frames, and QI is the marginal with respect to the intent.
+
+(18)
+
+(19)
+
+(20)
+
+(21)
+
+(22)
+
+(23)
+
+(24)
+
+(25)
+
+(26)
+
+(27)
+
+(28)
+
+6.3. Details of the learning algorithm
+
+Training a deep CRF model requires calculating derivatives of the objective in terms of each of the potentials in the model,
+
+which in turn requires inference of P (X, I|V ). The network is trained to maximize the log-likelihood of the data:
+
+l(X ∗) = log
+
+P (X ∗, I|V )
+
+= log
+
+˜P (X ∗, I|V )
+Z(V )
+
+= log
+
+˜P (X ∗, I|V ) − log Z(V )
+
+Z(V ) =
+
+˜P (X, I|V )
+
+(cid:88)
+
+I
+
+(cid:88)
+
+I
+(cid:88)
+
+I
+(cid:88)
+
+(cid:88)
+
+I
+
+X
+
+where we explicitly write out the partition function Z(V), and ˜P () is the unnormalized version of P (). Again, we use X ∗ to
+explicitly refer to the ground truth labels. As before, V is omitted from the following derivations. The goal is to update the
+parameters of the model, for which we need gradients with respect to the parameters. Similar to SGD, we ﬁnd the gradient
+with respect to one part of the parameters at a time, speciﬁcally with respect to one potential in one frame. That is, φi
+X (x)
+instead of φX (x). The partial derivatives of this loss with respect to each of the potentials are as follows.
+
+6.3.1 Updating the frame potential φX
+
+The frame potential φX (xi) incorporates the interplay between activity category, object, action, progress and scene, and
+could be written explicitly as φX (Ct, Ot, At, Pt, St). In practice this potential is composed of unary, pairwise, and tertiary
+potentials directly predicted by a CNN. We found predicting only the following terms to be sufﬁcient without introducing too
+many additional parameters: φX (Ct, Ot, At, Pt, St)=φ(Ot, Pt)+φ(At, Pt)+φ(Ot, St) + φ(Ct, Ot, At, Pt) where we only
+model the assignments seen in the training set, and assume others are not possible.
+
+Let us ﬁrst derive the update equation for φX as a whole, and then demonstrate how to update each of the individual
+potentials. In the following derivation, we simply take the partial derivative where appropriate and iteratively use the chain
+rule.
+
+(Denominator and numerator cancel)
+
+∂l(X ∗)
+∂φˆi
+X (ˆx)
+
+=
+
+1
+
+(cid:32)
+
+(cid:88)
+
+(cid:80)
+
+I
+
+˜P (X ∗, I)
+
+I
+
+˜P (X ∗, I)
+
+(cid:33)
+
+∂ (cid:0)(cid:80)
+
+i )(cid:1)
+
+X (x∗
+i φi
+∂φˆi
+X (ˆx)
+
+−
+
+∂ log Z
+∂φˆi
+X (ˆx)
+
+= 1ˆx=x∗ −
+
+= 1ˆx=x∗ −
+
+(cid:88)
+
+(cid:88)
+
+X
+(cid:88)
+
+I
+(cid:88)
+
+∂ ˜P (X, I)
+∂φˆi
+X (ˆx)
+1ˆx=x ˜P (X, I)
+
+1
+Z
+
+1
+Z
+
+= 1ˆx=x∗ −
+
+1ˆx=xP (X, I)
+
+I
+
+X
+(cid:88)
+
+(cid:88)
+
+X
+(cid:88)
+
+I
+(cid:88)
+
+X
+(cid:88)
+
+I
+(cid:88)
+
+= 1ˆx=x∗ −
+
+1ˆx=xQI(I)
+
+Qi(xi)
+
+X
+
+I
+= 1ˆx=x∗ − Qˆi(ˆx)
+
+(Since
+
+Qi(xi) = 1)
+
+(cid:89)
+
+i
+(cid:88)
+
+xi
+
+≈ 1ˆx=x∗ −
+
+1ˆx=xQ(X, I)
+
+(Using the mean-ﬁeld)
+
+where we use X ∗ to refer to the ground truth labels, and ˆX to refer to the variables we are taking the partial derivative with
+= 1ˆx=x∗ . Intuitively this implies the partial gradient is the difference between the
+respect to. We note that
+
+∂((cid:80)
+
+i ))
+
+X (x∗
+i φi
+∂φˆi
+X (ˆx)
+
+(30)
+
+(31)
+
+(32)
+
+(33)
+
+(34)
+
+(35)
+
+(36)
+
+(37)
+
+(38)
+
+(39)
+
+(40)
+
+ground truth and the model prediction. This equation is easily extended to update each of the individual potentials as follows:
+
+∂l(X ∗)
+∂φˆi( ˆOt, ˆPt)
+∂l(X ∗)
+∂φˆi( ˆAt, ˆPt)
+∂l(X ∗)
+∂φˆi( ˆOt, ˆSt)
+∂l(X ∗)
+∂φˆi( ˆCt, ˆOt, ˆAt, ˆPt)
+
+= 1( ˆOt, ˆPt)=(O∗
+
+t ) −
+
+t ,P ∗
+
+= 1( ˆAt, ˆPt)=(A∗
+
+t ) −
+
+t ,P ∗
+
+= 1( ˆOt, ˆSt)=(O∗
+
+t ) −
+
+t ,S∗
+
+(cid:88)
+
+(cid:88)
+
+(cid:88)
+
+Ct
+(cid:88)
+
+At
+(cid:88)
+
+St
+(cid:88)
+
+Ct
+(cid:88)
+
+Ot
+(cid:88)
+
+St
+(cid:88)
+
+Ct
+
+At
+
+Pt
+
+Qˆi(X ∗
+t )
+
+Qˆi(X ∗
+t )
+
+Qˆi(X ∗
+t )
+
+= 1( ˆCt, ˆOt, ˆAt, ˆPt)=(C∗
+
+t ,O∗
+
+t ,A∗
+
+t ,P ∗
+
+t ) −
+
+Qˆi(X ∗
+t )
+
+(cid:88)
+
+St
+
+where we marginalize out the variables that are not a part of each potential. Again, Xt incorporates all the frame variables
+{Ct, Ot, At, Pt, St}. These partial derivatives are passed down the CNN (backprop) to update the parameters of the network.
+
+6.3.2 Updating the frame-intent potential φXI
+
+Similarly to φX we proceed as follows:
+
+∂l(X ∗)
+XI(ˆx, ˆI)
+
+∂φˆi
+
+˜P (X ∗, I)1ˆx=x∗ 1 ˆI=I
+
+−
+
+(cid:33)
+
+∂ log Z
+XI(ˆx, ˆI)
+
+∂φˆi
+
+(cid:32)
+
+(cid:88)
+
+I
+
+1
+
+˜P (X ∗, I)
+
+I
+˜P (X ∗, ˆI)
+
+∂ log Z
+XI(ˆx, ˆI)
+
+1ˆx=x∗ −
+
+I
+
+XI(x∗
+i φi
+
+XI(x∗
+i φi
+XI(x∗
+i φi
+
+˜P (X ∗, I)
+(cid:110)(cid:80)
+i φi
+exp
+I exp (cid:8)(cid:80)
+(cid:110)(cid:80)
+i φi
+exp
+I exp (cid:8)(cid:80)
+(cid:110)(cid:80)
+i φi
+exp
+I exp (cid:8)(cid:80)
+(cid:110)(cid:80)
+i φi
+exp
+I exp (cid:8)(cid:80)
+(cid:110)(cid:80)
+i φi
+exp
+I exp (cid:8)(cid:80)
+exp (cid:80)
+I exp (cid:80)
+(cid:110)
+H∗
+exp
+ˆi
+I exp {H∗
+
+∂φˆi
+(cid:111)
+i , ˆI)
+i , I)(cid:9) 1ˆx=x∗ −
+XI(x∗
+(cid:111)
+i , ˆI)
+i , I)(cid:9) 1ˆx=x∗ −
+XI(x∗
+(cid:111)
+i , ˆI)
+i , I)(cid:9) 1ˆx=x∗ −
+XI(x∗
+(cid:111)
+i , ˆI)
+i , I)(cid:9) 1ˆx=x∗ −
+XI(x∗
+(cid:111)
+i , ˆI)
+i , I)(cid:9) 1ˆx=x∗ −
+XI(x∗
+i , ˆI)
+i φXI(x∗
+i , I)
+( ˆI) + H ∗
+( ˆI)
+ˆi
+i (I) + H ∗
+
+XI(x∗
+i φi
+i φXI(x∗
+
+XI(x∗
+i φi
+
+i (I)}
+
+=
+
+(cid:80)
+
+=
+
+(cid:80)
+
+=
+
+(cid:80)
+
+=
+
+(cid:80)
+
+=
+
+(cid:80)
+
+=
+
+(cid:80)
+
+≈
+
+(cid:80)
+
+=
+
+(cid:80)
+
+=
+
+(cid:80)
+
+1ˆx=x∗ − Qˆi(ˆx)QI( ˆI)
+(cid:111)
+
+1ˆx=x∗ − Qˆi(ˆx)QI( ˆI)
+
+∂ log Z
+XI(ˆx, ˆI)
+
+∂φˆi
+
+(Terms without I cancel)
+
+(cid:88)
+
+(cid:88)
+
+X
+
+I
+
+∂ ˜P (X, I)
+∂φˆi
+XI(ˆx, ˆI)
+
+(cid:88)
+
+(cid:88)
+
+X
+
+I
+
+˜P (X, I)1ˆx=x1 ˆI=I
+
+P (X, I)1ˆx=x1 ˆI=I
+
+1
+Z
+
+1
+Z
+
+(cid:88)
+
+(cid:88)
+
+X
+
+I
+
+(cid:88)
+
+(cid:88)
+
+X
+
+I
+
+Q(X, I)1ˆx=x1 ˆI=I
+
+(Mean-ﬁeld approximation)
+
+(51)
+
+This equation can be interpreted in that it captures the difference between the distribution of the intent given the ground
+
+truth, and the predicted distribution of the intent.
+
+(41)
+
+(42)
+
+(43)
+
+(44)
+
+(45)
+
+(46)
+
+(47)
+
+(48)
+
+(49)
+
+(50)
+
+(52)
+
+(53)
+
+6.3.3 Updating the frame-frame potential φXX
+
+The pairwise potentials φXX (xi, xj) for two time points i and j in our model have the form:
+
+φXX (xi, xj) = µ(xi, xj)
+
+w(m)k(m)(vi, vj)
+
+(cid:88)
+
+m
+
+= µ(xi, xj)k(vi, vj)
+
+where µ models the asymmetric afﬁnity between frames, w are kernel weights, and each k(m) is a Gaussian kernel that
+depends on the videoframes vi and vj which are omitted from this notation for convenience, but the probability and the
+potentials are conditioned on V. In this work we use a single kernel that prioritises short-term interactions:
+
+k(vi, vj) = exp
+
+−
+
+(cid:18)
+
+(cid:19)
+
+(j − i)2
+2σ2
+
+The parameters of the general asymmetric compatibility function µ(xi, xj) are learned from the data, and σ is a hyper-
+parameter chosen by cross-validation. The parameters of µ are learned as follows, and this could be extended to a more
+general form of φXX :
+
+∂l(X ∗)
+∂µˆi(ˆx, ˆb)
+
+1
+
+(cid:32)
+
+(cid:88)
+
+(cid:80)
+I
+
+˜P (X ∗, I)
+
+I
+
+˜P (X ∗, I)
+
+(cid:33)
+
+∂
+∂µˆi(ˆx, ˆb)
+
+
+
+
+
+(cid:88)
+
+j>ˆi
+
+XX (x∗
+φi
+
+i , x∗
+
+j ) +
+
+XX (x∗
+φi
+
+j , x∗
+i )
+
+ −
+
+(cid:88)
+
+j<ˆi
+
+
+
+∂ log Z
+∂µˆi(ˆx, ˆb)
+
+=
+
+=
+
+=
+
+(cid:88)
+
+j>ˆi
+(cid:88)
+
+j>ˆi
+
+−
+
+1
+Z
+
+=
+
+(cid:88)
+
+j>ˆi
+
+1ˆx=x∗ 1ˆb=x∗
+
+k(vˆi, vj) +
+
+1ˆx=x∗ 1ˆb=x∗
+
+k(vj, vˆi) −
+
+1ˆx=x∗ 1ˆb=x∗
+
+k(vˆi, vj) +
+
+1ˆx=x∗ 1ˆb=x∗
+
+k(vj, vˆi)
+
+j
+
+j
+
+j
+
+j
+
+1
+Z
+
+(cid:88)
+
+(cid:88)
+
+X
+
+I
+
+∂ ˜P (X, I)
+∂µˆi(ˆx, ˆb)
+
+(cid:88)
+
+(cid:88)
+
+˜P (X, I)
+
+(cid:88)
+
+(cid:88)
+
+X
+
+I
+
+i
+
+
+
+
+
+1ˆx=x1ˆb=xj
+
+k(vi, vj) +
+
+1ˆx=x1ˆb=xj
+
+k(vj, vi)
+
+
+
+(cid:88)
+
+j<i
+
+
+
+1ˆx=x∗ 1ˆb=x∗
+
+k(vˆi, vj) +
+
+j
+
+1ˆx=x∗ 1ˆb=x∗
+
+k(vj, vˆi)
+
+j
+
+(cid:88)
+
+j<i
+
+(cid:88)
+
+j<ˆi
+
+
+
+(cid:88)
+
+j<ˆi
+
+(cid:88)
+
+(cid:88)
+
+−
+
+X
+
+I
+
+(cid:89)
+
+i
+
+QI(I)
+
+Qi(xi)
+
+1ˆx=x1ˆb=xj
+
+k(vi, vj) +
+
+1ˆx=x1ˆb=xj
+
+k(vj, vi)
+
+
+
+(Mean-ﬁeld)
+
+∂l(X ∗)
+∂µˆi(a, b)
+
+=
+
+(cid:88)
+
+j>ˆi
+
+1a=x∗
+ˆi
+
+1b=x∗
+
+j
+
+k(vˆi, vj) − Qˆi(a)
+
+Qj(b)k(vˆi, vj) +
+
+1b=x∗
+ˆi
+
+1a=x∗
+
+j
+
+k(vj, vˆi) − Qˆi(b)
+
+Qj(a)k(vj, vˆi)
+
+= 1a=x∗
+ˆi
+
+KA∗
+
+ˆi (b) − Qˆi(a)KAˆi(b) + 1b=x∗
+
+KB∗
+
+ˆi (a) − Qˆi(b)KBˆi(a)
+
+ˆi
+
+This update equation consists of two symmetric parts, one for inﬂuence from frames before, and one for inﬂuence from
+frames after. Intuitively, this captures the difference in the true afﬁnity between frame i and all frames j on the one hand, and
+on the other hand the predicted afﬁnity, where the afﬁnity is weighted by the kernel.
+
+6.4. Additional implementation details
+
+A more detailed algorithmic description of the model is presented in Algorithm 3. More details can be found on the project
+
+page https://github.com/gsig/temporal-fields/.
+Training time Training the models in this paper took a while: The RGB stream of the Two-Stream model converged after
+only 0.2 epochs (20% of the total data, randomly selected) of the training data, but training the Flow stream needed 4.0 epochs
+to reach the best performance. Our model needed 0.7 epochs for the RGB stream and 8.3 epochs for the Flow stream. Each
+0.1 epoch is approximately 1450 batches of size 256 (all labelled frames at 8 FPS), and takes between 3-8 hours depending on
+
+(cid:88)
+
+j<ˆi
+(cid:88)
+
+j<ˆi
+
+j>i
+(cid:88)
+
+j<ˆi
+
+
+
+
+
+(cid:88)
+
+(cid:88)
+
+i
+
+j>i
+
+(cid:88)
+
+j>ˆi
+
+(54)
+
+(55)
+
+(56)
+
+(57)
+
+(58)
+
+(59)
+
+(60)
+
+(61)
+
+(62)
+
+Algorithm 3 Learning for Asynchronous Temporal Fields (Detailed)
+
+1: Given videos V
+2: while not converged do
+3:
+4:
+
+for each example in mini-batch do
+
+5:
+6:
+7:
+8:
+9:
+
+Sample frame v ∈ V ⊆ V that has index i
+Calculate messages with Eq. 18-25, approximated by Eq. 9 (from paper)
+Alternate updating Qi and QI until convergence
+Find gradients with Eqs. 40,53,62
+Backprop gradients through CNN
+Store computations of Eq. 12-17 for later use
+
+10:
+
+Update CNN using accumulated gradients
+
+hardware and model. Our learning rate schedule was chosen by ﬁnding the largest learning rate that did not cause divergence,
+and then making sure the learning rate was decayed by a factor of 100 over the course of training. Investigations into training
+these kinds of models faster are likely to yield substantial beneﬁts.
+Training Deep Models with Latent Variables One of the pursuits of this work was introducing latent variables into a deep
+framework, the intent. The gradient for the frame-intent potential, contains predictions of the model on both sides, which
+is a common problem in deep reinforcement learning, where a variety of tricks such as target ﬁxing, double Q-learning,
+and gradient clipping, are used to combat the instability caused by this. In this work we found that simply severing the
+dependency of the frame-intent variable on the input data got rid of the instability, and still gave acceptable performance on
+the RGB stream, however we found that this did not give good performance on the Flow stream.
+
+In order to train the network with the frame-intent potential depending on the input data, we experimented with a variety
+of techniques from the reinforcement learning literature. Only two methods were found to help: Alternating target and
+prediction networks, and regularization. For alternating target and prediction networks, the network predicts two frame-
+intent potentials, and then the network randomly chooses which to use as the target, and which to use as the source, and
+backprop only through one of them. For regularization, we enforce the frame-intent potential to be close to zero, similar to
+weight decay (set to 4 · 10−4). Regularization was found to be give slightly better performance, and easy to implement/tune,
+and was used in this work.
+
+6.5. Details about intent analysis
+
+To analyze the learned intent variable, we deﬁned 10 types of intent: getting something to eat, clean the living space,
+getting dressed, getting something from storage, get informed, get out of bed, leave the house, photograph something, re-
+laxing, working. To identify videos corresponding to the intent, we used keyword related to the intent (such as closet
+and clothes for getting dressed) and manually veriﬁed that the content of the video matched the intent. The analysis
+demonstrates that the latent intent variables captures non-trivial structure of the label space, but precisely understanding
+goal-oriented behavior compared to simple activity analysis remains important future work.
+
+6.6. Additional Visualizations of Output Predictions
+
+Due to space constraints in the full paper, we present here additional visualizations from the model. In Figure 13 we
+present in the same way as Figure 9 (from the paper). That is, we present the 3 most conﬁdent categories, 2 most conﬁdent
+actions, and 1 most conﬁdent object. For example, in the ﬁrst row we can see that once the light turns on in the room and the
+couch becomes visible the category Sitting on a sofa/couch ﬁres, which in turn increases the likelihood of sitting in the next
+few frames. Furthermore, in Figure 14 we present similar visualizations, but only the 6 most conﬁdent categories, to further
+understand the interplay between the activity categories. In the ﬁrst row, we can see a video of a person walking towards the
+camera, and we can see how one after the other the model recognizes cup, phone, and sandwich, and reasons about these
+connected activities. Finally, in Figure 15 we present a breakdown of the mean average precision (mAP) by our model for
+each class of the dataset, sorted by the mAP of our model.
+
+Figure 13. Visualizations of the model predictions for the 3 most conﬁdent categories, 2 most conﬁdent actions, and 1 most conﬁdent
+object. Darker colors indicate higher likelihood.
+
+Figure 14. Visualizations of the model predictions for the 6 most conﬁdent categories. Darker colors indicate higher likelihood.
+
+Figure 15. mAP for our model for all classes, sorted by mAP. The column on the right is the continuation of the left column.
+

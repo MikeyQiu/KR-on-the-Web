@@ -1,0 +1,3010 @@
+6
+1
+0
+2
+ 
+p
+e
+S
+ 
+8
+2
+ 
+ 
+]
+
+C
+D
+.
+s
+c
+[
+ 
+ 
+1
+v
+4
+5
+1
+9
+0
+.
+9
+0
+6
+1
+:
+v
+i
+X
+r
+a
+
+MPI-FAUN: An MPI-Based Framework for Alternating-Updating
+Nonnegative Matrix Factorization
+
+Ramakrishnan Kannan, Oak Ridge National Laboratories, TN
+Grey Ballard, Wake Forest University, NC
+Haesun Park, Georgia Institute of Technology, GA
+
+Non-negative matrix factorization (NMF) is the problem of determining two non-negative low rank factors W and H, for
+the given input matrix A, such that A ≈ WH. NMF is a useful tool for many applications in diﬀerent domains such as topic
+modeling in text mining, background separation in video analysis, and community detection in social networks. Despite its
+popularity in the data mining community, there is a lack of eﬃcient parallel algorithms to solve the problem for big data sets.
+The main contribution of this work is a new, high-performance parallel computational framework for a broad class of
+NMF algorithms that iteratively solves alternating non-negative least squares (NLS) subproblems for W and H. It maintains
+the data and factor matrices in memory (distributed across processors), uses MPI for interprocessor communication, and, in
+the dense case, provably minimizes communication costs (under mild assumptions). The framework is ﬂexible and able to
+leverage a variety of NMF and NLS algorithms, including Multiplicative Update, Hierarchical Alternating Least Squares,
+and Block Principal Pivoting. Our implementation allows us to benchmark and compare diﬀerent algorithms on massive
+dense and sparse data matrices of size that spans for few hundreds of millions to billions. We demonstrate the scalability of
+our algorithm and compare it with baseline implementations, showing signiﬁcant performance improvements. The code and
+the datasets used for conducting the experiments are available online.
+
+1. INTRODUCTION
+Non-negative Matrix Factorization (NMF) is the problem of ﬁnding two low rank factors W ∈ Rm×k
+and H ∈ Rk×n
+denotes the set
+of m × n matrices with non-negative real values. Formally, the NMF problem [Seung and Lee 2001]
+can be deﬁned as
+
+for a given input matrix A ∈ Rm×n
+
+, such that A ≈ WH. Here, Rm×n
+
++
+
++
+
++
+
++
+
+min
+W(cid:62)0,H(cid:62)0
+
+(cid:107)A − WH(cid:107)F,
+
+(1)
+
+where (cid:107)X(cid:107)F = ((cid:80)
+
+i j x2
+
+i j)1/2 is the Frobenius norm.
+
+NMF is widely used in data mining and machine learning as a dimension reduction and factor
+analysis method. It is a natural ﬁt for many real world problems as the non-negativity is inher-
+ent in many representations of real-world data and the resulting low rank factors are expected to
+have a natural interpretation. The applications of NMF range from text mining [Pauca et al. 2004],
+computer vision [Hoyer 2004], and bioinformatics [Kim and Park 2007] to blind source separation
+[Cichocki et al. 2009], unsupervised clustering [Kuang et al. 2012; Kuang et al. 2013] and many
+other areas. In the typical case, k (cid:28) min(m, n); for problems today, m and n can be on the order of
+millions or more, and k is on the order of few tens to thousands.
+
+There is a vast literature on algorithms for NMF and their convergence properties [Kim et al.
+2014]. The commonly adopted NMF algorithms are – (i) Multiplicative Update (MU) [Seung and
+Lee 2001] (ii) Hierarchical Alternating Least Squares (HALS) [Cichocki et al. 2009; Ho et al. 2008]
+(iii) NMF based on Alternating Nonnegative Least Squares and Block Principal Pivoting (ABPP)
+[Kim and Park 2011], and (iv) Stochastic Gradient Descent (SGD) Updates [Gemulla et al. 2011].
+Most of the algorithms in NMF literature are based on alternately optimizing each of the low rank
+factors W and H while keeping the other ﬁxed, in which case each subproblem is a constrained con-
+vex optimization problem. Subproblems can then be solved using standard optimization techniques
+such as projected gradient or interior point method; a detailed survey for solving such problems can
+be found in [Wang and Zhang 2013; Kim et al. 2014]. In this paper, our implementation uses either
+ABPP, MU, or HALS. But our parallel framework is extensible to other algorithms as-is or with a
+few modiﬁcations, as long as they ﬁt an alternating-updating framework (deﬁned in Section 4).
+
+With the advent of large scale internet data and interest in Big Data, researchers have started
+studying scalability of many foundational machine learning algorithms. To illustrate the dimension
+
+of matrices commonly used in the machine learning community, we present a few examples. Nowa-
+days the adjacency matrix of a billion-node social network is common. In the matrix representation
+of a video data, every frame contains three matrices for each RGB color, which is reshaped into a
+column. Thus in the case of a 4K video, every frame will take approximately 27 million rows (4096
+row pixels x 2196 column pixels x 3 colors). Similarly, the popular representation of documents in
+text mining is a bag-of-words matrix, where the rows are the dictionary and the columns are the
+documents (e.g., webpages). Each entry Ai j in the bag-of-words matrix is generally the frequency
+count of the word i in the document j. Typically with the explosion of the new terms in social media,
+the number of words spans to millions. To handle such high-dimensional matrices, it is important to
+study low-rank approximation methods in a data-distributed and parallel computing environment.
+
+In this work, we present an eﬃcient algorithm and implementation using tools from the ﬁeld of
+High-Performance Computing (HPC). We maintain data in memory (distributed across processors),
+take advantage of optimized libraries like BLAS and LAPACK for local computational routines,
+and use the Message Passing Interface (MPI) standard to organize interprocessor communication.
+Furthermore, the current hardware trend is that available parallelism (and therefore aggregate com-
+putational rate) is increasing much more quickly than improvements in network bandwidth and
+latency, which implies that the relative cost of communication (compared to computation) is in-
+creasing. To address this challenge, we analyze algorithms in terms of both their computation and
+communication costs. In particular, we prove in Section 5.2 that in the case of dense input and under
+a mild assumption, our proposed algorithm minimizes the amount of data communicated between
+processors to within a constant factor of the lower bound.
+
+A key attribute of our framework is that the eﬃciency does not require a loss of generality of
+NMF algorithms. Our central observation is that most NMF algorithms consist of two main tasks:
+(a) performing matrix multiplications and (b) solving Non-negative Least Squares (NLS) subprob-
+lems, either approximately or exactly. More importantly, NMF algorithms tend to perform the same
+matrix multiplications, diﬀering only in how they solve NLS subproblems, and the matrix multipli-
+cations often dominate the running time of the algorithms. Our framework is designed to perform the
+matrix multiplications eﬃciently and organize the data so that the NLS subproblems can be solved
+independently in parallel, leveraging any of a number of possible methods. We explore the overall
+eﬃciency of the framework and compare three diﬀerent NMF methods in Section 6, performing
+convergence, scalability, and parameter-tuning experiments on over 1500 processors.
+
+Dataset
+Video
+Stack Exchange
+Webbase-2001
+
+Type
+Dense
+Sparse
+Sparse
+
+Matrix size
+1 Million x 13,824
+627,047 x 12 Million
+118 Million x 118 Million
+
+NMF Time
+5.73 seconds
+67 seconds
+25 minutes
+
+Table I: MPI-FAUN on large real-world datasets. Reported time is for 30 iterations on 1536 proces-
+sors with a low rank of 50.
+
+With our framework, we are able to explore several large-scale synthetic and real-world data sets,
+some dense and some sparse. In Table I, we present the NMF computation wall clock time on some
+very large real world datasets. We describe the results of the computation in Section 6, showing the
+range of application of NMF and the ability of our framework to scale to large data sets.
+
+A preliminary version of this work has already appeared as a conference paper [Kannan et al.
+2016]. While the focus of the previous work was parallel performance of ABPP, the goal of this
+paper is to explore more data analytic questions. In particular, the new contributions of this paper
+include (1) implementing a software framework to compare ABPP with MU and HALS for large
+scale data sets, (2) benchmarking on a data analysis cluster and scaling up to over 1500 proces-
+sors, and (3) providing an interpretation of results for real-world data sets. We provide a detailed
+comparison with other related work, including MapReduce implementations of NMF, in Section 3.
+
+2
+
+A
+Input matrix
+W Left low rank factor
+H
+m
+n
+k
+Mi
+Mi
+Mi j
+p
+pr
+pc
+
+Right low rank factor
+Number of rows of input matrix
+Number of columns of input matrix
+Low rank
+ith row block of matrix M
+ith column block of matrix M
+(i, j)th subblock of M
+Number of parallel processes
+Number of rows in processor grid
+Number of columns in processor grid
+
+Table II: Notation
+
+Our main contribution is a new, high-performance parallel computational framework for a broad
+class of NMF algorithms. The framework is eﬃcient, scalable, ﬂexible, and demonstrated to be ef-
+fective for large-scale dense and sparse matrices. Based on our survey and knowledge, we are the
+fastest NMF implementation available in the literature. The code and the datasets used for conduct-
+ing the experiments can be downloaded from https://github.com/ramkikannan/nmﬂibrary.
+
+2. PRELIMINARIES
+
+2.1. Notation
+Table II summarizes the notation we use throughout this paper. We use upper case letters for ma-
+trices and lower case letters for vectors. We use both subscripts and superscripts for sub-blocks of
+matrices. For example, Ai is the ith row block of matrix A, and Ai is the ith column block. Likewise,
+ai is the ith row of A, and ai is the ith column. We use m and n to denote the numbers of rows and
+columns of A, respectively, and we assume without loss of generality m (cid:62) n throughout.
+
+2.2. Communication model
+To analyze our algorithms, we use the α-β-γ model of distributed-memory parallel computation.
+In this model, interprocessor communication occurs in the form of messages sent between two
+processors across a bidirectional link (we assume a fully connected network). We model the cost of
+a message of size n words as α + nβ, where α is the per-message latency cost and β is the per-word
+bandwidth cost. Each processor can compute ﬂoating point operations (ﬂops) on data that resides
+in its local memory; γ is the per-ﬂop computation cost. With this communication model, we can
+predict the performance of an algorithm in terms of the number of ﬂops it performs as well as the
+number of words and messages it communicates. For simplicity, we will ignore the possibilities of
+overlapping computation with communication in our analysis. For more details on the α-β-γ model,
+see [Thakur et al. 2005; Chan et al. 2007].
+
+2.3. MPI collectives
+Point-to-point messages can be organized into collective communication operations that involve
+more than two processors. MPI provides an interface to the most commonly used collectives like
+broadcast, reduce, and gather, as the algorithms for these collectives can be optimized for particular
+network topologies and processor characteristics. The algorithms we consider use the all-gather,
+reduce-scatter, and all-reduce collectives, so we review them here, along with their costs. Our anal-
+ysis assumes optimal collective algorithms are used (see [Thakur et al. 2005; Chan et al. 2007]),
+though our implementation relies on the underlying MPI implementation.
+
+At the start of an all-gather collective, each of p processors owns data of size n/p. After the
+all-gather, each processor owns a copy of the entire data of size n. The cost of an all-gather is
+
+3
+
+α · log p + β · p−1
+p n. At the start of a reduce-scatter collective, each processor owns data of size n.
+After the reduce-scatter, each processor owns a subset of the sum over all data, which is of size n/p.
+(Note that the reduction can be computed with other associative operators besides addition.) The
+cost of an reduce-scatter is α · log p + (β + γ) · p−1
+p n. At the start of an all-reduce collective, each
+processor owns data of size n. After the all-reduce, each processor owns a copy of the sum over all
+data, which is also of size n. The cost of an all-reduce is 2α · log p + (2β + γ) · p−1
+p n. Note that the
+costs of each of the collectives are zero when p = 1.
+
+3. RELATED WORK
+In the data mining and machine learning literature there is an overlap between low rank approxi-
+mations and matrix factorizations due to the nature of applications. Despite its name, non-negative
+matrix “factorization” is really a low rank approximation. Recently there is a growing interest in
+collaborative ﬁltering based recommender systems. One of the popular techniques for collabora-
+tive ﬁltering is matrix factorization, often with nonnegativity constraints, and its implementation
+is widely available in many oﬀ-the-shelf distributed machine learning libraries such as GraphLab
+[Low et al. 2012], MLLib [Meng et al. 2015], and many others [Satish et al. 2014; Yun et al. 2014]
+as well. However, we would like to clarify that collaborative ﬁltering using matrix factorization is
+a diﬀerent problem than NMF: in the case of collaborative ﬁltering, non-nonzeros in the matrix are
+considered to be missing entries, while in the case of NMF, non-nonzeros in the matrix correspond
+to true zero values.
+
+There are several recent distributed NMF algorithms in the literature [Liao et al. 2014; Falout-
+sos et al. 2014; Yin et al. 2014; Liu et al. 2010]. Liu et al. propose running Multiplicative Update
+(MU) for KL divergence, squared loss, and “exponential” loss functions [Liu et al. 2010]. Matrix
+multiplication, element-wise multiplication, and element-wise division are the building blocks of
+the MU algorithm. The authors discuss performing these matrix operations eﬀectively in Hadoop
+for sparse matrices. Using similar approaches, Liao et al. implement an open source Hadoop-based
+MU algorithm and study its scalability on large-scale biological data sets [Liao et al. 2014]. Also,
+Yin, Gao, and Zhang present a scalable NMF that can perform frequent updates, which aim to use
+the most recently updated data [Yin et al. 2014]. Similarly Faloutsos et al. propose a distributed,
+scalable method for decomposing matrices, tensors, and coupled data sets through stochastic gradi-
+ent descent on a variety of objective functions [Faloutsos et al. 2014]. The authors also provide an
+implementation that can enforce non-negative constraints on the factor matrices. All of these works
+use Hadoop to implement their algorithms.
+
+We emphasize that our MPI-based approach has several advantages over Hadoop-based ap-
+
+proaches:
+— eﬃciency – our approach maintains data in memory, never communicating the data matrix, while
+Hadoop-based approaches must read/write data to/from disk and involves global shuﬄes of data
+matrix entries;
+
+— generality – our approach is well-designed for both dense and sparse data matrices, whereas
+
+Hadoop-based approaches generally require sparse inputs;
+
+— privacy – our approach allows processors to collaborate on computing an approximation without
+ever sharing their local input data (important for applications involving sensitive data, such as
+electronic health records), while Hadoop requires the user to relinquish control of data place-
+ment.
+
+We note that Spark [Zaharia et al. 2010] is a popular big-data processing infrastructure that is
+generally more eﬃcient for iterative algorithms such as NMF than Hadoop, as it maintains data
+in memory and avoids ﬁle system I/O. Even with a Spark implementation of previously proposed
+Hadoop-based NMF algorithm, we expect performance to suﬀer from expensive communication of
+input matrix entries, and Spark will not overcome the shortcomings of generality and privacy of
+the previous algorithms. Although Spark has collaborative ﬁltering libraries such as MLlib [Meng
+
+4
+
+et al. 2015], which use matrix factorization and can impose non-negativity constraints, none of them
+implement pure NMF, and so we do not have a direct comparison against NMF running on Spark.
+As mentioned above, the problem of collaborative ﬁltering is diﬀerent from NMF, and therefore
+diﬀerent computations are performed at each iteration.
+
+Fairbanks et al. [Fairbanks et al. 2015] present a parallel NMF algorithm designed for multicore
+machines. To demonstrate the importance of minimizing communication, we consider this approach
+to parallelizing an alternating-updating NMF algorithm in distributed memory (see Section 5.1).
+While this naive algorithm exploits the natural parallelism available within the alternating iterations
+(the fact that rows of W and columns of H can be computed independently), it performs more com-
+munication than necessary to set up the independent problems. We compare the performance of this
+algorithm with our proposed approach to demonstrate the importance of designing algorithms to
+minimize communication; that is, simply parallelizing the computation is not suﬃcient for satisfac-
+tory performance and parallel scalability.
+
+Apart from distributed NMF algorithms using Hadoop and multicores, there are also implemen-
+tations of the MU algorithm in a distributed memory setting using X10 [Grove et al. 2014] and on a
+GPU [Mej´ıa-Roa et al. 2015].
+
+4. ALTERNATING-UPDATING NMF ALGORITHMS
+We deﬁne Alternating-Updating NMF algorithms as those that (1) alternate between updating W
+for a given H and updating H for a given W and (2) use the Gram matrix associated with the ﬁxed
+factor matrix and the product of the input data matrix A with the ﬁxed factor matrix. We show the
+structure of the framework in Algorithm 1.
+
+Algorithm 1 [W, H] = AU-NMF(A, k)
+Require: A is an m × n matrix, k is rank of approximation
+1: Initialize H with a non-negative matrix in Rn×k
++ .
+2: while stopping criteria not satisﬁed do
+3:
+4:
+5: end while
+
+Update W using HHT and AHT
+Update H using WT W and WT A
+
+The speciﬁcs of lines 3 and 4 depend on the NMF algorithm, and we refer to the computation
+associated with these lines as the Local Update Computations (LUC), as they will not aﬀect the
+parallelization schemes we deﬁne in Section 5.2. Because these computations are performed locally,
+we use a function F(m, n, k) to denote the number of ﬂops required for each algorithm’s LUC (and
+we do not consider communication costs).
+
+We note that AU-NMF is very similar to a two-block, block coordinate descent (BCD) framework,
+but it has a key diﬀerence. In the BCD framework where the two blocks are the unknown factors W
+and H, we solve the following subproblems, which have a unique solution for a full rank H and W:
+
+W ← argmin
+
+H ← argmin
+
+˜W(cid:62)0
+
+˜H(cid:62)0
+
+(cid:13)(cid:13)(cid:13)A − ˜WH
+(cid:13)(cid:13)(cid:13)A − W ˜H
+
+(cid:13)(cid:13)(cid:13)F ,
+(cid:13)(cid:13)(cid:13)F .
+
+(2)
+
+Since each subproblem involves nonnegative least squares, this two-block BCD method is also
+called the Alternating Non-negative Least Squares (ANLS) method [Kim et al. 2014]. For exam-
+ple, Block Principal Pivoting (ABPP), discussed more in detail at Section 4.3, is one algorithm that
+solves these NLS subproblems. In the context of the AU-NMF algorithm, an ANLS method maxi-
+mally reduces the overall NMF objective function value by ﬁnding the optimal solution for given H
+and W in lines 3 and 4 respectively.
+
+5
+
+There are other popular NMF algorithms that update the factor matrices alternatively without
+maximally reducing the objective function value each time, in the same sense as in ANLS. These
+updates do not necessarily solve each of the subproblems (2) to optimality but simply improve the
+overall objective function (1). Such methods include Multiplicative Update (MU) [Seung and Lee
+2001] and Hierarchical Alternating Least Squares (HALS) [Cichocki et al. 2009], which was also
+proposed as Rank-one Residual Iteration (RRI) [Ho et al. 2008]. To show how these methods can ﬁt
+into the AU-NMF framework, we discuss them in more detail in Sections 4.1 and 4.2.
+
+The convergence properties of these diﬀerent algorithms are discussed in detail by Kim, He and
+Park [Kim et al. 2014]. We emphasize here that both MU and HALS require computing Gram
+matrices and matrix products of the input matrix and each factor matrix. Therefore, if the update
+ordering follows the convention of updating all of W followed by all of H, both methods ﬁt into
+the AU-NMF framework. We note that both MU and HALS are deﬁned for more general update
+orders, but for our purposes we constrain them to be AU-NMF algorithms.
+
+While we focus on three NMF algorithms in this paper, we highlight that our framework is ex-
+tensible to other NMF algorithms, including those based on Alternating Direction Method of Mul-
+tipliers (ADMM) [Sun and F´evotte 2014], Nesterov-based methods [Guan et al. 2012], or any other
+method that ﬁts the framework of Algorithm 1.
+
+4.1. Multiplicative Update (MU)
+In the case of MU [Seung and Lee 2001], individual entries of W and H are updated with all other
+entries ﬁxed. In this case, the update rules are
+
+wi j ← wi j
+
+, and
+
+(AHT )i j
+(WHHT )i j
+(WT A)i j
+(WT WH)i j
+
+.
+
+hi j ← hi j
+
+Instead of performing these (m + n)k in an arbitrary order, if all of W is updated before H (or vice-
+versa), this method also follows the AU-NMF framework. After computing the Gram matrices HHT
+and WT W and the products AHT and WT A, the extra cost of computing W(HHT ) and (WT W)H is
+F(m, n, k) = 2(m+n)k2 ﬂops to perform updates for all entries of W and H, as the other elementwise
+operations aﬀect only lower-order terms. Thus, when MU is used, lines 3 and 4 in Algorithm 1 –
+and functions UpdateW and UpdateH in Algorithms 2 and 3 – implement the expressions in (3),
+given the previously computed matrices.
+
+4.2. Hierarchical Alternating Least Squares (HALS)
+In the case of HALS [Cichocki et al. 2009; Cichocki and Anh-Huy 2009], updates are performed
+on individual columns of W and rows of H with all other entries in the factor matrices ﬁxed. This
+approach is a BCD method with 2k blocks, set to minimize the function
+
+where wi is the ith column of W and hi is the ith row of H. The update rules [Cichocki and Anh-Huy
+2009, Algorithm 2] can be written in closed form:
+
+f (w1, · · · , wk, h1, · · · , hk) =
+
+A −
+
+wihi
+
+,
+
+(cid:13)(cid:13)(cid:13)(cid:13)(cid:13)(cid:13)(cid:13)
+
+k(cid:88)
+
+i=1
+
+(cid:13)(cid:13)(cid:13)(cid:13)(cid:13)(cid:13)(cid:13)F
+
+wi ←
+
+wi ←
+
+hi ←
+
+wi + (AHT )i − W(HHT )i(cid:105)
+(cid:104)
+wi
+(cid:107)wi(cid:107)
+(cid:104)
+hi + (WT A)i − (WT W)iH
+
+, and
+
++
+
+(cid:105)
++ .
+
+6
+
+(3)
+
+(4)
+
+(5)
+
+Note that the columns of W and rows of H are updated in order, so that the most up-to-date
+values are always used, and these 2k updates can be done in an arbitrary order. However, if all
+the W updates are done before H (or vice-versa), the method falls into the AU-NMF framework.
+After computing the matrices HHT , AHT , WT W, and WT A, the extra computation is F(m, n, k) =
+2(m + n)k2 ﬂops for updating both W and H.
+
+Thus, when HALS is used, lines 3 and 4 in Algorithm 1 – and functions UpdateW and UpdateH
+in Algorithms 2 and 3 – implement the expressions in (5), given the previously computed matrices.
+
+4.3. Alternating Nonnegative Least Squares with Block Principal Pivoting
+Block Principal Pivoting (BPP) is an active-set-like method for solving the NLS subproblems in Eq.
+(2). The main subroutine of BPP is the single right-hand side NLS problem
+
+The Karush-Kuhn-Tucker (KKT) optimality conditions for Eq. (6) are as follows
+
+min
+x(cid:62)0
+
+(cid:107)Cx − b(cid:107)2.
+
+y = CT Cx − CT b
+y (cid:62) 0
+x (cid:62) 0
+xiyi = 0 ∀i.
+
+(6)
+
+(7a)
+(7b)
+(7c)
+(7d)
+
+The KKT conditions (7) states that at optimality, the support sets (i.e., the non-zero elements) of
+x and y are complementary to each other. Therefore, Eq. (7) is an instance of the Linear Comple-
+mentarity Problem (LCP) which arises frequently in quadratic programming. When k (cid:28) min(m, n),
+active-set and active-set-like methods are very suitable because most computations involve matrices
+of sizes m × k, n × k, and k × k which are small and easy to handle.
+
+If we knew which indices correspond to nonzero values in the optimal solution, then computing
+the solution is an unconstrained least squares problem on these indices. In the optimal solution, call
+the set of indices i such that xi = 0 the active set, and let the remaining indices be the passive set. The
+BPP algorithm works to ﬁnd this ﬁnal active set and passive set. It greedily swaps indices between
+the intermediate active and passive sets until ﬁnding a partition that satisﬁes the KKT condition.
+In the partition of the optimal solution, the values of the indices that belong to the active set will
+take zero. The values of the indices that belong to the passive set are determined by solving the
+unconstrained least squares problem restricted to the passive set. Kim, He and Park [Kim and Park
+2011], discuss the BPP algorithm in further detail. We use the notation
+
+X ← SolveBPP(CT C, CT B)
+to deﬁne the (local) function for using BPP to solve Eq. (6) for every column of X. We deﬁne
+CBPP(k, c) as the cost of SolveBPP, given the k × k matrix CT C and k × c matrix CT B. SolveBPP
+mainly involves solving least squares problems over the intermediate passive sets. Our implementa-
+tion uses the normal equations to solve the unconstrained least squares problems because the normal
+equations matrices have been pre-computed in order to check the KKT condition. However, more
+numerically stable methods such as QR decomposition can also be used.
+
+Thus, when ABPP is used, lines 3 and 4 in Algorithm 1 – and functions UpdateW and UpdateH
+in Algorithms 2 and 3 – correspond to calls to SolveBPP. The number of ﬂops involved in SolveBPP
+is not a closed form expression; in this case F(m, n, k) = CBPP(k, m) + CBPP(k, n).
+
+5. PARALLEL ALGORITHMS
+
+5.1. Naive Parallel NMF Algorithm
+In this section we present a naive parallelization of NMF algorithms, which has previously appeared
+in the context of a shared-memory parallel platform [Fairbanks et al. 2015]. Each NLS problem with
+multiple right-hand sides can be parallelized on the observation that the problems for multiple right-
+hand sides are independent from each other. For example, we can solve several instances of Eq. (6)
+
+7
+
+Algorithm 2 [W, H] = Naive-Parallel-AUNMF(A, k)
+Require: A is an m × n matrix distributed both row-wise and column-wise across p processors, k
+
+is rank of approximation
+
+Require: Local matrices: Ai is m/p × n, Ai is m × n/p, Wi is m/p × k, Hi is k × n/p
+1: pi initializes Hi
+2: while stopping criteria not satisﬁed do
+/* Compute W given H */
+collect H on each processor using all-gather
+pi computes Wi ← updateW(HHT , AiHT )
+/* Compute H given W */
+collect W on each processor using all-gather
+pi computes (Hi)T ← updateH(WT W, (WT Ai)T )
+
+3:
+4:
+
+5:
+6:
+7: end while
+
+Ensure: W, H ≈ argmin
+˜W(cid:62)0, ˜H(cid:62)0
+
+(cid:107)A − ˜W ˜H(cid:107)
+
+column-wise across processors
+
+Ensure: W is an m×k matrix distributed row-wise across processors, H is a k ×n matrix distributed
+
+Algorithm
+
+Naive-Parallel-AUNMF
+
+MPI-FAUN (m/p (cid:62) n)
+
+MPI-FAUN (m/p < n)
+
+Lower Bound
+
+Flops
++ (m+n)k2 + F
++ (m+n)k2
+p
++ (m+n)k2
+p
+
++ F
+
++ F
+
+4 mnk
+p
+4 mnk
+p
+4 mnk
+p
+
+(cid:17)
+
+p , k
+(cid:17)
+
+p , k
+
+(cid:16) m
+p , n
+(cid:16) m
+p , n
+(cid:16) m
+p , n
+
+p , k
+
+(cid:17)
+
+Words
+O((m + n)k)
+
+O(nk)
+(cid:18) (cid:113)
+
+(cid:19)
+
+mnk2
+p
+
+O
+
+−
+
+(cid:18)
+
+Ω
+
+min
+
+(cid:26) (cid:113)
+
+(cid:27)(cid:19)
+
+mnk2
+p
+
+, nk
+
+Messages Memory
++ (m+n)k
+
+O(log p)∗
+
+O
+
+O
+
+O
+
+(cid:16) mn
+p
+(cid:16) mn
+p
+(cid:18)
+
+mn
+p
+
+mn
+p
+
+(cid:17)
+
+(cid:17)
+
++ mk
+p
+(cid:113)
+
++ nk
+(cid:19)
+
++
+
+mnk2
+p
++ (m+n)k
+p
+
+O(log p)∗
+
+O(log p)∗
+
+Ω(log p)
+
+Table III: Leading order algorithmic costs for Naive-Parallel-AUNMF and MPI-FAUN (per iter-
+ation). Note that the computation and memory costs assume the data matrix A is dense, but the
+communication costs (words and messages) apply to both dense and sparse cases. The function F(·)
+denotes the number of ﬂops required for the particular NMF algorithm’s Local Update Computa-
+tion, aside from the matrix multiplications common across AU-NMF algorithms.
+∗The stated latency cost assumes no communication is required in LUC; HALS requires k log p
+messages for normalization steps.
+
+independently for diﬀerent b where C is ﬁxed, which implies that we can optimize row blocks of
+W and column blocks of H in parallel.
+
+Algorithm 2 and Figure 1 present a straightforward approach to setting up the independent sub-
+problems. Let us divide W into row blocks W1, . . . , Wp and H into column blocks H1, . . . , Hp.
+We then double-partition the data matrix A accordingly into row blocks A1, . . . , Ap and column
+blocks A1, . . . , Ap so that processor i owns both Ai and Ai (see Figure 1). With these partitions of
+the data and the variables, one can implement any AU-NMF algorithm in parallel, with only one
+communication step for each solve.
+
+We summarize the algorithmic costs of Algorithm 2 (derived in the following subsections) in
+Table III. This naive algorithm [Fairbanks et al. 2015] has three main drawbacks: (1) it requires
+storing two copies of the data matrix (one in row distribution and one in column distribution) and
+both full factor matrices locally, (2) it does not parallelize the computation of HHT and WT W (each
+processor computes it redundantly), and (3) as we will see in Section 5.2, it communicates more
+data than necessary.
+
+5.1.1. Computation Cost. The computation cost of Algorithm 2 depends on the particular NMF
+algorithm used. Thus, the computation at line 4 consists of computing AiHT , HHT , and performing
+
+8
+
+Fig. 1: Naive-Parallel-AUNMF. Note that both rows and columns of A are 1D distributed. The
+algorithm works by iteratively (all-)gathering the entire ﬁxed factor matrix to each processor and
+then performing the Local Update Computations to update the variable factor matrix.
+
+the algorithm-speciﬁc Local Update Computations for m/p rows of W. Likewise, the computation
+at line 6 consists of computing WT Ai, WT W, and performing the Local Update Computations for
+n/p columns of H. In the dense case, this amounts to 4mnk/p + (m + n)k2 + F(m/p, n/p, k) ﬂops.
+In the sparse case, processor i performs 2(nnz(Ai) + nnz(Ai))k ﬂops to compute AiHT and WT Ai
+instead of 4mnk/p.
+
+5.1.2. Communication Cost. The size of W is mk words, and the size of H is nk words. Thus, the
+communication cost of the all-gathers at lines 3 and 5, based on the expression given in Section 2.3
+is α · 2 log p + β · (m + n)k.
+
+5.1.3. Memory Requirements. The local memory requirement includes storing each processor’s
+part of matrices A, W, and H. In the case of dense A, this is 2mn/p + (m + n)k/p words, as A is
+stored twice; in the sparse case, processor i requires nnz(Ai) + nnz(Ai) words for the input matrix
+and (m + n)k/p words for the output factor matrices. Local memory is also required for storing
+temporary matrices W and H of size (m + n)k words.
+
+5.2. MPI-FAUN
+We present our proposed algorithm, MPI-FAUN, as Algorithm 3. The main ideas of the algorithm
+are to (1) exploit the independence of Local Update Computations for rows of W and columns of
+H and (2) use communication-optimal matrix multiplication algorithms to set up the Local Update
+Computations. The naive approach (Algorithm 2) shares the ﬁrst property, by parallelizing over
+
+9
+
+rows of W and columns of H, but it uses parallel matrix multiplication algorithms that communicate
+more data than necessary. The central intuition for communication-eﬃcient parallel algorithms for
+computing HHT , AHT , WT W, and WT A comes from a classiﬁcation proposed by Demmel et al.
+[Demmel et al. 2013]. They consider three cases, depending on the relative sizes of the dimensions
+of the matrices and the number of processors; the four multiplies for NMF fall into either the “one
+large dimension” or “two large dimensions” cases. MPI-FAUN uses a careful data distribution in
+order to use a communication-optimal algorithm for each of the matrix multiplications, while at the
+same time exploiting the parallelism in the LUC.
+
+The algorithm uses a 2D distribution of the data matrix A across a pr × pc grid of processors (with
+p = pr pc), as shown in Figure 2. As we derive in the subsequent subsections, Algorithm 3 performs
+(cid:111)(cid:17)
+an alternating method in parallel with a per-iteration bandwidth cost of O
+words, latency cost of O(log p) messages, and load-balanced computation (up to the sparsity pattern
+of A and convergence rates of local BPP computations).
+
+mnk2/p, nk
+
+min
+
+(cid:110) (cid:112)
+
+(cid:16)
+
+To minimize the communication cost and local memory requirements, in the typical case pr and
+(cid:17)
+pc are chosen so that m/pr ≈ n/pc ≈
+. If
+the matrix is very tall and skinny, i.e., m/p > n, then we choose pr = p and pc = 1. In this case, the
+distribution of the data matrix is 1D, and the bandwidth cost is O(nk) words.
+
+mn/p, in which case the bandwidth cost is O
+
+mnk2/p
+
+(cid:16) (cid:112)
+
+(cid:112)
+
+The matrix distributions for Algorithm 3 are given in Figure 2; we use a 2D distribution of A and
+1D distributions of W and H. Recall from Table II that Mi and Mi denote row and column blocks
+of M, respectively. Thus, the notation (Wi) j denotes the jth row block within the ith row block of
+W. Lines 3–8 compute W for a ﬁxed H, and lines 9–14 compute H for a ﬁxed W; note that the
+computations and communication patterns for the two alternating iterations are analogous.
+
+In the rest of this section, we derive the per-iteration computation and communication costs,
+as well as the local memory requirements. We also argue the communication-optimality of the
+algorithm in the dense case. Table III summarizes the results of this section and compares them to
+Naive-Parallel-AUNMF.
+
+5.2.1. Computation Cost. Local matrix computations occur at lines 3, 6, 9, and 12. In the case that
+
+A is dense, each processor performs
+
+n
+p
+
+m
+pr
+
+n
+pc
+
+n
+pc
+
+k = 4
+
+k2 + 2
+
+k2 + 2
+
+k + m
+p
+
+m
+pr
+ﬂops. In the case that A is sparse, processor (i, j) performs (m + n)k2/p ﬂops in computing Ui j
+and Xi j, and 4nnz(Ai j)k ﬂops in computing Vi j and Yi j. Local update computations occur at lines
+8 and 14. In each case, the symmetric positive semi-deﬁnite matrix is k × k and the number of
+columns/rows of length k to be computed are m/p and n/p, respectively. These costs together are
+given by F(m/p, n/p, k). There are computation costs associated with the all-reduce and reduce-
+scatter collectives, both those contribute only to lower order terms.
+
++ (m + n)k2
+p
+
+mnk
+p
+
+5.2.2. Communication Cost. Communication occurs during six collective operations (lines 4, 5, 7,
+10, 11, and 13). We use the cost expressions presented in Section 2.3 for these collectives. The
+communication cost of the all-reduces (lines 4 and 10) is α · 4 log p + β · 2k2; the cost of the two
+all-gathers (lines 5 and 11) is α · log p + β · ((pr−1)nk/p + (pc−1)mk/p); and the cost of the two
+reduce-scatters (lines 7 and 13) is α · log p + β · ((pc−1)mk/p + (pr−1)nk/p).
+
+We note that LUC may introduce signiﬁcant communication cost, depending on the NMF algo-
+rithm used. The normalization of columns of W within HALS, for example, introduces an extra
+k log p latency cost. We will ignore such costs in our general analysis.
+
+In the case that m/p < n, we choose pr = (cid:112)
+(cid:112)
+
+np/m > 1, and these
+communication costs simplify to α · O(log p) + β · O(mk/pr + nk/pc + k2) = α · O(log p) + β ·
+mnk2/p + k2). In the case that m/p (cid:62) n, we choose pc = 1, and the costs simplify to α ·
+O(
+O(log p) + β · O(nk).
+
+mp/n > 1 and pc = (cid:112)
+
+10
+
+Algorithm 3 [W, H] = MPI-FAUN(A, k)
+Require: A is an m × n matrix distributed across a pr × pc grid of processors, k is rank of approximation
+Require: Local matrices: Ai j is m/pr × n/pc, Wi is m/pr × k, (Wi) j is m/p × k, H j is k × n/pc, and (H j)i is
+
+k × n/p
+
+1: pi j initializes (H j)i
+2: while stopping criteria not satisﬁed do
+/* Compute W given H */
+pi j computes Ui j = (H j)i(H j)i
+compute HHT = (cid:80)
+pi j collects H j using all-gather across proc columns
+pi j computes Vi j = Ai jHT
+j
+compute (AHT )i= (cid:80)
+
+3:
+4:
+5:
+6:
+
+7:
+
+i, j Ui j using all-reduce across all procs
+
+T
+
+(AHT )i
+
+(cid:46) Vi j is m/pr × k
+j Vi j using reduce-scatter across proc row to achieve row-wise distribution of
+(cid:46) pi j owns m/p × k submatrix ((AHT )i) j
+
+8:
+
+9:
+10:
+11:
+12:
+13:
+
+T (Wi) j
+
+pi j computes (Wi) j ← UpdateW(HHT , ((AHT )i) j)
+/* Compute H given W */
+pi j computes Xi j = (Wi) j
+compute WT W= (cid:80)
+pi j collects Wi using all-gather across proc rows
+pi j computes Yi j = Wi
+T Ai j
+(cid:46) Yi j is k × n/pc
+compute (WT A) j = (cid:80)
+i Yi j using reduce-scatter across proc columns to achieve column-wise distribu-
+(cid:46) pi j owns k × n/p submatrix ((WT A) j)i
+
+i, j Xi j using all-reduce across all procs
+
+(cid:46) WT W is k × k and symmetric
+
+tion of (WT A) j
+
+(cid:46) HHT is k × k and symmetric
+
+pi j computes ((H j)i)T ← UpdateH(WT W, (((WT A) j)i)T )
+
+14:
+15: end while
+Ensure: W, H ≈ argmin
+˜W(cid:62)0, ˜H(cid:62)0
+
+(cid:107)A − ˜W ˜H(cid:107)
+
+Ensure: W is an m × k matrix distributed row-wise across processors, H is a k × n matrix distributed column-
+
+wise across processors
+
+5.2.3. Memory Requirements. The local memory requirement includes storing each processor’s
+part of matrices A, W, and H. In the case of dense A, this is mn/p + (m + n)k/p words; in the
+sparse case, processor (i, j) requires nnz(Ai j) words for the input matrix and (m + n)k/p words for
+the output factor matrices. Local memory is also required for storing temporary matrices W j, Hi,
+Vi j, and Yi j, of size 2mk/pr + 2nk/pc) words.
+
+In the dense case, assuming k < n/pc and k < m/pr, the local memory requirement is no more
+than a constant times the size of the original data. For the optimal choices of pr and pc, this assump-
+tion simpliﬁes to k < max
+
+mn/p, m/p
+
+(cid:110) (cid:112)
+
+(cid:111)
+.
+
+We note that if the temporary memory requirements become prohibitive, the computation of
+((AHT )i) j and ((WT A) j)i via all-gathers and reduce-scatters can be blocked, decreasing the local
+memory requirements at the expense of greater latency costs. When A is sparse and k is large
+enough, the memory footprint of the factor matrices can be larger than the input matrix. In this case,
+the extra temporary memory requirements can become prohibitive; we observed this for a sparse
+data set with very large dimensions (see Section 6.3.5). We leave the implementation of the blocked
+algorithm to future work.
+
+5.2.4. Communication Optimality. In the case that A is dense, Algorithm 3 provably minimizes
+communication costs. Theorem 5.1 establishes the bandwidth cost lower bound for any algorithm
+that computes WT A or AHT each iteration. A latency lower bound of Ω(log p) exists in our com-
+munication model for any algorithm that aggregates global information [Chan et al. 2007], and for
+NMF, this global aggregation is necessary in each iteration. Based on the costs derived above, MPI-
+mn/p, matching these lower bounds
+FAUN is communication optimal under the assumption k <
+to within constant factors.
+
+(cid:112)
+
+11
+
+H H0 H1 H2 H3
+
+k
+
+n
+p
+
+k
+
+n← →
+
+W0
+
+m
+p
+
+A0
+
+A1
+
+A2
+
+A3
+
+A
+
+↑
+
+m
+
+↓
+
+W1
+
+W2
+
+W3
+
+W
+
+H0
+
+H1
+
+H
+
+k
+
+(H0)0 (H0)1 (H0)2 (H1)0 (H1)1 (H1)2
+
+n
+← →
+pc
+←
+
+n
+
+n
+p
+→
+
+W0
+
+A00
+
+A01
+
+W1
+
+(W1)0
+
+(W1)1
+
+k
+
+(W0)0
+
+(W0)1
+
+↑
+
+m
+pr
+
+↓
+
+(W2)0
+
+m
+p
+
+(W2)1
+
+W
+
+↑
+
+m
+
+↓
+
+A10
+
+A11
+
+W2
+
+A20
+
+A21
+
+A
+
+(a) 1D Distribution with p = pr = 4 and pc = 1.
+
+(b) 2D Distribution with pr = 3 and pc = 2.
+
+Fig. 2: Data distributions for MPI-FAUN. Note that for the 2D distribution, Ai j is m/pr × m/pc, Wi
+is m/pr × k, (Wi) j is m/p × k, H j is k × n/pc, and (H j)i is k × n/p.
+
+Theorem 5.1 ([Demmel et al. 2013]). Let A ∈ Rm×n, W ∈ Rm×k, and H ∈ Rk×n be dense ma-
+trices, with k < n (cid:54) m. If k <
+mn/p, then any distributed-memory parallel algorithm on p
+processors that load balances the matrix distributions and computes WT A and/or AHT must com-
+municate at least Ω(min{
+mnk2/p, nk}) words along its critical path.
+
+(cid:112)
+
+(cid:112)
+
+Proof. The proof follows directly from [Demmel et al. 2013, Section II.B]. Each matrix mul-
+tiplication WT A and AHT has dimensions k < n (cid:54) m, so the assumption k <
+mn/p ensures
+that neither multiplication has “3 large dimensions.” Thus, the communication lower bound is either
+mnk2/p) in the case of p > m/n (or “2 large dimensions”), or Ω(nk), in the case of p < m/n
+Ω(
+(cid:112)
+mnk2/p, so the lower bound can be written as
+(or “1 large dimension”). If p < m/n, then nk <
+Ω(min{
+
+mnk2/p, nk}).
+
+(cid:112)
+
+(cid:112)
+
+(cid:112)
+
+We note that the communication costs of Algorithm 3 are the same for dense and sparse data
+matrices (the data matrix itself is never communicated). In the case that A is sparse, this commu-
+nication lower bound does not necessarily apply, as the required data movement depends on the
+sparsity pattern of A. Thus, we cannot make claims of optimality in the sparse case (for general A).
+The communication lower bounds for WT A and/or AHT (where A is sparse) can be expressed in
+terms of hypergraphs that encode the sparsity structure of A [Ballard et al. 2015]. Indeed, hyper-
+graph partitioners have been used to reduce communication and achieve load balance for a similar
+problem: computing a low-rank representation of a sparse tensor (without non-negativity constraints
+on the factors) [Kaya and Uc¸ar 2015].
+
+12
+
+Fig. 3: Parallel matrix multiplications within MPI-FAUN for ﬁnding H given W, with pr = 3 and
+pc = 2. The computation of WT W appears on the far left; the rest of the ﬁgure depicts computation
+of WT A.
+
+6. EXPERIMENTS
+In this section, we describe our implementation of MPI-FAUN and evaluate its performance. We
+identify a few synthetic and real world data sets to experiment with MPI-FAUN with dimensions
+that span from hundreds to millions. We compare the performance and exploring scaling behavior of
+diﬀerent NMF algorithms – MU, HALS, and ANLS/BPP (ABPP), implemented using the parallel
+MPI-FAUN framework. The code and the datasets used for conducting the experiments can be
+downloaded from https://github.com/ramkikannan/nmﬂibrary.
+
+6.1. Experimental Setup
+
+6.1.1. Data Sets. We used sparse and dense matrices that are either synthetically generated or
+
+from real world applications. We explain the data sets in this section.
+
+— Dense Synthetic Matrix: We generate a low rank matrix as the product of two uniform random
+matrices of size 207,360 × 100 and 100 × 138,240. The dimensions of this matrix are chosen to
+be evenly divisible for a particular set of processor grids.
+
+— Sparse Synthetic Matrix: We generate a random sparse Erd˝os-R´enyi matrix of the size 207,360
+
+× 138,240 with density of 0.001. That is, every entry is nonzero with probability 0.001.
+
+— Dense Real World Matrix (Video): NMF is used on video data for background subtraction in
+order to detect moving objects. The low rank matrix ˆA = WH represents background and the
+error matrix A − ˆA represents moving objects. Detecting moving objects has many real-world
+applications such as traﬃc estimation [Fujimoto et al. 2014] and security monitoring [Bouwmans
+et al. 2015]. In the case of detecting moving objects, only the last minute or two of video is taken
+
+13
+
+from the live video camera. The algorithm to incrementally adjust the NMF based on the new
+streaming video is presented in [Kim et al. 2014]. To simulate this scenario, we collected a video
+in a busy intersection of the Georgia Tech campus at 20 frames per second. From this video,
+we took video for approximately 12 minutes and then reshaped the matrix such that every RGB
+frame is a column of our matrix, so that the matrix is dense with size 1,013,400 × 13,824.
+
+— Sparse Real World Matrix (Webbase): This data set is a directed sparse graph whose nodes cor-
+respond to webpages (URLs) and edges correspond to hyperlinks from one webpage to another.
+The NMF output of this directed graph helps us understand clusters in graphs. We consider
+two versions of the data set: webbase-1M and webbase-2001. The dataset webbase-1M contains
+about 1 million nodes (1,000,005) and 3.1 million edges (3,105,536), and was ﬁrst reported by
+Williams et al. [Williams et al. 2009]. The version webbase-2001 has about 118 million nodes
+(118,142,155) and over 1 billion edges (1,019,903,190); it was ﬁrst reported by Boldi and Vigna
+[Boldi and Vigna 2004]. Both data sets are available in the University of Florida Sparse Matrix
+Collection [Davis and Hu 2011] and the latter webbase-2001 being the largest among the entire
+collection.
+
+— Text data (Stack Exchange): Stack Exchange is a network of question-and-answer websites on
+topics in varied ﬁelds, each site covering a speciﬁc topic, where questions, answers, and users
+are subject to a reputation award process. There are many Stack Exchange forums, such as ask
+ubuntu, mathematics, latex. We downloaded the latest anonymized dump of all user-contributed
+content on the Stack Exchange network from https://archive.org/details/stackexchange as of 28-
+Jul-2016. We used only the questions from the most popular site called Stackoverﬂow and did
+not include the answers and comments. We removed the standard 571 English stop words (such
+as are, am, be, above, below) and then used snowball stemming available through the Natural
+Language Toolkit (NLTK) package (www.nltk.org). After this initial pre-processing, we deleted
+HTML tags (such as lt, gt, em) from the posts. The resulting bag-of-words matrix has a vocabu-
+lary of size 627,047 over 11,708,841 documents with 365,168,945 non-zero entries.
+
+The size of all the real world data sets were adjusted to the nearest size for uniformly distributing
+
+the matrix.
+
+6.1.2. Implementation Platform. We conducted our experiments on “Rhea” at the Oak Ridge Lead-
+ership Computing Facility (OLCF). Rhea is a commodity-type Linux cluster with a total of 512
+nodes and a 4X FDR Inﬁniband interconnect. Each node contains dual-socket 8-core Intel Sandy
+Bridge-EP processors and 128 GB of memory. Each socket has a shared 20MB L3 cache, and each
+core has a private 256K L2 cache.
+
+Our objective of the implementation is using open source software as much as possible to promote
+reproducibility and reuse of our code. The entire C++ code was developed using the matrix library
+Armadillo [Sanderson 2010]. In Armadillo, the elements of the dense matrix are stored in column
+major order and the sparse matrices in Compressed Sparse Column (CSC) format. For dense BLAS
+and LAPACK operations, we linked Armadillo with Intel MKL – the default LAPACK/BLAS li-
+brary in RHEA. It is also easy to link Armadillo with OpenBLAS [Xianyi 2015]. We use Armadillo’s
+own implementation of sparse matrix-dense matrix multiplication, the default GNU C++ Compiler
+(g++ (GCC) 4.8.2) and MPI library (Open MPI 1.8.4) on RHEA. We chose the commodity cluster
+with open source software so that the numbers presented here are representative of common use.
+
+6.1.3. Algorithms. In our experiments, we considered the following algorithms:
+
+— MU: MPI-FAUN (Algorithm 3) with MU (Equation (3))
+— HALS: MPI-FAUN (Algorithm 3) with HALS (Equation (5))
+— ABPP: MPI-FAUN (Algorithm 3) with BPP (Section 4.3)
+— Naive: Naive-Parallel-AUNMF (Algorithm 2, Section 5.1)
+
+Our implementation of Naive (Algorithm 2) uses BPP but can be easily to extended to MU and
+HALS and other NMF algorithms. A detailed comparison of Naive-Parallel-AUNMF with MPI-
+
+14
+
+FAUN is made in our earlier work [Kannan et al. 2016]. We include some benchmark results from
+Naive to reiterate the point that communication eﬃciency is key to obtaining reasonable perfor-
+mance, but we also omit other Naive results in order to focus attention on comparisons among other
+algorithms.
+
+For the algorithms based on MPI-FAUN, we use the processor grid that is closest to the theoretical
+optimum (see Section 5.2.2) in order to minimize communication costs. See Section 6.3.4 for an
+empirical evaluation of varying processor grids for a particular algorithm and data set.
+
+To ensure fair comparison among algorithms, the same random seed is used across diﬀerent
+methods appropriately. That is, the initial random matrix H is generated with the same random seed
+when testing with diﬀerent algorithms (note that W need not be initialized). In our experiments, we
+use number of iterations as the stopping criteria for all the algorithms.
+
+While we would like to compare against other high-performance NMF algorithms in the litera-
+ture, the only other distributed-memory implementations of which we’re aware are implemented us-
+ing Hadoop and are designed only for sparse matrices [Liao et al. 2014], [Liu et al. 2010], [Gemulla
+et al. 2011], [Yin et al. 2014] and [Faloutsos et al. 2014]. We stress that Hadoop is not designed for
+high performance computing of iterative numerical algorithms, requiring disk I/O between steps, so
+a run time comparison between a Hadoop implementation and a C++/MPI implementation is not
+a fair comparison of parallel algorithms. A qualitative example of diﬀerences in run time is that a
+Hadoop implementation of the MU algorithm on a large sparse matrix of size 217 × 216 with 2 × 108
+nonzeros (with k=8) takes on the order of 50 minutes per iteration [Liu et al. 2010], while our MU
+implementation takes 0.065 seconds per iteration for the synthetic data set (which is an order of
+magnitude larger in terms of rows, columns, and nonzeros) running on only 16 nodes.
+
+6.2. Relative Error over Iterations
+There are various metrics to compare the quality of the NMF algorithms [Kim et al. 2014]. The most
+common among these metrics are (a) relative error and (b) projected gradient. The former represents
+the closeness of the low rank approximation ˆA ≈ WH, which is generally the optimization objective.
+The latter represent the quality of the produced low rank factors and the stationarity of the ﬁnal
+solution. These metrics are also used as the stopping criterion for terminating the iteration of the
+NMF algorithm as in line 2 of Algorithm 1. Typically a combination of the number of iterations
+along with improvement of these metrics until a tolerance is met is be used as stopping criterion.
+In this paper, we use relative error for the comparison as it is monotonically decreasing, as opposed
+to projected gradient of the low rank factors, which shows oscillations over iterations. The relative
+error can be formally deﬁned as (cid:107)A − WH(cid:107)F/(cid:107)A(cid:107)F.
+
+In Figure 4, we measure the relative error at the end of every iteration (i.e., after the updates
+of both W and H) for all three algorithms MU, HALS, and ABPP. We consider three real world
+datasets, video, stack exchange and webbase-1M, and set k = 50. We used only the number of
+iterations as stopping criterion and just for this section, ran all the algorithms for 50 iterations.
+
+To begin with, we explain the observations on the dense video dataset presented in Figure 4a. The
+relative error of MU was highest at 0.1804 after 50 iterations and ABPP was the least with 0.1170.
+HALS’s relative error was 0.1208. From the ﬁgure, we can observe that ABPP error didn’t change
+after 29 iterations where as HALS and MU was still improving marginally at the 4th decimal even
+after 50 iterations.
+
+We can observe that the relative error of stack exchange from Figure 4b is better than webbase-1M
+from Figure 4c over all three algorithms. In the case of the stack exchange dataset, the relative errors
+after 50 iterations follow the pattern MU > HALS > ABPP, with values 0.8480, 0.8365, and 0.8333
+respectively. Unlike the video dataset, both MU and HALS stopped improving after 23 iterations,
+where as ABPP was still improving in the 4th decimal even though its error was better than the
+others. However, the diﬀerence in relative error for the webbase-1M dataset was not as signiﬁcant
+as in the others, though the relative ordering of MU > HALS > ABPP was consistent, with values
+of 0.9703 for MU 0.9697 for HALS and 0.9695 for ABPP.
+
+15
+
+In general, for these datasets ABPP identiﬁed better approximations than MU and HALS, which
+is consistent with the literature [Kim et al. 2014; Kim and Park 2011]. However, for the sparse
+datasets, the diﬀerences in relative error are small across the NMF algorithms.
+
+6.3. Time Per Iteration
+In this section we focus on per-iteration time of all the algorithms. We report four types of exper-
+iments, varying the number of processors (Section 6.3.2), the rank of the approximation (Section
+6.3.3), the shape of the processor grid (Section 6.3.4), and scaling up the dataset size. For each ex-
+periment we report a time breakdown in terms of the overall computation and communication steps
+(described in Section 6.3.1) shared by all algorithms.
+
+6.3.1. Time Breakdown. To diﬀerentiate the computation and communication costs among the al-
+gorithms, we present the time breakdown among the various tasks within the algorithms for all
+performance experiments. For Algorithm 3, there are three local computation tasks and three com-
+munication tasks to compute each of the factor matrices:
+
+— MM, computing a matrix multiplication with the local data matrix and one of the factor matrices;
+— LUC , local updates either using ABPP or applying the remaining work of the MU or HALS
+
+updates (i.e., the total time for both U pdateW and U pdateH functions);
+
+— Gram, computing the local contribution to the Gram matrix;
+— All-Gather, to compute the global matrix multiplication;
+— Reduce-Scatter, to compute the global matrix multiplication;
+— All-Reduce, to compute the global Gram matrix.
+
+In our results, we do not distinguish the costs of these tasks for W and H separately; we report
+their sum, though we note that we do not always expect balance between the two contributions for
+each task. Algorithm 2 performs all of these tasks except Reduce-Scatter and All-Reduce; all of its
+communication is in All-Gather.
+
+6.3.2. Scaling p: Strong Scaling. Figure 5 presents a strong scaling experiment with four data sets:
+sparse synthetic, dense synthetic, webbase-1M, and video. In this experiment, for each data set and
+algorithm, we use low rank k = 50 and vary the number of processors (with ﬁxed problem size). We
+use {1, 6, 24, 54, 96} nodes; since each node has 16 cores, this corresponds to {16, 96, 384, 864, 1536}
+cores and report average per-iteration times.
+
+We highlight three main observations from these experiments:
+
+(1) Naive is slower than all other algorithms for large p;
+(2) MU, HALS, and ABPP (algorithms based on MPI-FAUN) scale up to over 1000 processors;
+(3) the relative per-iteration cost of LUC decreases as p increases (for all algorithms), and therefore
+the extra per-iteration cost of ABPP (compared with MU and HALS) becomes negligible.
+
+Observation 1. We report Naive performance only for the synthetic data sets (Figures 5a and
+5b); the results for the real-world data sets are similar. For the Sparse Synthetic data set, Naive is
+4.2× slower than the fastest algorithm (ABPP) on 1536 processors; for the Dense Synthetic data
+set, Naive is 1.6× slower than the fastest algorithm (MU) at that scale. Nearly all of this slowdown
+is due to the communication costs of Naive. Theoretical and practical evidence supporting the ﬁrst
+observation is also reported in our previous paper [Kannan et al. 2016]. However, we also note that
+Naive is the fastest algorithm for the smallest p for each problem, which is largely due to reduced
+MM time. Each algorithm performs exactly the same number of ﬂops per MM; the eﬃciency of
+Naive for small p is due to cache eﬀects. For example, for the Dense Synthetic problem on 96
+processors, the output matrix of Naive’s MM ﬁts in L2 cache, but the output matrix of MPI-FAUN’s
+MM does not; these eﬀects disappear as the p increases.
+
+Observation 2. Algorithms based on MPI-FAUN (MU, HALS, ABPP) scale well, up to over
+1000 processors. All algorithms’ run times decrease as p increases, with the exception of the Sparse
+
+16
+
+MU
+HALS
+ABPP
+
+MU
+HALS
+ABPP
+
+MU
+HALS
+ABPP
+
+0
+
+10
+
+20
+
+30
+
+40
+
+50
+
+Iterations
+
+(a) Dense Real World
+
+0
+
+10
+
+20
+
+30
+
+40
+
+50
+
+Iterations
+
+(b) Stack Exchange
+
+0
+5
+=
+k
+
+r
+o
+f
+
+r
+o
+r
+r
+E
+
+.
+l
+e
+R
+
+0
+5
+=
+k
+
+r
+o
+f
+
+r
+o
+r
+r
+E
+
+.
+l
+e
+R
+
+0.18
+
+0.16
+
+0.14
+
+0.12
+
+1
+
+0.95
+
+0.9
+
+0.85
+
+0
+5
+=
+k
+
+r
+o
+f
+
+r
+o
+r
+r
+E
+
+.
+l
+e
+R
+
+0.99
+
+0.98
+
+0.97
+
+Fig. 4: Relative error comparison of MU, HALS, ABPP on real world datasets
+
+0
+
+10
+
+20
+
+30
+
+40
+
+50
+
+Iterations
+
+(c) Webbase
+
+17
+
+Real World data set, in which case all algorithms slow down scaling from p = 864 to p = 1536 (we
+attribute this lack of scaling to load imbalance). For sparse problems, comparing p = 16 to p = 1536
+(a factor increase of 96), we observe speedups from ABPP of 59× (synthetic) and 22× (real world).
+For dense problems, comparing p = 96 to p = 1536 (a factor increase of 16), ABPP’s speedup
+is 12× for both problems. MU and HALS demonstrate similar scaling results. For comparison,
+speedups for Naive were 8× and 3× (sparse) and 6× and 4× (dense).
+
+Observation 3. MU, HALS, and ABPP share all the same subroutines except those that are
+characterized as LUC . Considering only LUC subroutines, MU and HALS require fewer operations
+than ABPP. However, HALS has to make one additional communication for normalization of W.
+For small p, these cost diﬀerences are apparent in Figure 5. For example, for the sparse real world
+data set on 16 processors, ABPP’s LUC time is 16× that of MU, and the per iteration time diﬀers
+by a factor of 4.5. However, as p increases, the relative time spent in LUC computations decreases,
+so the extra time taken by ABPP has less of an eﬀect on the total per iteration time. By contrast, for
+the dense real world data set on 1536 processors, ABPP spends a factor of 27 times more time in
+LUC than MU but only 11% longer over the entire iteration. For the synthetic data sets, LUC takes
+24% (sparse) on 16 processors and 84% (dense) on 96 processors, and that percentage drops to 11%
+(sparse) and 15% (dense) on 1536 processors.
+
+These trends can also be seen theoretically (Table III). We expect local computations like MM,
+LUC , and Gram to scale like 1/p, assuming load balance is preserved. If communication costs
+are dominated by the number of words being communicated (i.e., the communication is bandwidth
+bound), then we expect time spent in communication to scale like 1/
+p, and at least for dense
+problems, this scaling is the best possible. Thus, communication costs will eventually dominate
+computation costs for all NMF problems, for suﬃciently large p. (Note that if communication is
+latency bound and proportional to the number of messages, then time spent communicating actually
+increases with p.)
+
+√
+
+The overall conclusion from this empirical and theoretical observation is that the extra per-
+iteration cost of ABPP over alternatives like MU and HALS decreases as the number of processors
+p increases. As shown in Section 6.2 the faster error reduction of ABPP typically reduces the over-
+all time to solution compared with the alternatives even it requires more time for each iteration. Our
+conclusion is that as we scale up p, this tradeoﬀ is further relaxed so that ABPP becomes more and
+more advantageous for both quality and performance.
+
+6.3.3. Scaling k. Figure 6 presents an experiment scaling up the low rank value k from 10 to 50
+with each of the four data sets. In this experiment, for each data set and algorithm, the problem size
+is ﬁxed and the number of processors is ﬁxed to p = 864. As in Section 6.3.2, we report the average
+per-iteration times. We also omit Naive data for the real world data sets to highlight the comparisons
+among MU, HALS, and ABPP.
+
+We highlight two observations from these experiments:
+
+(1) Naive is plagued by communication time that increases linearly with k;
+(2) ABPP’s time increases more quickly with k than those of MU or HALS;
+
+Observation 1. We see from the synthetic data sets (Figures 6a and 6b) that the overall time
+of Naive increases more rapidly with k than any other algorithm and that the increase in time is
+due mainly to communication (All-Gather). Table III predicts that Naive communication volume
+scales linearly with k, and we see that in practice the prediction is almost perfect with the synthetic
+problems. This conﬁrms that the communication is dominated by bandwidth costs and not latency
+costs (which are constant with respect to k). We note that the communication cost of MPI-FAUN
+k, which is why we don’t see as dramatic an increase in communication time for MU,
+scales like
+HALS, or ABPPin Figure 6.
+
+√
+
+Observation 2. Focusing attention on time spent in LUC computations, we can compare how
+MU, HALS, and ABPP scale diﬀerently with k. We see a more rapid increase of LUC time for
+
+18
+
+)
+s
+d
+n
+o
+c
+e
+s
+(
+
+e
+m
+T
+
+i
+
+)
+s
+d
+n
+o
+c
+e
+s
+(
+
+e
+m
+T
+
+i
+
+)
+s
+d
+n
+o
+c
+e
+s
+(
+
+e
+m
+T
+
+i
+
+)
+s
+d
+n
+o
+c
+e
+s
+(
+
+e
+m
+T
+
+i
+
+3
+
+2
+
+1
+
+0
+
+3
+
+2
+
+1
+
+0
+
+10
+
+5
+
+0
+
+2
+
+1
+
+0
+
+M
+
+U
+
+H A L S
+N aive
+A B PP
+
+16
+
+M
+
+U
+
+H A L S
+N aive
+A B PP
+
+96
+
+M
+
+U
+
+H A L S
+N aive
+A B PP
+
+384
+
+M
+
+U
+
+H A L S
+N aive
+A B PP
+
+864
+
+M
+
+U
+
+H A L S
+N aive
+A B PP
+
+1536
+
+Number of Processes (p)
+
+(a) Sparse Synthetic
+
+M
+
+U
+
+H A L S
+A B PP
+
+N aive
+
+16
+
+M
+
+U
+
+H A L S
+A B PP
+
+N aive
+
+96
+
+384
+
+M
+
+U
+
+H A L S
+A B PP
+
+N aive
+
+864
+
+M
+
+U
+
+H A L S
+A B PP
+
+N aive
+
+1536
+
+Number of Processes (p)
+
+(b) Dense Synthetic
+
+M
+
+U
+
+H A L S
+A B PP
+
+16
+
+M
+
+U
+
+H A L S
+A B PP
+
+96
+
+M
+
+U
+
+H A L S
+A B PP
+
+384
+
+M
+
+U
+
+H A L S
+A B PP
+
+864
+
+M
+
+U
+
+H A L S
+A B PP
+
+1536
+
+Number of Processes (p)
+
+(c) Sparse Real World (webbase-1M)
+
+All-Reduce
+Reduce-Scatter
+All-Gather
+Gram
+LUC
+MM
+
+All-Reduce
+Reduce-Scatter
+All-Gather
+Gram
+LUC
+MM
+
+All-Reduce
+Reduce-Scatter
+All-Gather
+Gram
+LUC
+MM
+
+All-Reduce
+Reduce-Scatter
+All-Gather
+Gram
+LUC
+MM
+
+M
+
+U
+
+H A L S
+A B PP
+
+16
+
+M
+
+U
+
+H A L S
+A B PP
+
+96
+
+M
+
+U
+
+H A L S
+A B PP
+
+384
+
+M
+
+U
+
+H A L S
+A B PP
+
+864
+
+M
+
+U
+
+H A L S
+A B PP
+
+1536
+
+Number of Processes (p)
+
+(d) Dense Real World (Video)
+
+Fig. 5: Strong scaling (varying p) with k = 50 benchmarking per-iteration times.
+
+19
+
+ABPP than MU or HALS; this is expected because the LUC computations unique to ABPP require
+between O(k3) and O(k4) operations (depending on the data) while the unique LUC computations
+for MU and HALS are O(k2), with all other parameters ﬁxed. Thus, the extra per-iteration cost of
+ABPP increases with k, so the advantage of ABPP of better error reduction must also increase with
+k for it to remain superior at large values of k. We also note that although the number of operations
+within MM is O(k), we do not observe much increase in time from k = 10 to k = 50; this is due to
+the improved eﬃciency of local MM for larger values of k.
+
+6.3.4. Varying Processor Grid. In this section we demonstrate the eﬀect of the dimensions of the
+processor grid on per-iteration performance. For a ﬁxed total number of processors p, the commu-
+nication cost of Algorithm 3 varies with the choice of pr and pc. To minimize the amount of data
+communicated, the theoretical analysis suggests that the processor grid should be chosen to make
+the sizes of the local data matrix as square as possible. This implies that if m/p > n, pr = p and
+pc = 1 is the optimal choice (a 1D processor grid); likewise if n/p > m then a 1D processor grid with
+pr = 1 and pc = p is the optimal choice. Otherwise, a 2D processor grid minimizes communication
+with pr ≈
+
+np/m (subject to integrality and pr pc = p).
+Figure 7 presents a benchmark of ABPP for the Sparse Synthetic data set for ﬁxed values of p
+and k. We vary the processor grid dimensions from both 1D grids to the 2D grid that matches the
+theoretical optimum exactly. Because the sizes of the Sparse Synthetic matrix are 172,800×115,200
+and the number of processors is 1536, the theoretically optimal grid is pr = (cid:112)
+mp/n = 48 and
+pc = (cid:112)
+np/m = 32. The experimental results conﬁrm that this processor grid is optimal, and we see
+that the time spent communicating increases as the processor grid deviates from the optimum, with
+the 1D grids performing the worst.
+
+mp/n and pc ≈
+
+(cid:112)
+
+(cid:112)
+
+6.3.5. Scaling up to Very Large Sparse Datasets. In this section, we test MPI-FAUN by scaling up
+the problem size. While we’ve used webbase-1M in previous experiments, we consider webbase-
+2001 in this section as it is the largest sparse data in University of Florida Sparse Matrix Collection
+[Davis and Hu 2011]. The former dataset has about 1 million nodes and 3 million edges, whereas the
+latter dataset has over 100 million nodes and 1 billion edges (see Section 6.1.1 for more details). Not
+only is the size of the input matrix increased by two orders of magnitude (because of the increase
+in the number of edges), but also the size of the output matrices is increased by two orders of
+magnitude (because of the increase in the number of nodes).
+
+In fact, with a low rank of k = 50, the size of the output matrices dominates that of the input
+matrix: W and H together require a total of 88 GB, while A (stored in compressed column format)
+is only 16 GB. At this scale, because each node (consisting of 16 cores) of Rhea has 128 GB of
+memory, multiple nodes are required to store the input and output matrices with room for other
+intermediate values. As mentioned in Section 5.1.3, MPI-FAUN requires considerably more tempo-
+rary memory than necessary when the output matrices require more memory than the input matrix.
+While we were not limited by this property for the other sparse matrices, the webbase-2001 matrix
+dimensions are so large that we need the memories of tens of nodes to run the algorithm. Thus,
+we report results only for the largest number of processors in our experiments: 1536 processors (96
+nodes). The extra temporary memory used by MPI-FAUN is a latency-minimizing optimization; the
+algorithm can be updated to avoid this extra memory cost using a blocked matrix multiplication al-
+gorithm. The extra memory can be reduced to a negligible amount at the expense of more messages
+between processors and synchronizations across the parallel machine. We have not yet implemented
+this update.
+
+We present results for webbase-2001 in Figure 8. The timing results are consistent with the ob-
+servations from other synthetic and real world sparse datasets as discussed in Section 6.3.2, though
+the raw times are about 2 orders of magnitude larger, as expected. In the case of the error plot, as
+observed in other experiments, ABPP outperforms other algorithms; however we see that MU re-
+duces error at a faster rate than HALS in the ﬁrst 30 iterations. At the 30th iteration, the error for
+HALS was still improving at the third decimal, whereas MU’s was improving at the fourth decimal.
+
+20
+
+)
+s
+d
+n
+o
+c
+e
+s
+(
+
+e
+m
+T
+
+i
+
+0.5
+
+1
+
+0
+
+)
+s
+d
+n
+o
+c
+e
+s
+(
+
+e
+m
+T
+
+i
+
+0.6
+
+0.4
+
+0.2
+
+0
+
+)
+s
+d
+n
+o
+c
+e
+s
+(
+
+e
+m
+T
+
+i
+
+0.6
+
+0.4
+
+0.2
+
+0
+
+)
+s
+d
+n
+o
+c
+e
+s
+(
+
+e
+m
+T
+
+i
+
+0.3
+
+0.2
+
+0.1
+
+0
+
+M
+
+U
+
+H A L S
+A B PP
+N aive
+
+10
+
+M
+
+U
+
+H A L S
+A B PP
+N aive
+
+20
+
+M
+
+U
+
+H A L S
+A B PP
+N aive
+
+30
+
+M
+
+U
+
+H A L S
+A B PP
+N aive
+
+40
+
+Low Rank (k)
+
+M
+
+U
+
+H A L S
+A B PP
+N aive
+
+50
+
+(a) Sparse Synthetic
+
+M
+
+U
+
+H A L S
+N aive
+A B PP
+
+10
+
+M
+
+U
+
+H A L S
+N aive
+A B PP
+
+20
+
+M
+
+U
+
+H A L S
+N aive
+A B PP
+
+30
+
+M
+
+U
+
+H A L S
+N aive
+A B PP
+
+40
+
+Low Rank (k)
+
+M
+
+U
+
+H A L S
+N aive
+A B PP
+
+50
+
+(b) Dense Synthetic
+
+M
+
+U
+
+H A L S
+A B PP
+
+10
+
+M
+
+U
+
+H A L S
+A B PP
+
+20
+
+M
+
+U
+
+H A L S
+A B PP
+
+30
+
+M
+
+U
+
+H A L S
+A B PP
+
+40
+
+Low Rank (k)
+
+M
+
+U
+
+H A L S
+A B PP
+
+50
+
+(c) Sparse Real World (webbase-1M)
+
+All-Reduce
+Reduce-Scatter
+All-Gather
+Gram
+LUC
+MM
+
+All-Reduce
+Reduce-Scatter
+All-Gather
+Gram
+LUC
+MM
+
+All-Reduce
+Reduce-Scatter
+All-Gather
+Gram
+LUC
+MM
+
+All-Reduce
+Reduce-Scatter
+All-Gather
+Gram
+LUC
+MM
+
+M
+
+U
+
+H A L S
+A B PP
+
+10
+
+M
+
+U
+
+H A L S
+A B PP
+
+20
+
+M
+
+U
+
+H A L S
+A B PP
+
+30
+
+M
+
+U
+
+H A L S
+A B PP
+
+40
+
+Low Rank (k)
+
+M
+
+U
+
+H A L S
+A B PP
+
+50
+
+(d) Dense Real World (Video)
+
+Fig. 6: Varying low rank k with p = 864, benchmarking per-iteration times.
+
+21
+
+1
+
+0.5
+
+)
+s
+d
+n
+o
+c
+e
+s
+(
+
+e
+m
+T
+
+i
+
+All-Reduce
+Reduce-Scatter
+All-Gather
+Gram
+LUC
+MM
+
+0
+
+1× 1536
+
+8× 192
+
+16× 96
+
+32× 48
+
+48× 32
+
+192× 8
+
+96× 16
+
+1536× 1
+
+Processor Grid
+
+Fig. 7: Tuning processor grid for ABPP on Sparse Synthetic data set with p = 1536 and k = 50.
+
+)
+s
+d
+n
+o
+c
+e
+s
+(
+
+e
+m
+T
+
+i
+
+100
+
+50
+
+0
+
+1
+
+0.99
+
+0.98
+
+0
+5
+=
+k
+
+r
+o
+f
+
+r
+o
+r
+r
+E
+
+.
+l
+e
+R
+
+All-Reduce
+Reduce-Scatter
+All-Gather
+Gram
+LUC
+MM
+
+MU
+HALS
+ABPP
+
+MU
+
+HALS
+
+ABPP
+
+(a) Time
+
+0
+
+10
+
+20
+
+30
+
+Iterations
+
+(b) Error
+
+Fig. 8: NMF comparison on webbase-2001 for k=50 on 1536 processors.
+
+We suspect that over a greater number of iterations the error of HALS could become smaller than
+that of MU, which would be more consistent with other datasets.
+
+6.4. Interpretation of Results
+In this section, we present results from two of the real world datasets. The ﬁrst example shows an
+image processing example of background separation and moving object detection in surveillance
+video data, and the second example shows topic modeling output on the stack exchange text dataset.
+The details of these datasets are presented in Section 6.1.1. While the literature covers more detail
+about ﬁne tuning NMF and diﬀerent NMF variants for higher quality results on these two tasks
+[Zhou and Tao 2011; Bouwmans 2014; Anandkumar et al. 2014; Kim et al. 2015], our main focus
+is to show how quickly we can produce a baseline NMF output and its real world interpretation.
+
+6.4.1. Moving Object Detection of Surveillance Video Data. As explained in the Section 6.1.1, we
+processed 12 minutes video that is captured from a busy junction in Georgia Tech to separate the
+background and moving objects from this video. In Figure 9 we present some sample frames to
+compare the input image with the separated background and moving objects. The background are
+the results of the low rank approximation ˆA = WH output yielded from our MPI-FAUN algorithm
+and the moving objects are given by A − ˆA. We can clearly see the background remains static and
+the moving objects (e.g., cars) are visible.
+
+22
+
+Input Frame(A)
+
+Background (WH)
+
+Moving Object A − WH
+
+Fig. 9: Moving object detection for video data using NMF. Each row of images corresponds to
+a particular frame in the video. The left column is the original frame, the middle column is the
+reconstructed frame from the low-rank approximation (which captures the background), and the
+right column is the diﬀerence (which captures the moving objects).
+
+6.4.2. Topic Modeling of Stack Exchange Data. We downloaded the latest Stack Overﬂow dump
+from its archive on 28-Jul-2016. The details of the preprocessing and the sparse matrix generation
+are explained in Section 6.1.1. We ran our MPI-FAUN algorithm on this dataset, which has nearly
+12 million questions from the Stack Overﬂow site (under Stack Exchange) to produce 50 topics.
+The matrix W can be interpreted as vocabulary-topic distribution and the H as topic-document
+distribution. We took the top 5 words for each of the 50 topics and present them in Table IV.
+Typically a good topic generation satisﬁes properties such as (a) ﬁnding discriminative rather than
+common words – capturing words that can provide some information; (b) ﬁnding diﬀerent topics
+– the similarity between diﬀerent topics should be low; (c) coherence - all the words that belong
+to one topic should be coherent. There are some topic quality metrics [Newman et al. 2010] that
+capture the usefulness of topic generation algorithm. We can see NMF generated generally high-
+quality and coherent topics. Also, each of the topics are from diﬀerent domains such as databases,
+C/C++ programming, Java programming, and web technologies like PHP and HTML.
+
+7. CONCLUSION
+In this paper, we propose a high-performance distributed-memory parallel framework for NMF al-
+gorithms that iteratively update the low rank factors in an alternating fashion. Our parallel algorithm
+is designed to avoid communication overheads and scales well to over 1500 cores. The framework
+is ﬂexible, being (a) expressive enough to leverage many diﬀerent NMF algorithms and (b) eﬃcient
+for both sparse and dense matrices of sizes that span from a few hundreds to hundreds of millions.
+Our open-source software implementation is available for download.
+
+23
+
+word1
+
+refer
+text
+imag
+button
+creat
+string
+width
+app
+ipsum
+node
+0x00
+ﬁle
+function
+int
+public
+return
+info
+error
+set
+case
+method
+href
+end
+debug
+fals
+
+Top Keywords from Topics 1-25
+word4
+word3
+
+word2
+
+word5
+
+word1
+
+Top Keywords from Topics 26-50
+word4
+word3
+word2
+
+undeﬁn
+ﬁeld
+src
+click
+bean
+static
+height
+applic
+lorem
+list
+0xﬀ
+directori
+call
+char
+overrid
+param
+thread
+syntax
+properti
+break
+call
+nofollow
+def
+request
+boolean
+
+const
+box
+descript
+event
+add
+ﬁnal
+color
+servic
+dolor
+root
+byte
+read
+event
+const
+virtual
+result
+start
+found
+virtual
+switch
+except
+src
+dim
+ﬁlter
+ﬁx
+
+key
+word
+alt=ent
+form
+databas
+catch
+left
+thread
+sit
+err
+0x01
+open
+work
+static
+static
+def
+map
+symbol
+default
+default
+static
+link
+begin
+match
+bool
+
+compil
+static
+size
+add
+except
+url
+display
+work
+amet
+element
+0xc0
+upload
+variabl
+doubl
+extend
+boolean
+servic
+fail
+updat
+cout
+todo
+work
+properti
+found
+autoincr
+
+echo
+test
+tabl
+user
+data
+page
+privat
+row
+line
+var
+server
+number
+object
+array
+main
+type
+select
+sourc
+instal
+code
+void
+true
+ﬁnd
+view
+null
+
+type=text
+perform
+key
+email
+json
+load
+static
+column
+import
+map
+connect
+byte
+properti
+element
+thread
+ﬁeld
+item
+target
+version
+work
+overrid
+requir
+project
+control
+default
+
+php
+fail
+queri
+usernam
+store
+content
+ﬁnal
+date
+command
+marker
+client
+size
+json
+valu
+program
+properti
+queri
+except
+packag
+problem
+protect
+boolean
+import
+item
+key
+
+form
+unit
+databas
+login
+read
+url
+import
+cell
+print
+match
+messag
+print
+instanc
+key
+frame
+argument
+join
+java
+err
+chang
+catch
+option
+warn
+overrid
+int(11
+
+word5
+
+result
+result
+insert
+log
+databas
+link
+ﬂoat
+valu
+recent
+url
+request
+input
+list
+index
+cout
+resolv
+list
+fail
+default
+write
+extend
+valid
+referenc
+posit
+primari
+
+Table IV: Top 5 words of 50 topics from Stack Exchange data set.
+
+For solving data mining problems at today’s scale, parallel computation and distributed-memory
+systems are becoming prerequisites. We argue in this paper that by using techniques from high-
+performance computing, the computations for NMF can be performed very eﬃciently. Our frame-
+work allows for the HPC techniques (eﬃcient matrix multiplication) to be separated from the data
+mining techniques (choice of NMF algorithm), and we compare data mining techniques at large
+scale, in terms of data sizes and number of processors. One conclusion we draw from the empirical
+and theoretical observations is that the extra per-iteration cost of ABPP over alternatives like MU
+and HALS decreases as the number of processors p increases, making ABPP more advantageous
+in terms of both quality and performance at larger scales. By reporting time breakdowns that sepa-
+rate local computation from interprocessor communication, we also see that our eﬃcient algorithm
+prevents communication from bottlenecking the overall computation; our comparison with a naive
+approach shows that communication can easily dominate the running time of each iteration.
+
+In future work, we would like to extend MPI-FAUN algorithm to dense and sparse tensors, com-
+puting the CANDECOMP/PARAFAC decomposition in parallel with non-negativity constraints on
+the factor matrices. We plan on extending our software to include more NMF algorithms that ﬁt the
+AU-NMF framework; these can be used for both matrices and tensors. We would also like to ex-
+plore more intelligent distributions of sparse matrices: while our 2D distribution is based on evenly
+dividing rows and columns, it does not necessarily load balance the nonzeros of the matrix, which
+can lead to load imbalance in matrix multiplications. We are interested in using graph and hyper-
+
+24
+
+graph partitioning techniques to load balance the memory and computation while at the same time
+reducing communication costs as much as possible.
+
+ACKNOWLEDGMENTS
+
+This manuscript has been co-authored by UT-Battelle, LLC under Contract No. DE-AC05-00OR22725 with
+the U.S. Department of Energy. This project was partially funded by the Laboratory Director’s Research and
+Development fund. This research used resources of the Oak Ridge Leadership Computing Facility at the Oak
+Ridge National Laboratory, which is supported by the Oﬃce of Science of the U.S. Department of Energy.
+
+Also, partial funding for this work was provided by AFOSR Grant FA9550-13-1-0100, National Sci-
+ence Foundation (NSF) grants IIS-1348152 and ACI-1338745, Defense Advanced Research Projects Agency
+(DARPA) XDATA program grant FA8750-12-2-0309.
+
+The United States Government retains and the publisher, by accepting the article for publication, acknowl-
+edges that the United States Government retains a non-exclusive, paid-up, irrevocable, world-wide license to
+publish or reproduce the published form of this manuscript, or allow others to do so, for United States Govern-
+ment purposes. The Department of Energy will provide public access to these results of federally sponsored re-
+search in accordance with the DOE Public Access Plan (http://energy.gov/downloads/doepublic-access-plan).
+Any opinions, ﬁndings and conclusions or recommendations expressed in this material are those of the
+
+authors and do not necessarily reﬂect the views of the USDOE, NERSC, AFOSR, NSF or DARPA.
+
+REFERENCES
+
+Animashree Anandkumar, Rong Ge, Daniel Hsu, Sham M Kakade, and Matus Telgarsky. 2014. Tensor decompositions for
+
+learning latent variable models. Journal of Machine Learning Research 15, 1 (2014), 2773–2832.
+
+Grey Ballard, Alex Druinsky, Nicholas Knight, and Oded Schwartz. 2015. Brief Announcement: Hypergraph Partitioning
+for Parallel Sparse Matrix-Matrix Multiplication. In Proceedings of SPAA. 86–88. http://doi.acm.org/10.1145/2755573.
+2755613
+
+P. Boldi and S. Vigna. 2004. The Webgraph Framework I: Compression Techniques. In Proceedings of the (WWW ’04). New
+
+York, NY, USA, 595–602. http://doi.acm.org/10.1145/988672.988752
+
+Thierry Bouwmans. 2014. Traditional and recent approaches in background modeling for foreground detection: An overview.
+
+Computer Science Review 11-12 (2014), 31 – 66. DOI:http://dx.doi.org/10.1016/j.cosrev.2014.04.001
+
+Thierry Bouwmans, Andrews Sobral, Sajid Javed, Soon Ki Jung, and El-Hadi Zahzah. 2015. Decomposition into low-rank
+plus additive matrices for background/foreground separation: A review for a comparative evaluation with a large-scale
+dataset. arXiv preprint arXiv:1511.01245 (2015).
+
+E. Chan, M. Heimlich, A. Purkayastha, and R. van de Geijn. 2007. Collective communication: theory, practice, and expe-
+rience. Concurrency and Computation: Practice and Experience 19, 13 (2007), 1749–1783. http://dx.doi.org/10.1002/
+cpe.1206
+
+Andrzej Cichocki and Phan Anh-Huy. 2009. Fast local algorithms for large scale nonnegative matrix and tensor factor-
+izations. IEICE Transactions on Fundamentals of Electronics, Communications and Computer Sciences 92, 3 (2009),
+708–721.
+
+Andrzej Cichocki, Rafal Zdunek, Anh Huy Phan, and Shun-ichi Amari. 2009. Nonnegative matrix and tensor factorizations:
+
+applications to exploratory multi-way data analysis and blind source separation. Wiley.
+
+Timothy A. Davis and Yifan Hu. 2011. The University of Florida Sparse Matrix Collection. ACM Trans. Math. Softw. 38, 1,
+
+Article 1 (Dec. 2011), 25 pages. DOI:http://dx.doi.org/10.1145/2049662.2049663
+
+J. Demmel, D. Eliahu, A. Fox, S. Kamil, B. Lipshitz, O. Schwartz, and O. Spillinger. 2013. Communication-Optimal Parallel
+Recursive Rectangular Matrix Multiplication. In Proceedings of IPDPS. 261–272. http://dx.doi.org/10.1109/IPDPS.
+2013.80
+
+James P. Fairbanks, Ramakrishnan Kannan, Haesun Park, and David A. Bader. 2015. Behavioral clusters in dynamic graphs.
+
+Parallel Comput. 47 (2015), 38–50. http://dx.doi.org/10.1016/j.parco.2015.03.002
+
+Christos Faloutsos, Alex Beutel, Eric P. Xing, Evangelos E. Papalexakis, Abhimanu Kumar, and Partha Pratim Talukdar.
+2014. Flexi-FaCT: Scalable Flexible Factorization of Coupled Tensors on Hadoop. In Proceedings of the SDM. 109–
+117. http://epubs.siam.org/doi/abs/10.1137/1.9781611973440.13
+
+Richard Fujimoto, Angshuman Guin, Michael Hunter, Haesun Park, Gaurav Kanitkar, Ramakrishnan Kannan, Michael Mil-
+holen, SaBra Neal, and Philip Pecher. 2014. A Dynamic Data Driven Application System for Vehicle Tracking. Procedia
+Computer Science 29 (2014), 1203–1215. http://dx.doi.org/10.1016/j.procs.2014.05.108
+
+Rainer Gemulla, Erik Nijkamp, Peter J Haas, and Yannis Sismanis. 2011. Large-scale matrix factorization with distributed
+stochastic gradient descent. In Proceedings of the KDD. ACM, 69–77. http://dx.doi.org/10.1145/2020408.2020426
+David Grove, Josh Milthorpe, and Olivier Tardieu. 2014. Supporting Array Programming in X10. In Proceedings of ACM
+SIGPLAN International Workshop on Libraries, Languages, and Compilers for Array Programming (ARRAY’14). Arti-
+cle 38, 6 pages. http://doi.acm.org/10.1145/2627373.2627380
+
+25
+
+N. Guan, D. Tao, Z. Luo, and B. Yuan. 2012. NeNMF: An Optimal Gradient Method for Nonnega-
+IEEE Transactions on Signal Processing 60, 6 (June 2012), 2882–2898.
+
+tive Matrix Factorization.
+DOI:http://dx.doi.org/10.1109/TSP.2012.2190406
+
+Ngoc-Diep Ho, Paul Van Dooren, and Vincent D. Blondel. 2008. Descent methods for Nonnegative Matrix Factorization.
+
+Patrik O Hoyer. 2004. Non-negative matrix factorization with sparseness constraints. JMLR 5 (2004), 1457–1469. www.jmlr.
+
+CoRR abs/0801.3199 (2008).
+
+org/papers/volume5/hoyer04a/hoyer04a.pdf
+
+Ramakrishnan Kannan, Grey Ballard, and Haesun Park. 2016. A High-performance Parallel Algorithm for Nonnegative
+Matrix Factorization. In Proceedings of the 21st ACM SIGPLAN Symposium on Principles and Practice of Parallel
+Programming (PPoPP ’16). ACM, New York, NY, USA, 9:1–9:11. http://doi.acm.org/10.1145/2851141.2851152
+Oguz Kaya and Bora Uc¸ar. 2015. Scalable Sparse Tensor Decompositions in Distributed Memory Systems. In Proceedings
+
+of SC. ACM, Article 77, 11 pages. http://doi.acm.org/10.1145/2807591.2807624
+
+Hannah Kim, Jaegul Choo, Jingu Kim, Chandan K. Reddy, and Haesun Park. 2015. Simultaneous Discovery of Common
+and Discriminative Topics via Joint Nonnegative Matrix Factorization. In Proceedings of the 21th ACM SIGKDD Inter-
+national Conference on Knowledge Discovery and Data Mining, Sydney, NSW, Australia, August 10-13, 2015. 567–576.
+DOI:http://dx.doi.org/10.1145/2783258.2783338
+
+Hyunsoo Kim and Haesun Park. 2007. Sparse non-negative matrix factorizations via alternating non-negativity-constrained
+least squares for microarray data analysis. Bioinformatics 23, 12 (2007), 1495–1502. http://dx.doi.org/10.1093/
+bioinformatics/btm134
+
+Jingu Kim, Yunlong He, and Haesun Park. 2014. Algorithms for nonnegative matrix and tensor factorizations: A uniﬁed
+view based on block coordinate descent framework. Journal of Global Optimization 58, 2 (2014), 285–319. http://dx.
+doi.org/10.1007/s10898-013-0035-4
+
+Jingu Kim and Haesun Park. 2011. Fast nonnegative matrix factorization: An active-set-like method and comparisons. SIAM
+
+Journal on Scientiﬁc Computing 33, 6 (2011), 3261–3281. http://dx.doi.org/10.1137/110821172
+
+Da Kuang, Chris Ding, and Haesun Park. 2012. Symmetric nonnegative matrix factorization for graph clustering. In Pro-
+
+ceedings of SDM. 106–117. http://epubs.siam.org/doi/pdf/10.1137/1.9781611972825.10
+
+Da Kuang, Sangwoon Yun, and Haesun Park. 2013. SymNMF: nonnegative low-rank approximation of a similarity matrix
+for graph clustering. Journal of Global Optimization (2013), 1–30. http://dx.doi.org/10.1007/s10898-014-0247-2
+Ruiqi Liao, Yifan Zhang, Jihong Guan, and Shuigeng Zhou. 2014. CloudNMF: A MapReduce Implementation of Nonneg-
+ative Matrix Factorization for Large-scale Biological Datasets. Genomics, proteomics & bioinformatics 12, 1 (2014),
+48–51. http://dx.doi.org/10.1016/j.gpb.2013.06.001
+
+Chao Liu, Hung-chih Yang, Jinliang Fan, Li-Wei He, and Yi-Min Wang. 2010. Distributed nonnegative matrix factorization
+for web-scale dyadic data analysis on MapReduce. In Proceedings of the WWW. ACM, 681–690. http://dx.doi.org/10.
+1145/1772690.1772760
+
+Yucheng Low, Danny Bickson, Joseph Gonzalez, Carlos Guestrin, Aapo Kyrola, and Joseph M. Hellerstein. 2012. Distributed
+GraphLab: A Framework for Machine Learning and Data Mining in the Cloud. Proc. VLDB Endow. 5, 8 (April 2012),
+716–727. http://dx.doi.org/10.14778/2212351.2212354
+
+Edgardo Mej´ıa-Roa, Daniel Tabas-Madrid, Javier Setoain, Carlos Garc´ıa, Francisco Tirado, and Alberto Pascual-Montano.
+2015. NMF-mGPU: non-negative matrix factorization on multi-GPU systems. BMC bioinformatics 16, 1 (2015), 43.
+http://dx.doi.org/10.1186/s12859-015-0485-4
+
+Xiangrui Meng, Joseph Bradley, Burak Yavuz, Evan Sparks, Shivaram Venkataraman, Davies Liu, Jeremy Freeman, D. B.
+Tsai, Manish Amde, Sean Owen, Doris Xin, Reynold Xin, Michael J. Franklin, Reza Zadeh, Matei Zaharia, and Ameet
+Talwalkar. 2015. MLlib: Machine Learning in Apache Spark. (26 May 2015). http://arxiv.org/abs/1505.06807
+
+David Newman, Jey Han Lau, Karl Grieser, and Timothy Baldwin. 2010. Automatic evaluation of topic coherence. In Human
+Language Technologies: The 2010 Annual Conference of the North American Chapter of the Association for Computa-
+tional Linguistics. Association for Computational Linguistics, 100–108.
+
+V Paul Pauca, Farial Shahnaz, Michael W Berry, and Robert J Plemmons. 2004. Text mining using nonnegative matrix
+
+factorizations. In Proceedings of SDM.
+
+Conrad Sanderson. 2010. Armadillo: An Open Source C++ Linear Algebra Library for Fast Prototyping and Computation-
+
+ally Intensive Experiments. Technical Report. NICTA. http://arma.sourceforge.net/armadillo nicta 2010.pdf
+
+Nadathur Satish, Narayanan Sundaram, Md Mostofa Ali Patwary, Jiwon Seo, Jongsoo Park, M Amber Hassaan, Shubho
+Sengupta, Zhaoming Yin, and Pradeep Dubey. 2014. Navigating the maze of graph analytics frameworks using massive
+graph datasets. In Proceedings of the 2014 ACM SIGMOD international conference on Management of data. ACM,
+979–990.
+
+D. Seung and L. Lee. 2001. Algorithms for non-negative matrix factorization. NIPS 13 (2001), 556–562.
+D. L. Sun and C. F´evotte. 2014. Alternating direction method of multipliers for non-negative matrix factorization with the
+beta-divergence. In 2014 IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP). 6201–
+6205. DOI:http://dx.doi.org/10.1109/ICASSP.2014.6854796
+
+26
+
+Rajeev Thakur, Rolf Rabenseifner, and William Gropp. 2005. Optimization of Collective Communication Operations in
+MPICH. International Journal of High Performance Computing Applications 19, 1 (2005), 49–66. http://hpc.sagepub.
+com/content/19/1/49.abstract
+
+Yu-Xiong Wang and Yu-Jin Zhang. 2013. Nonnegative Matrix Factorization: A Comprehensive Review. TKDE 25, 6 (June
+
+2013), 1336–1353. http://dx.doi.org/10.1109/TKDE.2012.51
+
+Samuel Williams, Leonid Oliker, Richard Vuduc, John Shalf, Katherine Yelick, and James Demmel. 2009. Optimization of
+sparse matrix-vector multiplication on emerging multicore platforms. Parallel Comput. 35, 3 (2009), 178 – 194.
+
+Zhang Xianyi. Last Accessed 03-Dec-2015. OpenBLAS. (Last Accessed 03-Dec-2015). http://www.openblas.net
+Jiangtao Yin, Lixin Gao, and Zhongfei(Mark) Zhang. 2014. Scalable Nonnegative Matrix Factorization with Block-wise
+Updates. In Machine Learning and Knowledge Discovery in Databases (LNCS), Vol. 8726. 337–352. http://dx.doi.org/
+10.1007/978-3-662-44845-8 22
+
+Hyokun Yun, Hsiang-Fu Yu, Cho-Jui Hsieh, SVN Vishwanathan, and Inderjit Dhillon. 2014. NOMAD: Non-locking,
+stOchastic Multi-machine algorithm for Asynchronous and Decentralized matrix completion. Proceedings of the VLDB
+Endowment 7, 11 (2014), 975–986.
+
+Matei Zaharia, Mosharaf Chowdhury, Michael J. Franklin, Scott Shenker, and Ion Stoica. 2010. Spark: Cluster Computing
+with Working Sets. In Proceedings of the 2nd USENIX Conference on Hot Topics in Cloud Computing (HotCloud’10).
+USENIX Association, 10–10. http://dl.acm.org/citation.cfm?id=1863103.1863113
+
+Tianyi Zhou and Dacheng Tao. 2011. Godec: Randomized low-rank & sparse matrix decomposition in noisy case. In Pro-
+
+ceedings of the 28th International Conference on Machine Learning (ICML-11). 33–40.
+
+27
+
