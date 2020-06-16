@@ -1,0 +1,3796 @@
+6
+1
+0
+2
+ 
+r
+p
+A
+ 
+8
+1
+ 
+ 
+]
+L
+M
+
+.
+t
+a
+t
+s
+[
+ 
+ 
+1
+v
+3
+6
+2
+5
+0
+.
+4
+0
+6
+1
+:
+v
+i
+X
+r
+a
+
+Chained Gaussian Processes
+
+Alan D. Saul
+Department of Computer Science
+University of Sheﬃeld
+
+James Hensman
+CHICAS, Faculty of Health and Medicine
+Lancaster University
+
+Aki Vehtari
+Helsinki Institute for Information Technology HIIT
+Department of Computer Science
+Aalto University
+
+Neil D. Lawrence
+Department of Computer Science
+University of Sheﬃeld
+
+alan.saul@sheffield.ac.uk
+
+james.hensman@lancaster.ac.uk
+
+aki.vehtari@aalto.fi
+
+n.lawrence@sheffield.ac.uk
+
+Abstract
+Gaussian process models are ﬂexible, Bayesian non-parametric approaches to regression.
+Properties of multivariate Gaussians mean that they can be combined linearly in the manner
+of additive models and via a link function (like in generalized linear models) to handle
+non-Gaussian data. However, the link function formalism is restrictive, link functions
+are always invertible and must convert a parameter of interest to a linear combination
+of the underlying processes. There are many likelihoods and models where a non-linear
+combination is more appropriate. We term these more general models Chained Gaussian
+Processes: the transformation of the GPs to the likelihood parameters will not generally
+be invertible, and that implies that linearisation would only be possible with multiple
+(localized) links, i.e. a chain. We develop an approximate inference procedure for Chained
+GPs that is scalable and applicable to any factorized likelihood. We demonstrate the
+approximation on a range of likelihood functions.
+
+1. Introduction
+
+Gaussian process models are ﬂexible distributions that can provide priors over non linear
+functions. They rely on properties of the multivariate Gaussian for their tractability
+and their non-parametric nature.
+In particular, the sum of two functions, drawn from
+a Gaussian process is also given by a Gaussian process. Mathematically, if f ∼ N (µf , kf )
+and g ∼ N (µg, kf ) and we deﬁne y = g + f then properties of multivariate Gaussian give
+us that y ∼ N (µf + µg, kf + kg) where µf and µg are deterministic functions of a single
+input, kf and kg are deterministic, positive semi deﬁnite functions of two inputs and y, g
+and f are stochastic processes.
+
+This elementary property of the Gaussian process is the foundation of much of its
+It makes additive models trivial, and means we can easily combine any process
+power.
+with Gaussian noise. Naturally, it can be applied recursively, and covariance functions
+
+1
+
+can be designed to reﬂect the underlying structure of the problem at hand (e.g. Hensman
+et al. (2013b) uses additive structure to account for variation in replicate behavior in gene
+expression).
+
+In practice observations are often non Gaussian. In response, statistics has developed
+the ﬁeld of generalized linear models (Nelder and Wedderburn, 1972). In a generalized linear
+model a link function is used to connect the mean function of the Gaussian process with
+the mean function of another distribution of interest. For example, the log link can be used
+to relate the rate in a Poisson distribution with our GP, log λ = f + g. Or for classiﬁcation
+the logistic distribution can be used to represent the mean probability of positive outcome,
+log p
+
+1−p = f + g.
+Writing models in terms of the link function captures the linear nature of the underlying
+model, but it is somewhat against the probabilistic approach to modeling where we consider
+the generative model of our data. While there’s nothing wrong with this relationship
+mathematically, when we consider the generative model we never apply the link function
+directly, we consider the inverse link or transformation function. For the log link this turns
+into the exponential, λ = exp(f + g). Writing the model in this form emphasizes the
+importance that the transformation function has on the generative model (see e.g. work on
+warped GPs (Snelson et al., 2004)). The log link implies a multiplicative combination of
+f and g, λ = exp(f + g) = exp(f ) exp(g), but in some cases we might wish to consider
+an additive model, λ = exp(f ) + exp(g). Such a model no longer falls within the class
+of generalized linear models as there is no link function that renders the two underlying
+In this paper we address this issue and use variational
+processes additive Gaussian.
+approximations to develop a framework for non-linear combination of the latent processes.
+Because these models cannot be written in the form a single link function we call this
+approach “Chained Gaussian Processes”.
+
+In this paper we are interested in performing variational inference when we have input-
+dependent likelihood parameters. We will focus on the case when where the likelihood
+contains two latent parameters, though the model is general enough to handle more.
+Parameters of interest could be a latent mean which we wish to infer, a shape parameter
+for determining the shape of the tails, amongst other things. We will focus on the cases
+where we have two such latent parameters but propose methods for extending this further.
+We will focus on likelihoods p(y|f , g) that depend on two latent functions, f ∼
+N (f |µf , f (x)), g ∼ N (g|µg, g(x)). If this noise distribution is a Gaussian then we have two
+special cases, with g(x) = σ2 we have a Gaussian process with the conjugate homogeneous
+Gaussian likelihood. With g(x) = eg(x) we obtain a model for a heteroscedastic Gaussian
+process (Lazaro-Gredilla and Titsias, 2011).
+
+A range of other noise models require multiple parameters to be learnt. Traditionally
+within the Gaussian process literature MAP solutions are used, or alternatively these
+parameters are integrated out approximately (Rue et al., 2009). In this work we accept
+that these parameters may change as a function of the input space, and look at inferring
+posterior Gaussian process functions for these parameters. We do so in a scalable way
+with sparse variational methods, with the capability of using stochastic gradients during
+inference. We believe scalability is essential as parameters may only become well determined
+as the number of observations grow large. We show results with a number of diﬀerent noise
+models
+
+2
+
+We will ﬁrst introduce notation, and review previous work on heteroscedastic Gaussian
+processes. Then, we show how to elegantly extend this idea into a more scalable and
+general framework, allowing a huge number of likelihoods to utilise multiple input dependent
+processes.
+
+2. Background
+
+Assume we have access to a training dataset of n input-output observations {(xi, yi)}n
+i=1,
+yi is assumed to be a noisy realisation of an underlying latent function f = f (x), i.e.
+yi = f (xi) + (cid:15)i. For a Gaussian likelihood (cid:15)i ∼ N (cid:0)µ, σ2(cid:1), xi ∈ Rq and yi ∈ R. Normally the
+mean of the likelihood is assumed to be input dependent and given a GP prior µ = fi = f (xi)
+where f (x) ∼ GP(µf , kg(x, x(cid:48))), and σ is ﬁxed at an optimal point. In this case the integrals
+required to infer a posterior, p(f |y), are tractable.
+
+One extension of this model is the heteroscedastic GP regression model (Goldberg
+et al., 1998; Lazaro-Gredilla and Titsias, 2011), where the noise variance σ is dependent on
+the input. The noise variance can be assigned a log GP prior, yi ∼ N (cid:0)f (xi), eg(xi)(cid:1),
+where g(x) = GP(µg, kg(x, x(cid:48))),
+i.e. a log link function is used. Unfortunately this
+generalization of the original Gaussian process model is not analytically tractable and
+requires an approximation to be made.
+Suggested approximations include MCMC
+(Goldberg et al., 1998), variational inference (Lazaro-Gredilla and Titsias, 2011), Laplace
+approximation (Vanhatalo et al., 2013) and expectation propagation (Hern´andez-Lobato
+et al., 2014) (EP).
+
+Another generalization of the standard GP is to vary the scale of the process as a
+function of the inputs. Adams and Stegle (2008) suggest a log GP prior for the scale of
+the process giving rise to non-parametric non-stationarity in the model. Turner and Sahani
+(2011) took a related approach to develop probabilistic amplitude demodulation, here the
+amplitude (or scale) of the process was given by a Gaussian process with a link function
+given by σ = log(exp(f ) − 1). Finally Tolvanen et al. (2014) assign both the noise variance
+and the scale a log GP prior.
+
+Both these two variations on Gaussian process regression combine processes in a non-
+linear way within a Gaussian likelihood, but the idea may be further generalized to systems
+that deal with non-Gaussian observation noise.
+
+In this paper we describe a general approach to combining processes in a non-linear
+way. We assume that the likelihood factorizes across the data, but is a general non-
+linear function of b input dependent latent functions. Our main focus will be examples
+of likelihoods with b = 2, f (xi) and g(xi), such that, p(y|f (xi), g(xi)), though the ideas can
+all be generalized to b > 2. Previous work in this domain include the use of the Laplace
+approximation (Vanhatalo et al., 2013), however this method scales poorly, O(b3n3) and so
+isn’t applicable to datasets of a moderate size.
+
+To render the model tractable we extend recent advances in large scale variational
+inference approaches to GPs (Hensman et al., 2013a). With non-Gaussian likelihoods
+restrictions on the latent function values may diﬀer, and a non-linear transformation of
+the latent function, g ∈ Rq may be required. The inference approach builds on work
+by Hensman et al. (2015), that in turn builds on the variational inference method proposed
+by Opper and Archambeau (2009).
+
+3
+
+In other work (Nguyen and Bonilla, 2014) mixtures of Gaussian latent functions have
+also been applied for non-Gaussian likelihoods, we expect such mixture distributions would
+also be applicable to our case. More recently this approach (Dezfouli and Bonilla, 2015)
+was extended to provide scalability utilising sparse methods similar to this work.
+
+3. Chained Gaussian Processes
+
+Our approach to approximate inference in chained GPs builds on previous work in inducing
+point methods for sparse approximations of GPs (Snelson and Ghahramani, 2006; Titsias,
+2009; Hensman et al., 2015, 2013a). Inducing point methods introduce m ‘pseudo inputs’,
+known as inducing inputs, at locations Z = {zi}m
+i=1. The corresponding function values are
+given by ui = f (zi). These inducing inputs points do not eﬀect the marginal of f because
+
+(cid:90)
+
+p(f |X, Z) =
+
+p(f |u, X)p(u|Z)du,
+
+(cid:1). The
+where p(u|Z) = N (u|0, Kuu) and p(f |u, X) = N (cid:0)f |KfuK−1
+part-covariances given by Kfu = kf (X, Z) where X is the locations of f , deﬁne the
+relationship between inducing variables and the latent function of interest, f . The
+likelihood is p(y) = (cid:82) p(y|f )p(f |u)p(u)df du. To avoid O(n3) computation
+marginal
+complexity Titsias (2009) invokes Jensen’s inequality to obtain a lower bound on the
+marginal
+This
+approximation also forms the basis of our approach for non-Gaussian models.
+
+likelihood log p(y), an approach known as variational compression.
+
+uuu, Kﬀ − KfuK−1
+
+uuKuf
+
+3.1 Variational Bound
+
+For non-Gaussian likelihoods, even with a single latent process the marginal likelihood,
+p(y), is not tractable, but it can be lower bounded variationally. We assume that the latent
+functions, f = f (x) and g = g(x) are a priori independent
+
+p(f , g|uf , ug) = p(f |uf )p(g|ug).
+
+(1)
+
+The derivation of the variational lower bound then follows a similar form as (Hensman et al.,
+2015) with the extension to multiple latent functions. We begin by writing down our log
+marginal likelihood,
+
+log p(y) = log
+
+p(y|f , g)p(f , g|uf , ug)p(uf )p(ug)df dg duf dug
+
+(cid:90)
+
+then introduce a variational approximation to the posterior,
+
+p(f , g, ug, uf |y) ≈ p(f |uf )p(g|ug)q(uf )q(ug),
+
+(2)
+
+where we have made the additional assumption that the latent functions factorize in the
+variational posterior.
+
+Using Jensen’s inequality and the factorization of the latent functions (1), a variational
+
+lower bound can then be obtained for the log marginal likelihood,
+
+log p(y) = log
+
+p(y|f , g)p(f |uf )p(g|ug)p(uf )p(ug)df dg duf dug
+
+(cid:90)
+
+(cid:90)
+
+≥
+
+q(f )q(g) log p(y|f , g)df dg − KL (q(uf ) (cid:107) p(uf )) − KL (q(ug) (cid:107) p(ug)) ,
+
+(3)
+
+4
+
+where q(f ) = (cid:82) p(f |uf )q(uf )duf and q(g) = (cid:82) p(g|ug)q(ug)dug, and KL (p(a) (cid:107) p(b))
+denotes the KL divergence between the two distributions. For Gaussian process priors
+on the latent functions we recover
+
+p(f |uf ) = N
+
+f |Kfuf K−1
+
+uf uf
+
+uf , Kﬀ − Qﬀ
+
+p(g|ug) = N
+
+g|Kgug K−1
+
+ugug ug, Kgg − Qgg
+
+(cid:17)
+
+(cid:17)
+
+,
+
+(cid:16)
+
+(cid:16)
+
+Qﬀ = Kfuf K−1
+Qgg = Kgug K−1
+
+Kuf f
+uf uf
+ugug Kugg.
+
+where
+
+where
+
+Note that covariances for f and g, can diﬀer though their inducing input locations, Z, are
+shared.
+
+We take q(uf ) and q(ug) to be Gaussian distributions with variational parameters,
+q(uf ) = N (uf |µf , Sf ) and q(ug) = N (ug|µg, Sg). Using the properties of multivariate
+Gaussians this results in tractable integrals for q(f ) and q(g),
+
+q(f ) = N
+
+f |Kfuf K−1
+
+q(g) = N
+
+g|Kgug K−1
+
+(cid:17)
+
+µf , Kﬀ + ˆQﬀ
+
+uf uf
+ugug µg, Kgg + ˆQgg
+
+(cid:17)
+
+,
+
+(cid:16)
+
+(cid:16)
+
+(4)
+
+(5)
+
+ˆQﬀ = Kfuf K−1
+ˆQgg = Kgug K−1
+
+uf uf (Sf − Kuf uf )K−1
+ugug (Sg − Kugug )K−1
+
+Kuf f
+uf uf
+ugug Kugg.
+
+The KL terms in (3) and their derivative can be computed in closed form and are
+inexpensive as they are divergence between Gaussians. However, an intractable integral,
+(cid:82) q(f )q(g) log p(y|f , g)df dg, still remains. Since the likelihood factorizes,
+
+p(y|f , g) =
+
+p(yi|fi, gi),
+
+(cid:89)n
+
+i=1
+
+the problematic integral in (3) also factorizes across data points, allowing us to use stochastic
+variational inference (Hensman et al., 2013a; Hoﬀman et al., 2013),
+
+(cid:90)
+
+(cid:90)
+
+q(f )q(g) log p(y|f , g)df dg =
+
+q(f )q(g) log
+
+p(yi|fi, gi)df dg
+
+n
+(cid:89)
+
+i=1
+
+(cid:90)
+
+(cid:88)n
+
+=
+
+i=1
+
+q(fi)q(gi) log p(yi|fi, gi)dfi dgi.
+
+(6)
+
+We are then left with n, b dimensional Gaussian integrals over the log-likelihood,
+
+log p(y) ≥
+
+q(fi)q(gi) log p(yi|fi, gi)dfi dgi
+
+(cid:88)n
+
+(cid:90)
+
+i=1
+
+− KL (q(uf ) (cid:107) p(uf )) − KL (q(ug) (cid:107) p(ug)) .
+
+(7)
+
+5
+
+The bound will also hold for any additional number of latent functions by assuming they
+all factorize in the variational posterior.
+
+The bound decomposes into a sum over data, as such the n input points can be
+visited in mini-batches, and the gradients and log-likelihood of each mini-batch can be
+subsequently summed, this operation can be also be parallelized (Gal et al., 2014). A single
+mini-batch can instead be visited obtaining a stochastic gradient for use in a stochastic
+optimization (Hensman et al., 2013a; Hoﬀman et al., 2013). This provides the ability to
+scale to huge datasets.
+
+If the likelihood is Gaussian these integrals are analytic (Lazaro-Gredilla and Titsias,
+2011), though the noise variance must be constrained positive via a transformation of the
+latent function, e.g an exponent. In this case,
+
+(cid:90)
+
+(cid:90)
+
+=
+
+q(fi)q(gi) log p(yi|fi, gi)dfi dgi
+
+N (cid:0)fi|mf i, vf i
+
+(cid:1) N (cid:0)gi|mgi, vgi
+
+(cid:1) log N (yi|fi, egi)
+
+(cid:16)
+
+= log N
+
+yi|mf i, emg i−
+
+(cid:17)
+
+vg i
+2
+
+−
+
+vgi
+4
+
+−
+
+vf ie−mg i+
+2
+
+vg i
+2
+
+mf = Kfuf K−1
+mg = Kgug K−1
+
+uf uf
+ugug µg
+
+µf
+
+vf = Kﬀ + ˆQﬀ
+vg = Kgg + ˆQgg.
+
+where we deﬁne
+
+vf i denotes the ith diagonal element of the matrix with vf along its diagonal.
+It may
+be possible in this Gaussian case to ﬁnd the optimal q(f ) such that the bound collapses
+to that of Lazaro-Gredilla and Titsias (2011), however this would not allow for stochastic
+optimization. Here we arrive at a sparse extension, where a Gaussian distribution is assumed
+for the posterior over of f , where as previously q(f ) has been collapsed out and could take
+any form. This sparse extension provides the ability to scale to much larger datasets whilst
+maintaining a similar variational lower bound.
+
+The model is however not restricted to heteroscedastic Gaussian likelihoods.
+
+If the
+integral (6) and its gradients can be computed in an unbiased way, any factorizing likelihood
+can be used. This can be seen as a chained Gaussian process. There is no single link function
+that allows the speciﬁcation of this model under the modelling assumptions of a generalised
+linear model. An example that will be revisited in the experiments is the beta distribution,
+yi ∼ B(α, β) where α, β ∈ R+ and observations yi ∈ (0, 1), xi ∈ Rq. Since α, β must
+maintain positiveness, then can be assigned log GP priors,
+
+yi ∼ B(α = ef (xi), β = eg(xi)),
+
+(8)
+
+where f (x) = GP(µf , kf (x, x(cid:48))) and g(x) = GP(µg, kg(x, x(cid:48))). This allows the shape of the
+beta distribution to change over time, see Supplementary Material and section 4.2.2 for an
+example plots.
+
+Using the variational bound above, all that is required is to perform a series of n two
+dimensional quadratures, for both the log-likelihood and its gradients, a relatively simple
+
+6
+
+task and computationally feasible when looking at modest batch sizes. From this example
+the power and adaptability of the method should be apparent.
+
+A major strength of this method is that performing this integral is the only requirement
+to implement a new noise model, similarly to (Nguyen and Bonilla, 2014; Hensman et al.,
+2015). Further, since a stochastic optimizer is used the gradients do not need to be exact.
+Our implementations can use oﬀ the shelf stochastic optimizer, such as Adagrad (Duchi
+et al., 2011) or RMSProp (Tieleman and Hinton, 2012). Further, for many likelihoods
+some portion of these integrals is analytically tractable, reducing the variance introduced
+by numerical integration. See supplementary material for an investigation.
+
+3.2 Posterior and Predictive Distributions
+
+Following from (2) it is clear that when the variational lower bound bound has been
+maximised with respect to the variational parameters, p(uf |y) ≈ q(uf ) and p(ug|y) ≈
+q(ug). The posterior for p(f ∗|y∗) under this approximation is
+
+p(f ∗|y∗) =
+
+p(f ∗|x, f )p(f |uf )p(uf |y)df duf
+
+(cid:90)
+
+(cid:90)
+
+(cid:90)
+
+=
+
+≈
+
+p(f ∗|uf )p(uf |y)duf
+
+p(f ∗|uf )q(uf )duf = q(f ∗),
+
+where q(f ∗) and q(g∗) become similar to (4).
+
+data pair {(x∗
+
+i , y∗
+
+i )}n∗
+
+i=1 follows as
+
+Finally, treating each prediction point independently, the predictive distribution for each
+
+p(y∗
+
+i |yi, xi) =
+
+p(y∗
+
+i |f ∗
+
+i , g∗
+
+i )q(f ∗
+
+i )q(g∗
+
+i )df ∗
+
+i dg∗
+i .
+
+(cid:90)
+
+This integral is analytically intractable in the general case, but again can be computed using
+a series of two dimensional quadrature or simple Monte Carlo sampling.
+
+4. Experiments
+
+To evaluate the eﬀectiveness of our chained GP approximations we consider a range of
+real and synthetic datasets. The performance measure used throughout is the negative
+log predictive density (NLPD) on held out data, table 1.1 The results for mean absolute
+error (MAE) (Supplementary Material) show comparable results between methods. 5-fold
+cross-validation is used throughout. The non-linear optimization of (hyper-) parameters is
+subject to local minima, as such multiple runs were performed on each fold with a range of
+parameter initialisations. The solution obtaining the highest log-likelihood on the training
+data of each fold was retained. Automatic relevance determination exponentiated quadratic
+kernels are used throughout allowing one lengthscale per input dimension, in addition to a
+bias kernel.2.. In all experiments 100 inducing points were used and their locations were
+
+1. Data used in the experiments can be downloaded via the pods package: https://github.com/sods/ods
+2. Code is publically available at: https://github.com/SheﬃeldML/ChainedGP
+
+7
+
+Data
+
+NLPD
+
+elevators1000
+elevators10000
+motorCorrupt
+boston
+
+G
+0.39 ± 0.13
+0.07 ± 0.01
+2.04 ± 0.06
+0.27 ± 0.02
+
+CHG
+0.1 ± 0.01
+0.03 ± 0.02
+1.79 ± 0.05
+0.09 ± 0.01
+
+Lt
+NA
+NA
+1.73 ± 0.05
+0.23 ± 0.02
+
+Vt
+NA
+NA
+2.52 ± 0.09
+0.19 ± 0.02
+
+CHt
+NA
+NA
+1.7 ± 0.05
+0.09 ± 0.02
+
+Table 1: Results NLPD over 5 cross-validation folds with 10 replicates each. Models shown
+in comparison are sparse Gaussian (G), chained heteroscedastic Gaussian (CHG), Student-t
+Laplace approximation (Lt), Student-t VB approximation (Vt), and chained heteroscedastic
+Student-t (CHt).
+
+optimized with respect to the lower bound of the log marginal likelihood following (Titsias,
+2009).
+
+4.1 Heteroscedastic Gaussian
+
+In our introduction we related our ideas to heteroscedastic GPs. We will ﬁrst use
+our approximations to show how the addition of input dependent noise to a Gaussian
+process regression model eﬀects performance, compared with a sparse Gaussian process
+model (Titsias, 2009). Performance is shown to improve as more data is provided as would
+be expected, making it clear that both models can scale with data, though the new model
+is more ﬂexible when handling the distributions tails. A sparse Gaussian process with
+Gaussian likelihood is chosen in these experiments as a baseline, as a non-sparse Gaussian
+process cannot scale to the size of all the experiments.
+
+The Elevator1000 uses a subset of 1, 000 of the Elevator dataset .
+
+In this data the
+heteroscedastic model (Chained GP) oﬀers considerable improvement in terms of negative
+log predictive density (NLPD) over the sparse GP (Table 1. Our second experiment with the
+Gaussian likelihood, Elevator10000, examines scaling of the model. Here a subset of 10, 000
+data points of the Elevator dataset are used, and performance is improved as expected.
+Previous models for heteroscedastic Gaussian process models cannot scale, the chained GP
+can implement the heteroscedastic setting and scale.
+
+4.2 Non-Gaussian Heteroscedastic likelihoods
+
+One of the major strengths of the approximation over pure scalability, is the ability to use
+more general non-Gaussian likelihoods. In this section we will investigate this ﬂexibility by
+performing inference with non-standard likelihoods. This allows models to be speciﬁed that
+correspond to the modellers belief about the data in a ﬂexible way.
+
+We ﬁrst investigate an extension of the Student-t likelihood that endows it with an
+
+input-dependent scale parameter. This is straightforward in the chained GP paradigm.
+
+The corrupt motorcycle dataset is an artiﬁcial modiﬁcation to the benchmark motorcycle
+dataset (Silverman, 1985) and shows the models capabilities more clearly. The original
+motorcycle dataset has had 25 of its data randomly corrupted with Gaussian noise of
+N (0, 3), simulating spurious accelerometer readings. We hope that our method will be
+robust and ignore such outlying values. An input-dependent mean, µ, is set alongside an
+
+8
+
+4
+
+3
+
+2
+
+1
+
+G
+
+Lt
+
+CHG CHt
+
+Vt
+
+(a) NLPD motor
+
+G
+
+Lt
+
+CHG CHt
+
+Vt
+
+(b) NLPD Boston
+
+Figure 1: a) NLPD on corrupt motorcycle dataset. b) NLPD of Boston housing dataset.
+In NLPD lower is better, models shown in comparison are sparse Gaussian (G), Student-
+t Laplace approximation (Lt), Student-t VB approximation (Vt), chained heteroscedastic
+Gaussian (CHG), and chained heteroscedastic Student-t (CHt). Boxplots show the variation
+over 5 folds.
+
+input dependent scale which must be positive, σ. A constant degrees of freedom parameter
+ν, is initalized to 4.0 and then is optimized to its MAP solution.
+
+yi ∼ St(µ = f (xi), σ2 = eg(xi), ν)
+
+(9)
+
+likelihood,
+
+where f (x) = GP(µf , kf (x, x(cid:48))) and g(x) = GP(µg, kg(x, x(cid:48))).
+This provides
+likelihood. We compare the model
+a heteroscedastic extension to the Student-t
+with a Gaussian process with homogeneous Student-t
+approximated
+variationally (Hensman et al., 2015) and the Laplace approximation. Figure 2 shows
+the improved quality of the error bars with the chained heteroscedastic Student-t model.
+Learning a model with heavy tails allows outliers to be ignored, and so its input dependent
+variance can be collapsed around just points close to the underlying function, which in this
+case is known to be well modelled with a heteroscedastic Gaussian process (Lazaro-Gredilla
+and Titsias, 2011; Goldberg et al., 1998). It is also interesting to note the heteroscedastic
+Gaussian’s performance, although not able to completely ignore outliers the model has learnt
+a very short lengthscale. This renders the prior over the scale parameter independent across
+the data, meaning that the resulting likelihood is more akin to a scale-mixture of Gaussians
+(which endows appropriate robustness characteristics). The main diﬀerence is that the
+scale-mixture is based on a log-Gaussian prior, as opposed to the Student-t which is based
+on an inverse Gamma.
+
+Figure 1 shows the NLPD on the corrupt motorcycle dataset and Boston housing dataset.
+The Boston housing dataset shows the median house prices throughout the Boston area,
+quantiﬁed by 506 data points, with 13 explanatory input variables (Kuß, 2006). We ﬁnd
+that the chained heteroscedastic Gaussian process model already outperforms the Student-t
+model on this dataset, and the additional ability to use heavier tails in the chained Student-t
+is not used. This ability to regress back to an already powerful model is a useful property
+of the chained Student-t model.
+
+0.6
+
+0.4
+
+0.2
+
+0
+
+−0.2
+
+9
+
+Standard Gaussian Process
+
+Heteroscedastic Gaussian
+
+Heteroscedastic Student-t
+
+6
+
+4
+
+2
+
+0
+
+−2
+
+−4
+
+−6
+
+−2
+
+6
+
+4
+
+2
+
+0
+
+−2
+
+−4
+
+−6
+
+−2
+
+6
+
+4
+
+2
+
+0
+
+−2
+
+−4
+
+−6
+
+−2
+
+−1
+
+0
+
+1
+
+2
+
+−1
+
+0
+
+1
+
+2
+
+−1
+
+0
+
+1
+
+2
+
+Figure 2: Corrupted motorcycle dataset, ﬁtted with a Gaussian process model with a
+Gaussian likelihood, a Gaussian process with input dependent noise (heteroscedastic) with
+a Gaussian likelihood, and a Gaussian process with Student-t likelihood, with an input
+dependent shape parameter. The mean is shown in solid and the variance is shown as
+dotted
+
+Figure 3: Twitter sentiment from the UK general election modelled using a heteroscedastic
+beta distribution. The timing of the exit poll is marked and is followed by a night of tweets
+as election counts come in. Other night time periods have a reduced volume of tweets and
+a corresponding increase in sentiment variance. Ticks on the x-axis indicate midnight.
+
+10
+
+Data
+
+leuk
+Surv
+
+NLPD
+
+G
+4.03 ± .08
+5.45 ± .06
+
+LSurv
+1.57 ± .01
+2.52 ± .02
+
+VSurv
+1.57 ± .01
+2.52 ± .02
+
+CHSurv
+1.56 ± .01
+2.16 ± .02
+
+Table 2: Results NLPD over 5 cross-validation folds with 10 replicates each. Models shown
+in comparison are sparse Gaussian (G), survival Laplace approximation (LSurv), survival
+VB approximation (VSurv), chained heteroscedastic survival (CHSurv).
+
+4.2.1 Survival Analysis
+
+Survival analysis focuses on the analysis of time-to-event data. This data arises frequently in
+clinical trials, though it is also commonly found in failure tests within engineering. In these
+settings it is common to observe censoring. Censoring occurs when an event is only observed
+to exist between two times, but no further information is available. For right-censoring, the
+most common type of censoring, the event time T ∈ [t, ∞).
+
+A common model to analyse this type of data is an accelerated failure time model. This
+suggests that the distribution of when an random event, T , may occur, is multiplicatively
+eﬀected by some function of the covariates, f (x), thus accelerating or retarding time; akin
+to notion of dog years.
+In a generalized linear model we may write this as log T =
+log T0 + log f (x), where T is the random variable for failure time of the individual with
+covariates x, and T0 follows a parametric distribution describing a non-accelerated failure
+time.
+
+To account for censoring the cumulative distribution needs to be computable and event
+times are restricted to be positive. A common parametric distribution for T0 that fulﬁlls
+these restrictions is the log-logistic distribution, with the median being some function of
+the covariates, f (x). This however is restrictive as the shape of failure time distribution is
+assumed to be the same for all patients. We relax this assumption by allowing the shape
+parameter of the log-logistic distribution to vary with response to the input,
+
+yi ∼ LL(α = ef (xi), β = eg(xi)),
+
+where f (x) = GP(µf , kf (x, x(cid:48))) and g(x) = GP(µg, kg(x, x(cid:48))). This allows both skewed
+unimodal and exponential shaped distributions for the failure time distribution depending
+on the individual, as shown in Figure 4. Again there is no associated link-function in this
+case, and the model can be modelled as a chained-survival model.
+
+Table 2 shows the models performance a real and synthetic datasets. The leukemia
+dataset (Henderson et al., 2002) contains censored event times for 1043 leukemia patients
+and is known to have non-linear responses certain covariates (Gelman et al., 2013). We ﬁnd
+little advantage from using the chained-survival model, but as usual the model is robust
+such that performance isn’t degraded in this case. We additionally show the results on a
+synthetic dataset where the shape parameter is known to vary with response to the input,
+in this case an increase in performance is seen. See Appendix A.5 for more details on the
+model and synthetic dataset.
+
+11
+
+Figure 4: Resulting model on synthetic survival dataset. Shows variation of median survival
+time and shape of log-logistic distribution, in response to diﬀering covariate information.
+Background colour shows the chained-survivals predictions, coloured dots show ground
+truth. Lower ﬁgures show associated failure time distributions and hazards for two diﬀerent
+synthetic patients. Shapes can be both unimodal or exponential.
+
+12
+
+4.2.2 Twitter Sentiment Analysis in the UK Election
+
+The ﬁnal experiment shows the adaptability of the model even further, on a novel dataset
+and with a novel heteroscedastic model. We consider sentiment in the UK general election,
+focussing on tweets tagged as supporters of the Labour party. We used a sentiment analysis
+tagging system3 to evaluate the positiveness of 105,396 tweets containing hashtags relating
+to recent the major political parties, over the run in to the UK 2015 general election.
+
+We are interested in modeling the distribution of positive sentiment as a function of
+time. The sentiment value is constrained to be to be between zero and one, and we do
+not believe the distribution of tweets through time to be necessarily unimodal. A natural
+likelihood to use in this case is the beta likelihood. This allows us to accommodate bathtub
+shaped distributions, indicating tweets are either extremely positive or extremely negative.
+We then allow the distribution over tweets to be heterogenous throughout time by using
+Gaussian process models for each parameter of the beta distribution,
+
+yi ∼ B(α = ef (xi), β = eg(xi)),
+
+where f (x) = GP(µf , kf (x, x(cid:48))) and g(x) = GP(µg, kg(x, x(cid:48))).
+
+The upper section of Figure 3 shows the data and the probability of each sentiment value
+throughout time. The lower part shows the corresponding mean and variance functions
+induced by the above parameterization. This year’s general election was particularly
+interesting: polls throughout the election showed it to be a close race between the two
+major parties, Conservative and Labour. But at the end of polling an exit poll was released
+that predicted an outright win for the Conservatives. This exit poll proved accurate and
+is associated with a corresponding dip in the sentiment of the tweets. Other interesting
+aspects of the analysis include the reduction in number of tweets during the night and the
+corresponding increase in the variance of our estimates.
+
+4.2.3 Decomposition of Poisson Processes
+
+The intensity, λ(x), of a Poisson process can be modelled as the product of two positive
+latent functions, exp(f (x)) and exp(g(x)), as a generalrised linear model,
+
+log(λ) = f (x) + g(x)
+y ∼ Poisson(λ = exp(f + g) = exp(f (x)) exp(g(x))),
+
+using a log link function.
+
+Instead imagine we form a new process by combining two diﬀerent underlying Poisson
+processes through addition. The superposition property of Poissons means that the resulting
+process is also Poisson with rates given by the sum of the underlying rates.
+
+To model this via a Gaussian process we have to assume that the intensity of the
+resulting Poisson, λ(x) is a sum of two positive functions, which are denoted by exp(f (x))
+and exp(g(x)) respectively,
+
+y ∼ Poisson(λ = exp(f (x)) + exp(g(x))),
+
+(10)
+
+3. Available from https://www.twinword.com/
+
+13
+
+Figure 5: Even with 350 data we can start to see the diﬀerentiation of the addition of
+a long lengthscale positive process and a short lengthscale positive process. Red crosses
+denote observations, dotted lines are the true latent functions generating the data using
+Eq (10), the solid line and associated error bars are the approximate posterior predictions,
+q(f ∗), q(g∗), of the latent processes.
+
+there is no link function representation for this model, it takes the form of a chained-GP.
+
+Focusing purely on the generative model of the data, the lack of an link function does
+not present an issue. Figure 5 shows a simple demonstration of the idea in a simulated data
+set.
+
+Using an additive model for the rate rather than a multiplicative model for counting
+processes has been discussed previously in the context of linear models for survival analysis,
+with promising results Lin and Ying (1995).
+
+To illustrate the model on real data we considered homicide data in Chicago. Taking
+data from http://homicides.redeyechicago.com/ (see also Linderman and Adams (2014)) we
+aggregated data into three months periods by zip code. We considered an additive Poisson
+process with a particular structure for the covariance functions. We constructed a rate of
+the form:
+
+Λ(x, t) = λ1(x)µ1(t) + λ2(x)µ2(t)
+
+where λ1(x) = exp(f1(x)), λ2(x) = exp(g1(x)), µ1(t) = exp(f2(t)) and µ2(t) = exp(g2(t))
+where f1(x), g1(x) are spatial GPs and f2(t) and g2(t) are temporal GPs. The overall rate
+decomposes into two separable rate functions, but the overall rate function is not separable.
+We have a sum of separable ( ´Alvarez et al., 2012) rate functions. This structure allows us
+to decompose the homicide map into separate spatial maps that each evolve at diﬀerent
+time rates. We selected one spatial map with a length scale of 0.04 and one spatial map
+with a length scale of 0.09. The time scales and variances of the temporal rate functions
+were optimized by maximum likelihood. The results are shown in Figure 6. The long
+
+14
+
+Figure 6: Homicide rate maps for Chicago. The short length scale spatial process, λ1(x)
+(above-left) is multiplied in the model by a temporal process, µ1(t) (below-left) which
+ﬂuctuates with passing seasons. Contours of spatial process are plotted as deaths per
+month per zip code area. Error bars on temporal processes are at 5th and 95th percentile.
+The longer length scale spatial process, λ2(x) (above-right) has been modeled with little to
+no ﬂuctuation temporally µ2(t) (below-right).
+
+length scale process hardly ﬂuctuates across time, whereas the short lengthscale process,
+which represents more localized homicide activity, ﬂuctuates across the seasons with scaled
+increases of around 1.25 deaths per month per zip code. This decomposition is possible and
+interpretable due to the structured underlying nature of the GPs inside the chained model.
+
+5. Conclusions
+
+We have introduced “Chained Gaussian Process” models. They allow us to make predictions
+which are based on a non-linear combination of underlying latent functions. This gives a
+far more ﬂexible formalism than the generalized linear models that are classically applied
+in this domain.
+
+15
+
+Chained Gaussian processes are a general formalism and therefore are intractable in the
+base case. We derived an approximation framework that is applicable for any factorized
+likelihood. For the cases we considered, involving two latent functions, the approximation
+made use of two dimensional Gauss-Hermite quadrature. We speculated that when the idea
+is extended to higher numbers of latent functions it may be necessary to resort to Monte
+Carlo sampling.
+
+Our approximation is highly scalable through the use of stochastic variational inference.
+This enables the full range of standard stochastic optimizers to be applied in the framework.
+
+AS was supported by a University of Sheﬃeld, Faculty Scholarship, JH was supported by
+a MRC fellowship. The authors also thank Amazon for a donation of AWS compute time
+and the anonymous reviewers of a previous transcript of this work.
+
+Acknowledgments
+
+References
+
+Ryan Prescott Adams and Oliver Stegle. Gaussian process product models for nonparametric
+nonstationarity. In Proceedings of the 25th International Conference on Machine Learning, pages
+1–8, 2008.
+
+Mauricio ´Alvarez, Lorenzo Rosasco, and Neil D. Lawrence. Kernels for vector-valued functions:
+A review. Foundations and Trends in Machine Learning, 4(3):195–266, 2012. doi: 10.1561/
+2200000036.
+
+Amir Dezfouli and Edwin V Bonilla. Scalable inference for Gaussian process models with black-
+box likelihoods. In C. Cortes, N. D. Lawrence, D. D. Lee, M. Sugiyama, and R. Garnett, editors,
+Advances in Neural Information Processing Systems 28, pages 1414–1422. Curran Associates, Inc.,
+2015.
+
+John Duchi, Elad Hazan, and Yoram Singer. Adaptive subgradient methods for online learning and
+
+stochastic optimization. J. Mach. Learn. Res., 12:2121–2159, July 2011. ISSN 1532-4435.
+
+Yarin Gal, Mark van der Wilk, and Carl E. Rasmussen. Distributed variational inference in
+sparse Gaussian process regression and latent variable models.
+In Zoubin Ghahramani, Max
+Welling, Corinna Cortes, Neil D. Lawrence, and Kilian Q. Weinberger, editors, Advances in Neural
+Information Processing Systems, volume 27, Cambridge, MA, 2014.
+
+Andrew Gelman, John B. Carlin, Hal S. Stern, David B. Dunson, Aki Vehtari, and Donald B. Rubin.
+Bayesian Data Analysis, Third Edition. CRC Press, November 2013. ISBN 9781439840955.
+
+Paul W. Goldberg, Christopher K. I. Williams, and Christopher M. Bishop. Regression with input-
+dependent noise: A Gaussian process treatment. In Michael I. Jordan, Michael J. Kearns, and
+Sara A. Solla, editors, Advances in Neural Information Processing Systems, volume 10, pages
+493–499, Cambridge, MA, 1998. MIT Press.
+
+R. Henderson, S. Shimakura, and Gorst D. Modeling spatial variation in leukemia survival data.
+
+Journal of the American Statistical Association, 97:965–972, 2002.
+
+James Hensman, Nicol´o Fusi, and Neil D. Lawrence. Gaussian processes for big data.
+
+In Ann
+Nicholson and Padhraic Smyth, editors, Uncertainty in Artiﬁcial Intelligence, volume 29. AUAI
+Press, 2013a.
+
+16
+
+James Hensman, Neil D. Lawrence, and Magnus Rattray. Hierarchical Bayesian modelling of gene
+expression time series across irregularly sampled replicates and clusters. BMC Bioinformatics, 14
+(252), 2013b. doi: doi:10.1186/1471-2105-14-252.
+
+James Hensman, Alexander G D G Matthews, and Zoubin Ghahramani. Scalable variational
+In In 18th International Conference on Artiﬁcial Intelligence
+
+Gaussian process classiﬁcation.
+and Statistics, pages 1–9, San Diego, California, USA, May 2015.
+
+Daniel Hern´andez-Lobato, Viktoriia Sharmanska, Kristian Kersting, Christoph H Lampert, and
+Novi Quadrianto. Mind the nuisance: Gaussian process classiﬁcation using privileged noise. In
+Z. Ghahramani, M. Welling, C. Cortes, N.D. Lawrence, and K.Q. Weinberger, editors, Advances
+in Neural Information Processing Systems 27, pages 837–845. Curran Associates, Inc., 2014.
+
+Matthew D. Hoﬀman, David M. Blei, Chong Wang, and John Paisley. Stochastic variational
+
+inference. Journal of Machine Learning Research, 14:1303–1347, 2013.
+
+Pasi Jyl¨anki, Jarno Vanhatalo, and Aki Vehtari. Robust Gaussian process regression with a Student-t
+
+likelihood. J. Mach. Learn. Res., 12:3227–3257, November 2011. ISSN 1532-4435.
+
+D. P. Kingma and M. Welling. Stochastic gradient VB and the variational auto-encoder. In 2nd
+
+International Conference on Learning Representations (ICLR), Banﬀ, 2014.
+
+Malte Kuß. Gaussian Process Models for Robust Regression, Classiﬁcation, and Reinforcement
+
+Learning. PhD thesis, TU Darmstadt, April 2006.
+
+Miguel Lazaro-Gredilla and Michalis Titsias.
+
+Variational heteroscedastic Gaussian process
+In Lise Getoor and Tobias Scheﬀer, editors, Proceedings of the 28th International
+regression.
+Conference on Machine Learning (ICML-11), ICML ’11, pages 841–848, New York, NY, USA,
+June 2011. ACM. ISBN 978-1-4503-0619-5.
+
+D. Y. Lin and Zhiliang Ying. Semiparametric analysis of general additive-multiplicative hazard
+doi:
+
+models for counting processes. The Annals of Statistics, 23(5):1712–1734, 10 1995.
+10.1214/aos/1176324320.
+
+Scott Linderman and Ryan Adams. Discovering latent network structure in point process data. In
+
+ICML, 2014.
+
+John Nelder and Robert Wedderburn. Generalized linear models. Journal of the Royal Statistical
+
+Society, A, 135(3), 1972. doi: 10.2307/2344614.
+
+Trung V Nguyen and Edwin V Bonilla. Automated variational inference for Gaussian process models.
+In Z. Ghahramani, M. Welling, C. Cortes, N.D. Lawrence, and K.Q. Weinberger, editors, Advances
+in Neural Information Processing Systems 27, pages 1404–1412. Curran Associates, Inc., 2014.
+
+Manfred Opper and Cedric Archambeau. The variational Gaussian approximation revisited. Neural
+
+Computation, 21(3):786–792, 2009.
+
+Danilo Jimenez Rezende, Shakir Mohamed, and Daan Wierstra. Stochastic back-propagation and
+
+variational inference in deep latent Gaussian models. Technical report, 2014.
+
+H˚avard Rue, Sara Martino, and Nicolas Chopin. Approximate Bayesian inference for latent Gaussian
+models by using integrated nested Laplace approximations. Journal of the Royal Statistical
+Society: Series B (Statistical Methodology), 71(2):319–392, 2009. doi: 10.1111/j.1467-9868.2008.
+00700.x.
+
+17
+
+B. W. Silverman. Some aspects of the spline smoothing approach to non-parametric regression curve
+
+ﬁtting (with discussion). Journal of the Royal Statistical Society, B, 47(1):1–52, 1985.
+
+Edward Snelson and Zoubin Ghahramani. Sparse Gaussian processes using pseudo-inputs. In Yair
+Weiss, Bernhard Sch¨olkopf, and John C. Platt, editors, Advances in Neural Information Processing
+Systems, volume 18, Cambridge, MA, 2006. MIT Press.
+
+Edward Snelson, Carl Edward Rasmussen, and Zoubin Ghahramani. Warped Gaussian processes.
+In Sebastian Thrun, Lawrence Saul, and Bernhard Sch¨olkopf, editors, Advances in Neural
+Information Processing Systems, volume 16, Cambridge, MA, 2004. MIT Press.
+
+T. Tieleman and G Hinton. Divide the gradient by a running average of its recent magnitude. In:
+
+COURSERA: Neural Networks for Machine Learning, 2012.
+
+Michalis K. Titsias. Variational learning of inducing variables in sparse Gaussian processes.
+
+In
+David van Dyk and Max Welling, editors, Proceedings of the Twelfth International Workshop on
+Artiﬁcial Intelligence and Statistics, volume 5, pages 567–574, Clearwater Beach, FL, 16-18 April
+2009. JMLR W&CP 5.
+
+Ville Tolvanen, Pasi Jyl¨anki, and Aki Vehtari.
+
+Expectation propagation for nonstationary
+heteroscedastic Gaussian process regression. In Machine Learning for Signal Processing (MLSP),
+2014 IEEE International Workshop, 2014.
+
+Richard E. Turner and Maneesh Sahani. Demodulation as probabilistic inference. IEEE Transactions
+
+on Audio, Speech, and Language Processing, 19:2398–2411, 2011.
+
+Jarno Vanhatalo, Jaakko Riihim¨aki, Jouni Hartikainen, Pasi Jyl¨anki, Ville Tolvanen, and Aki
+Vehtari. GPstuﬀ: Bayesian modeling with Gaussian processes. Journal of Machine Learning
+Research, 14(1):1175–1179, 2013. http://mloss.org/software/view/451/.
+
+18
+
+Appendix A. Supplementary Material
+
+A.1 Collapsed Heteroscedastic
+
+Lazaro-Gredilla and Titsias (2011) form a bound by ‘collapsing out’ the q(f ) distribution,
+such that it need not take a Gaussian form. As a brief review their bound can be derived
+as follows.
+
+log p(y|f ) ≥ Eq(f )
+
+(cid:105)
+(cid:104)
+log p(y|f , g)
+
++ log Eq(g)
+
+(cid:16)
+
+= log N
+
+y|f , emf i−
+
+(cid:17)
+
+vf i
+2
+
+−
+
+(cid:105)
+
+(cid:104) p(g)
+q(g)
+
+1
+4
+
+n
+(cid:88)
+
+i=1
+
+vf i = L(cid:48)
+
+L =
+
+p(y|f )p(f )df
+
+eL(cid:48)
+
+p(f )df
+
+(cid:90)
+
+(cid:90)
+
+(cid:90)
+
+≥
+
+=
+
+(cid:16)
+
+N
+
+y|f , emf i−
+
+(cid:17)
+
+vf i
+2
+
+N (f |0, Kﬀ ) −
+
+1
+4
+
+n
+(cid:88)
+
+i=1
+
+vf i
+
+− KL (q(g) (cid:107) p(g))
+
+(cid:16)
+
+= N
+
+y|0, Kﬀ + emf i−
+
+(cid:17)
+
+vf i
+2
+
+−
+
+1
+4
+
+n
+(cid:88)
+
+i=1
+
+vf i
+
+− KL (q(g) (cid:107) p(g))
+
+The bound that we assumes a sparse approximation, however it also constrains q(f ) to be
+Gaussian. This leads to an additional KL divergence since the optimal is not chosen, and
+additional penalty term arising from the mismatch of the constrained form of q(f ).
+
+A.2 Quadrature and Monte Carlo
+
+Computing the expected likelihood requires many low-dimensional integrals. Recently, there
+has been progress in using stochastic methods to obtain unbiased estimates in this area using
+centered representations (Kingma and Welling, 2014; Rezende et al., 2014). In this section,
+we re-examine the eﬀectiveness of Gauss-Hermite quadrature in this setting. Gauss-Hermite
+quadrature approximates Gaussian integrals in one dimension using a pre-deﬁned grid. For
+expectations of polynomial functions, the method is exact when the grid size meets the
+degree of the polynomial; for non-polynomial functions as we will encounter in general, we
+must accept a small amount of bias. To integrate higher dimensional functions, we must
+nest the quadrature, doing an integral across one dimension for each quadrature point in the
+other. Our experiments suggest that even in this case, the amount of bias is negligible, as
+Figure 7 investigates, examining the accuracy of nested quadrature as compared to Monte
+Carlo estimates using the centered parameterization (Kingma and Welling, 2014). Inspired
+
+19
+
+3
+
+2
+
+1
+
+0
+
+−1
+
+−2
+
+0.5
+
+h
+t
+u
+r
+t
+
+d
+n
+u
+o
+r
+g
+C
+M
+m
+o
+r
+f
+
+r
+o
+r
+r
+e
+
+e
+t
+u
+l
+o
+s
+b
+A
+
+100
+
+10−1
+
+10−2
+
+10−3
+
+10−4
+
+10−5
+
+10−6
+
+h
+t
+u
+r
+t
+
+d
+n
+u
+o
+r
+g
+C
+M
+m
+o
+r
+f
+
+r
+o
+r
+r
+e
+
+e
+t
+u
+
+l
+o
+s
+b
+A
+
+h
+t
+u
+r
+t
+
+d
+n
+u
+o
+r
+g
+C
+M
+m
+o
+r
+f
+
+r
+o
+r
+r
+e
+
+e
+t
+u
+l
+o
+s
+b
+A
+
+101
+
+100
+
+10−1
+
+10−2
+
+10−3
+
+10−4
+
+10−5
+
+10−6
+
+100
+
+10−1
+
+10−2
+
+10−3
+
+10−4
+
+10−5
+
+10−6
+
+1
+
+1.5
+
+2
+
+2.5
+
+3
+
+(a) Test locations marked
+
+4
+
+16
+
+64
+
+256 1024 4096 16384
+
+Function evaluations
+
+(b) Student-t mode
+
+4
+
+16
+
+64
+
+256 1024 4096 16384
+
+4
+
+16
+
+64
+
+256 1024 4096 16384
+
+Function evaluations
+
+(c) Student-t shoulder
+
+Function evaluations
+
+(d) Student-t tail
+
+Figure 7: Two dimensional Gauss-Hermite quadrature vs Monte Carlo. Each plot shows the
+log absolute error in estimating the two dimension integral required by our Heteroscedastic
+Student-t model (see section 4.2). In each case, the bias introduced by quadrature (circles)
+is small: a long way into the tail of the variance from the MC approximation.
+In fact,
+for small numbers of quadrature points, we often do better than the expected value using
+many more MC samples. Boxplots shows the absolute error on 1000 separate reruns of MC,
+whereas quadrature is deterministic. The error was evaluated at various points in the tail
+of the distribution as shown in a).
+
+by an examination of quadrature for expectation propagation (Jyl¨anki et al., 2011), we
+examine the eﬀectiveness for a several positions of the integral of a Student-t.
+
+Gauss-Hermite quadrature is appropriate for our integral as the Gaussian posteriors
+q(fi)q(gi) are convolved with a function p(yi|gi, fi). Monte Carlo integration is exact in
+the limit of inﬁnite samples, however in practice a subset of samples must be used. Gauss-
+Hermite requires phb evaluations per point in the mini-batch, where h is the number of
+Gauss-Hermite points used, p is the number of output dimensions, and b is the number
+of latent functions. Since Monte Carlo is unbiased, using a stochastic optimizer with the
+stochastic estimates of the integral and its gradients will work eﬀectively (Nguyen and
+
+20
+
+Bonilla, 2014; Kingma and Welling, 2014), though we ﬁnd the bias introduced by the
+quadrature approach to be negligible. For higher number of latent functions it may be more
+eﬃcient to make use of low variance Monte Carlo estimates for the integrals. Gradients for
+the model can be computed in a similar way with the Gaussian idenities used by Opper
+and Archambeau (2009).
+
+A.3 Gradients and Optimization
+
+Gradients can be computed similarly to (Hensman et al., 2015) using the equalities,
+
+∂
+∂µ
+∂
+∂σ2
+
+EN (x|µ,σ2)
+
+(cid:105)
+(cid:104)
+f (x)
+
+= EN (x|µ,σ2)
+
+EN (x|µ,σ2)
+
+(cid:105)
+(cid:104)
+f (x)
+
+=
+
+EN (x|µ,σ2)
+
+1
+2
+
+(cid:105)
+
+f (x)
+
+(cid:104) ∂
+∂x
+(cid:104) ∂
+∂x2 f (x)
+
+(cid:105)
+
+(11)
+
+(12)
+
+and the chain rule.
+
+Since our posterior assumes factorization between q(f ) and q(g) we simply do the
+
+gradients independently. That is calculate
+
+N (xi|mf ,vf )
+
+(cid:104)
+
+(cid:105)
+log p(y|f , g)
+
+EN (xi|mg,vg)
+
+(cid:104)
+
+(cid:105)
+log p(y|f , g)
+
+N (xi|mf ,vf )
+
+(cid:104)
+
+(cid:105)
+log p(y|f , g)
+
+EN (xi|mg,vg)
+
+(cid:104)
+
+(cid:105)
+log p(y|f , g)
+,
+
+E
+
+E
+
+∂
+∂µf
+∂
+∂µg
+∂
+∂vf
+∂
+∂vg
+
+independently using (11) and (12). The expectations can then be done using quadrature,
+or Monte Carlo sampling. As before
+
+µf
+
+uf uf
+
+mf = Kfuf K−1
+vf = Kﬀ + Kfuf K−1
+mg = Kgug K−1
+vg = Kgg + Kgug K−1
+
+ugug µg
+
+uf uf (Sf − Kuf uf )K−1
+
+uf uf
+
+Kuf f
+
+ugug (Sg − Kugug )K−1
+(cid:105) ∂mf
+∂Kfuf
+
+log p(y|f , g)
+
+(cid:104)
+
+∂Kfuf
+∂θ
+
+ugug Kugg.
+
+We then can chain using
+
+∂
+∂mf
+
+E
+
+N (xi|mf ,vf )
+
+, where θ is a hyper
+
+parameter of the kernel kf . Similar chain rules can be written for the other derivatives.
+
+The model contains variational parameters corresponding to q(uf ) = N (uf |µf , Sf ) and
+q(ug) = N (ug|µg, Sg) and the latent input locations, Z. As such the parameters do not
+scale with n. Naively the number of parameters is O(b(m2 + m) + m) however we can
+reduce this to O(b( m2
+2 + m)) by parameterizing the Choleksy of the covariance matrices,
+Sf = Lf L(cid:62)
+g . This has the added beneﬁt of enforcing that Sf and Sg are
+symmetrical and positive deﬁnite.
+
+f and Sg = LgL(cid:62)
+
+We initialize the model with random or informed lengthscales within the right region, µf
+and µg are assigned small random values, Sg and Sf are given an identity form. In practice
+
+21
+
+during optimization we ﬁnd it helpful to initially ﬁx all the kernel hyperparameters and Z at
+their initial locations, optimize for a small number of steps, then allow the optimization to
+run freely. This allows the latent means µf and µg to move to sensible locations before the
+model is allowed to completely change the form of the function through the modiﬁcation
+of the kernel hyperparameters. True convergence can be diﬃcult to achieve due to the
+potentially number of strongly dependent parameters and the non-convex optimization
+It is important to
+problem, and in practice we ﬁnd it helpful to monitor convergence.
+note however that the number of parameters to be optimized is ﬁxed with respect to n.
+
+A.4 Further Twitter experiment details
+
+The model used to model the twitter data has some interesting properties, such as the
+ability to model a transition from a unimodal distribution to a bimodal distribution. The
+following plot shows how the distribution changes throughout time for the Labour dataset.
+
+The latent functions α and β which are modelled in Section 4.2.2 can be plotted
+If both latent functions went below 1.0 then the distribution at that time
+themselves.
+would turn into a bathtub shape. If both are larger than one but one is larger than the
+other, we have a skewed distribution. If one is below zero and the over above, it appears
+exponential or negative exponential.
+
+A.5 Survival details
+
+To generate the synthetic survival dataset we ﬁrst deﬁne latent functions that we wish to
+infer. These are a complex function of an input, x, with two dimensions,
+
+(cid:18)
+
+α = exp
+
+2 exp(−30(x:,0 −
+
+)2) + sin(πx2
+
+:,1) − 2
+
+(cid:19)
+
+β = exp (sin(2πx:,0) + cos(2πx:,1)) .
+
+1
+4
+
+22
+
+We then make 1000 synthetic individuals, with covariates sampled uniformly from
+
+xi,0 ∼ Uniform(0, 1) and xi,1 ∼ Uniform(0, 1).
+
+Using these two latent functions, αi and βi, computed using covariates xi for individual
+
+i, we sample a simulated failure time from a log-logistic distribution,
+
+y ∼ LL(α, β) =
+
+(cid:17) (cid:0) y
+α
+
+(cid:16) β
+α
+(cid:16)
+
+1 + y
+α
+
+(cid:1)β−1
+β(cid:17)2 .
+
+These are then the true failure times of individuals with covariates xi. 20% of the
+data is chosen to be censored censor. A time is uniformly drawn, and the observed time
+is truncated to this time, yi = ti. Otherwise ti = yi. Additionally a indicator δi = 1 is
+provided to the model if censoring occurs, and δi = 0 if the real failure time was observed.
+This mimics patients dropping out of a trial, with the assumption that the time at which
+they drop out is independent of the failure time and covariates. For these censored times,
+we only know that Ti > ti, and for the uncensored individuals it is known that Ti = ti.
+
+As such the likelihood is decomposed into P (ti ≤ yi < ti + δt|αi, βi, δi = 0) and
+
+P (yi|αi, βi, δi = 1) = 1 − P (yi > ti|αi, βi, δi = 1)
+
+p(y|α, β, δ) =
+
+K:δ(cid:54)=1
+(cid:89)
+
+i
+
+(cid:16) βi
+αi
+(cid:16)
+
+(cid:17) (cid:16) yi
+αi
+
+1 + yi
+αi
+
+(cid:17)βi−1
+
+βi(cid:17)2
+
+M :δ=1
+(cid:89)
+
+j
+
+1 +
+
+1
+(cid:16) yj
+αj
+
+(cid:17)βj
+
+The task is then to infer α and β, such that we know how the failure time distribution
+
+varies in response to covariate information.
+
+23
+
+6
+1
+0
+2
+ 
+r
+p
+A
+ 
+8
+1
+ 
+ 
+]
+L
+M
+
+.
+t
+a
+t
+s
+[
+ 
+ 
+1
+v
+3
+6
+2
+5
+0
+.
+4
+0
+6
+1
+:
+v
+i
+X
+r
+a
+
+Chained Gaussian Processes
+
+Alan D. Saul
+Department of Computer Science
+University of Sheﬃeld
+
+James Hensman
+CHICAS, Faculty of Health and Medicine
+Lancaster University
+
+Aki Vehtari
+Helsinki Institute for Information Technology HIIT
+Department of Computer Science
+Aalto University
+
+Neil D. Lawrence
+Department of Computer Science
+University of Sheﬃeld
+
+alan.saul@sheffield.ac.uk
+
+james.hensman@lancaster.ac.uk
+
+aki.vehtari@aalto.fi
+
+n.lawrence@sheffield.ac.uk
+
+Abstract
+Gaussian process models are ﬂexible, Bayesian non-parametric approaches to regression.
+Properties of multivariate Gaussians mean that they can be combined linearly in the manner
+of additive models and via a link function (like in generalized linear models) to handle
+non-Gaussian data. However, the link function formalism is restrictive, link functions
+are always invertible and must convert a parameter of interest to a linear combination
+of the underlying processes. There are many likelihoods and models where a non-linear
+combination is more appropriate. We term these more general models Chained Gaussian
+Processes: the transformation of the GPs to the likelihood parameters will not generally
+be invertible, and that implies that linearisation would only be possible with multiple
+(localized) links, i.e. a chain. We develop an approximate inference procedure for Chained
+GPs that is scalable and applicable to any factorized likelihood. We demonstrate the
+approximation on a range of likelihood functions.
+
+1. Introduction
+
+Gaussian process models are ﬂexible distributions that can provide priors over non linear
+functions. They rely on properties of the multivariate Gaussian for their tractability
+and their non-parametric nature.
+In particular, the sum of two functions, drawn from
+a Gaussian process is also given by a Gaussian process. Mathematically, if f ∼ N (µf , kf )
+and g ∼ N (µg, kf ) and we deﬁne y = g + f then properties of multivariate Gaussian give
+us that y ∼ N (µf + µg, kf + kg) where µf and µg are deterministic functions of a single
+input, kf and kg are deterministic, positive semi deﬁnite functions of two inputs and y, g
+and f are stochastic processes.
+
+This elementary property of the Gaussian process is the foundation of much of its
+It makes additive models trivial, and means we can easily combine any process
+power.
+with Gaussian noise. Naturally, it can be applied recursively, and covariance functions
+
+1
+
+can be designed to reﬂect the underlying structure of the problem at hand (e.g. Hensman
+et al. (2013b) uses additive structure to account for variation in replicate behavior in gene
+expression).
+
+In practice observations are often non Gaussian. In response, statistics has developed
+the ﬁeld of generalized linear models (Nelder and Wedderburn, 1972). In a generalized linear
+model a link function is used to connect the mean function of the Gaussian process with
+the mean function of another distribution of interest. For example, the log link can be used
+to relate the rate in a Poisson distribution with our GP, log λ = f + g. Or for classiﬁcation
+the logistic distribution can be used to represent the mean probability of positive outcome,
+log p
+
+1−p = f + g.
+Writing models in terms of the link function captures the linear nature of the underlying
+model, but it is somewhat against the probabilistic approach to modeling where we consider
+the generative model of our data. While there’s nothing wrong with this relationship
+mathematically, when we consider the generative model we never apply the link function
+directly, we consider the inverse link or transformation function. For the log link this turns
+into the exponential, λ = exp(f + g). Writing the model in this form emphasizes the
+importance that the transformation function has on the generative model (see e.g. work on
+warped GPs (Snelson et al., 2004)). The log link implies a multiplicative combination of
+f and g, λ = exp(f + g) = exp(f ) exp(g), but in some cases we might wish to consider
+an additive model, λ = exp(f ) + exp(g). Such a model no longer falls within the class
+of generalized linear models as there is no link function that renders the two underlying
+In this paper we address this issue and use variational
+processes additive Gaussian.
+approximations to develop a framework for non-linear combination of the latent processes.
+Because these models cannot be written in the form a single link function we call this
+approach “Chained Gaussian Processes”.
+
+In this paper we are interested in performing variational inference when we have input-
+dependent likelihood parameters. We will focus on the case when where the likelihood
+contains two latent parameters, though the model is general enough to handle more.
+Parameters of interest could be a latent mean which we wish to infer, a shape parameter
+for determining the shape of the tails, amongst other things. We will focus on the cases
+where we have two such latent parameters but propose methods for extending this further.
+We will focus on likelihoods p(y|f , g) that depend on two latent functions, f ∼
+N (f |µf , f (x)), g ∼ N (g|µg, g(x)). If this noise distribution is a Gaussian then we have two
+special cases, with g(x) = σ2 we have a Gaussian process with the conjugate homogeneous
+Gaussian likelihood. With g(x) = eg(x) we obtain a model for a heteroscedastic Gaussian
+process (Lazaro-Gredilla and Titsias, 2011).
+
+A range of other noise models require multiple parameters to be learnt. Traditionally
+within the Gaussian process literature MAP solutions are used, or alternatively these
+parameters are integrated out approximately (Rue et al., 2009). In this work we accept
+that these parameters may change as a function of the input space, and look at inferring
+posterior Gaussian process functions for these parameters. We do so in a scalable way
+with sparse variational methods, with the capability of using stochastic gradients during
+inference. We believe scalability is essential as parameters may only become well determined
+as the number of observations grow large. We show results with a number of diﬀerent noise
+models
+
+2
+
+We will ﬁrst introduce notation, and review previous work on heteroscedastic Gaussian
+processes. Then, we show how to elegantly extend this idea into a more scalable and
+general framework, allowing a huge number of likelihoods to utilise multiple input dependent
+processes.
+
+2. Background
+
+Assume we have access to a training dataset of n input-output observations {(xi, yi)}n
+i=1,
+yi is assumed to be a noisy realisation of an underlying latent function f = f (x), i.e.
+yi = f (xi) + (cid:15)i. For a Gaussian likelihood (cid:15)i ∼ N (cid:0)µ, σ2(cid:1), xi ∈ Rq and yi ∈ R. Normally the
+mean of the likelihood is assumed to be input dependent and given a GP prior µ = fi = f (xi)
+where f (x) ∼ GP(µf , kg(x, x(cid:48))), and σ is ﬁxed at an optimal point. In this case the integrals
+required to infer a posterior, p(f |y), are tractable.
+
+One extension of this model is the heteroscedastic GP regression model (Goldberg
+et al., 1998; Lazaro-Gredilla and Titsias, 2011), where the noise variance σ is dependent on
+the input. The noise variance can be assigned a log GP prior, yi ∼ N (cid:0)f (xi), eg(xi)(cid:1),
+where g(x) = GP(µg, kg(x, x(cid:48))),
+i.e. a log link function is used. Unfortunately this
+generalization of the original Gaussian process model is not analytically tractable and
+requires an approximation to be made.
+Suggested approximations include MCMC
+(Goldberg et al., 1998), variational inference (Lazaro-Gredilla and Titsias, 2011), Laplace
+approximation (Vanhatalo et al., 2013) and expectation propagation (Hern´andez-Lobato
+et al., 2014) (EP).
+
+Another generalization of the standard GP is to vary the scale of the process as a
+function of the inputs. Adams and Stegle (2008) suggest a log GP prior for the scale of
+the process giving rise to non-parametric non-stationarity in the model. Turner and Sahani
+(2011) took a related approach to develop probabilistic amplitude demodulation, here the
+amplitude (or scale) of the process was given by a Gaussian process with a link function
+given by σ = log(exp(f ) − 1). Finally Tolvanen et al. (2014) assign both the noise variance
+and the scale a log GP prior.
+
+Both these two variations on Gaussian process regression combine processes in a non-
+linear way within a Gaussian likelihood, but the idea may be further generalized to systems
+that deal with non-Gaussian observation noise.
+
+In this paper we describe a general approach to combining processes in a non-linear
+way. We assume that the likelihood factorizes across the data, but is a general non-
+linear function of b input dependent latent functions. Our main focus will be examples
+of likelihoods with b = 2, f (xi) and g(xi), such that, p(y|f (xi), g(xi)), though the ideas can
+all be generalized to b > 2. Previous work in this domain include the use of the Laplace
+approximation (Vanhatalo et al., 2013), however this method scales poorly, O(b3n3) and so
+isn’t applicable to datasets of a moderate size.
+
+To render the model tractable we extend recent advances in large scale variational
+inference approaches to GPs (Hensman et al., 2013a). With non-Gaussian likelihoods
+restrictions on the latent function values may diﬀer, and a non-linear transformation of
+the latent function, g ∈ Rq may be required. The inference approach builds on work
+by Hensman et al. (2015), that in turn builds on the variational inference method proposed
+by Opper and Archambeau (2009).
+
+3
+
+In other work (Nguyen and Bonilla, 2014) mixtures of Gaussian latent functions have
+also been applied for non-Gaussian likelihoods, we expect such mixture distributions would
+also be applicable to our case. More recently this approach (Dezfouli and Bonilla, 2015)
+was extended to provide scalability utilising sparse methods similar to this work.
+
+3. Chained Gaussian Processes
+
+Our approach to approximate inference in chained GPs builds on previous work in inducing
+point methods for sparse approximations of GPs (Snelson and Ghahramani, 2006; Titsias,
+2009; Hensman et al., 2015, 2013a). Inducing point methods introduce m ‘pseudo inputs’,
+known as inducing inputs, at locations Z = {zi}m
+i=1. The corresponding function values are
+given by ui = f (zi). These inducing inputs points do not eﬀect the marginal of f because
+
+(cid:90)
+
+p(f |X, Z) =
+
+p(f |u, X)p(u|Z)du,
+
+(cid:1). The
+where p(u|Z) = N (u|0, Kuu) and p(f |u, X) = N (cid:0)f |KfuK−1
+part-covariances given by Kfu = kf (X, Z) where X is the locations of f , deﬁne the
+relationship between inducing variables and the latent function of interest, f . The
+likelihood is p(y) = (cid:82) p(y|f )p(f |u)p(u)df du. To avoid O(n3) computation
+marginal
+complexity Titsias (2009) invokes Jensen’s inequality to obtain a lower bound on the
+marginal
+This
+approximation also forms the basis of our approach for non-Gaussian models.
+
+likelihood log p(y), an approach known as variational compression.
+
+uuu, Kﬀ − KfuK−1
+
+uuKuf
+
+3.1 Variational Bound
+
+For non-Gaussian likelihoods, even with a single latent process the marginal likelihood,
+p(y), is not tractable, but it can be lower bounded variationally. We assume that the latent
+functions, f = f (x) and g = g(x) are a priori independent
+
+p(f , g|uf , ug) = p(f |uf )p(g|ug).
+
+(1)
+
+The derivation of the variational lower bound then follows a similar form as (Hensman et al.,
+2015) with the extension to multiple latent functions. We begin by writing down our log
+marginal likelihood,
+
+log p(y) = log
+
+p(y|f , g)p(f , g|uf , ug)p(uf )p(ug)df dg duf dug
+
+(cid:90)
+
+then introduce a variational approximation to the posterior,
+
+p(f , g, ug, uf |y) ≈ p(f |uf )p(g|ug)q(uf )q(ug),
+
+(2)
+
+where we have made the additional assumption that the latent functions factorize in the
+variational posterior.
+
+Using Jensen’s inequality and the factorization of the latent functions (1), a variational
+
+lower bound can then be obtained for the log marginal likelihood,
+
+log p(y) = log
+
+p(y|f , g)p(f |uf )p(g|ug)p(uf )p(ug)df dg duf dug
+
+(cid:90)
+
+(cid:90)
+
+≥
+
+q(f )q(g) log p(y|f , g)df dg − KL (q(uf ) (cid:107) p(uf )) − KL (q(ug) (cid:107) p(ug)) ,
+
+(3)
+
+4
+
+where q(f ) = (cid:82) p(f |uf )q(uf )duf and q(g) = (cid:82) p(g|ug)q(ug)dug, and KL (p(a) (cid:107) p(b))
+denotes the KL divergence between the two distributions. For Gaussian process priors
+on the latent functions we recover
+
+p(f |uf ) = N
+
+f |Kfuf K−1
+
+uf uf
+
+uf , Kﬀ − Qﬀ
+
+p(g|ug) = N
+
+g|Kgug K−1
+
+ugug ug, Kgg − Qgg
+
+(cid:17)
+
+(cid:17)
+
+,
+
+(cid:16)
+
+(cid:16)
+
+Qﬀ = Kfuf K−1
+Qgg = Kgug K−1
+
+Kuf f
+uf uf
+ugug Kugg.
+
+where
+
+where
+
+Note that covariances for f and g, can diﬀer though their inducing input locations, Z, are
+shared.
+
+We take q(uf ) and q(ug) to be Gaussian distributions with variational parameters,
+q(uf ) = N (uf |µf , Sf ) and q(ug) = N (ug|µg, Sg). Using the properties of multivariate
+Gaussians this results in tractable integrals for q(f ) and q(g),
+
+q(f ) = N
+
+f |Kfuf K−1
+
+q(g) = N
+
+g|Kgug K−1
+
+(cid:17)
+
+µf , Kﬀ + ˆQﬀ
+
+uf uf
+ugug µg, Kgg + ˆQgg
+
+(cid:17)
+
+,
+
+(cid:16)
+
+(cid:16)
+
+(4)
+
+(5)
+
+ˆQﬀ = Kfuf K−1
+ˆQgg = Kgug K−1
+
+uf uf (Sf − Kuf uf )K−1
+ugug (Sg − Kugug )K−1
+
+Kuf f
+uf uf
+ugug Kugg.
+
+The KL terms in (3) and their derivative can be computed in closed form and are
+inexpensive as they are divergence between Gaussians. However, an intractable integral,
+(cid:82) q(f )q(g) log p(y|f , g)df dg, still remains. Since the likelihood factorizes,
+
+p(y|f , g) =
+
+p(yi|fi, gi),
+
+(cid:89)n
+
+i=1
+
+the problematic integral in (3) also factorizes across data points, allowing us to use stochastic
+variational inference (Hensman et al., 2013a; Hoﬀman et al., 2013),
+
+(cid:90)
+
+(cid:90)
+
+q(f )q(g) log p(y|f , g)df dg =
+
+q(f )q(g) log
+
+p(yi|fi, gi)df dg
+
+n
+(cid:89)
+
+i=1
+
+(cid:90)
+
+(cid:88)n
+
+=
+
+i=1
+
+q(fi)q(gi) log p(yi|fi, gi)dfi dgi.
+
+(6)
+
+We are then left with n, b dimensional Gaussian integrals over the log-likelihood,
+
+log p(y) ≥
+
+q(fi)q(gi) log p(yi|fi, gi)dfi dgi
+
+(cid:88)n
+
+(cid:90)
+
+i=1
+
+− KL (q(uf ) (cid:107) p(uf )) − KL (q(ug) (cid:107) p(ug)) .
+
+(7)
+
+5
+
+The bound will also hold for any additional number of latent functions by assuming they
+all factorize in the variational posterior.
+
+The bound decomposes into a sum over data, as such the n input points can be
+visited in mini-batches, and the gradients and log-likelihood of each mini-batch can be
+subsequently summed, this operation can be also be parallelized (Gal et al., 2014). A single
+mini-batch can instead be visited obtaining a stochastic gradient for use in a stochastic
+optimization (Hensman et al., 2013a; Hoﬀman et al., 2013). This provides the ability to
+scale to huge datasets.
+
+If the likelihood is Gaussian these integrals are analytic (Lazaro-Gredilla and Titsias,
+2011), though the noise variance must be constrained positive via a transformation of the
+latent function, e.g an exponent. In this case,
+
+(cid:90)
+
+(cid:90)
+
+=
+
+q(fi)q(gi) log p(yi|fi, gi)dfi dgi
+
+N (cid:0)fi|mf i, vf i
+
+(cid:1) N (cid:0)gi|mgi, vgi
+
+(cid:1) log N (yi|fi, egi)
+
+(cid:16)
+
+= log N
+
+yi|mf i, emg i−
+
+(cid:17)
+
+vg i
+2
+
+−
+
+vgi
+4
+
+−
+
+vf ie−mg i+
+2
+
+vg i
+2
+
+mf = Kfuf K−1
+mg = Kgug K−1
+
+uf uf
+ugug µg
+
+µf
+
+vf = Kﬀ + ˆQﬀ
+vg = Kgg + ˆQgg.
+
+where we deﬁne
+
+vf i denotes the ith diagonal element of the matrix with vf along its diagonal.
+It may
+be possible in this Gaussian case to ﬁnd the optimal q(f ) such that the bound collapses
+to that of Lazaro-Gredilla and Titsias (2011), however this would not allow for stochastic
+optimization. Here we arrive at a sparse extension, where a Gaussian distribution is assumed
+for the posterior over of f , where as previously q(f ) has been collapsed out and could take
+any form. This sparse extension provides the ability to scale to much larger datasets whilst
+maintaining a similar variational lower bound.
+
+The model is however not restricted to heteroscedastic Gaussian likelihoods.
+
+If the
+integral (6) and its gradients can be computed in an unbiased way, any factorizing likelihood
+can be used. This can be seen as a chained Gaussian process. There is no single link function
+that allows the speciﬁcation of this model under the modelling assumptions of a generalised
+linear model. An example that will be revisited in the experiments is the beta distribution,
+yi ∼ B(α, β) where α, β ∈ R+ and observations yi ∈ (0, 1), xi ∈ Rq. Since α, β must
+maintain positiveness, then can be assigned log GP priors,
+
+yi ∼ B(α = ef (xi), β = eg(xi)),
+
+(8)
+
+where f (x) = GP(µf , kf (x, x(cid:48))) and g(x) = GP(µg, kg(x, x(cid:48))). This allows the shape of the
+beta distribution to change over time, see Supplementary Material and section 4.2.2 for an
+example plots.
+
+Using the variational bound above, all that is required is to perform a series of n two
+dimensional quadratures, for both the log-likelihood and its gradients, a relatively simple
+
+6
+
+task and computationally feasible when looking at modest batch sizes. From this example
+the power and adaptability of the method should be apparent.
+
+A major strength of this method is that performing this integral is the only requirement
+to implement a new noise model, similarly to (Nguyen and Bonilla, 2014; Hensman et al.,
+2015). Further, since a stochastic optimizer is used the gradients do not need to be exact.
+Our implementations can use oﬀ the shelf stochastic optimizer, such as Adagrad (Duchi
+et al., 2011) or RMSProp (Tieleman and Hinton, 2012). Further, for many likelihoods
+some portion of these integrals is analytically tractable, reducing the variance introduced
+by numerical integration. See supplementary material for an investigation.
+
+3.2 Posterior and Predictive Distributions
+
+Following from (2) it is clear that when the variational lower bound bound has been
+maximised with respect to the variational parameters, p(uf |y) ≈ q(uf ) and p(ug|y) ≈
+q(ug). The posterior for p(f ∗|y∗) under this approximation is
+
+p(f ∗|y∗) =
+
+p(f ∗|x, f )p(f |uf )p(uf |y)df duf
+
+(cid:90)
+
+(cid:90)
+
+(cid:90)
+
+=
+
+≈
+
+p(f ∗|uf )p(uf |y)duf
+
+p(f ∗|uf )q(uf )duf = q(f ∗),
+
+where q(f ∗) and q(g∗) become similar to (4).
+
+data pair {(x∗
+
+i , y∗
+
+i )}n∗
+
+i=1 follows as
+
+Finally, treating each prediction point independently, the predictive distribution for each
+
+p(y∗
+
+i |yi, xi) =
+
+p(y∗
+
+i |f ∗
+
+i , g∗
+
+i )q(f ∗
+
+i )q(g∗
+
+i )df ∗
+
+i dg∗
+i .
+
+(cid:90)
+
+This integral is analytically intractable in the general case, but again can be computed using
+a series of two dimensional quadrature or simple Monte Carlo sampling.
+
+4. Experiments
+
+To evaluate the eﬀectiveness of our chained GP approximations we consider a range of
+real and synthetic datasets. The performance measure used throughout is the negative
+log predictive density (NLPD) on held out data, table 1.1 The results for mean absolute
+error (MAE) (Supplementary Material) show comparable results between methods. 5-fold
+cross-validation is used throughout. The non-linear optimization of (hyper-) parameters is
+subject to local minima, as such multiple runs were performed on each fold with a range of
+parameter initialisations. The solution obtaining the highest log-likelihood on the training
+data of each fold was retained. Automatic relevance determination exponentiated quadratic
+kernels are used throughout allowing one lengthscale per input dimension, in addition to a
+bias kernel.2.. In all experiments 100 inducing points were used and their locations were
+
+1. Data used in the experiments can be downloaded via the pods package: https://github.com/sods/ods
+2. Code is publically available at: https://github.com/SheﬃeldML/ChainedGP
+
+7
+
+Data
+
+NLPD
+
+elevators1000
+elevators10000
+motorCorrupt
+boston
+
+G
+0.39 ± 0.13
+0.07 ± 0.01
+2.04 ± 0.06
+0.27 ± 0.02
+
+CHG
+0.1 ± 0.01
+0.03 ± 0.02
+1.79 ± 0.05
+0.09 ± 0.01
+
+Lt
+NA
+NA
+1.73 ± 0.05
+0.23 ± 0.02
+
+Vt
+NA
+NA
+2.52 ± 0.09
+0.19 ± 0.02
+
+CHt
+NA
+NA
+1.7 ± 0.05
+0.09 ± 0.02
+
+Table 1: Results NLPD over 5 cross-validation folds with 10 replicates each. Models shown
+in comparison are sparse Gaussian (G), chained heteroscedastic Gaussian (CHG), Student-t
+Laplace approximation (Lt), Student-t VB approximation (Vt), and chained heteroscedastic
+Student-t (CHt).
+
+optimized with respect to the lower bound of the log marginal likelihood following (Titsias,
+2009).
+
+4.1 Heteroscedastic Gaussian
+
+In our introduction we related our ideas to heteroscedastic GPs. We will ﬁrst use
+our approximations to show how the addition of input dependent noise to a Gaussian
+process regression model eﬀects performance, compared with a sparse Gaussian process
+model (Titsias, 2009). Performance is shown to improve as more data is provided as would
+be expected, making it clear that both models can scale with data, though the new model
+is more ﬂexible when handling the distributions tails. A sparse Gaussian process with
+Gaussian likelihood is chosen in these experiments as a baseline, as a non-sparse Gaussian
+process cannot scale to the size of all the experiments.
+
+The Elevator1000 uses a subset of 1, 000 of the Elevator dataset .
+
+In this data the
+heteroscedastic model (Chained GP) oﬀers considerable improvement in terms of negative
+log predictive density (NLPD) over the sparse GP (Table 1. Our second experiment with the
+Gaussian likelihood, Elevator10000, examines scaling of the model. Here a subset of 10, 000
+data points of the Elevator dataset are used, and performance is improved as expected.
+Previous models for heteroscedastic Gaussian process models cannot scale, the chained GP
+can implement the heteroscedastic setting and scale.
+
+4.2 Non-Gaussian Heteroscedastic likelihoods
+
+One of the major strengths of the approximation over pure scalability, is the ability to use
+more general non-Gaussian likelihoods. In this section we will investigate this ﬂexibility by
+performing inference with non-standard likelihoods. This allows models to be speciﬁed that
+correspond to the modellers belief about the data in a ﬂexible way.
+
+We ﬁrst investigate an extension of the Student-t likelihood that endows it with an
+
+input-dependent scale parameter. This is straightforward in the chained GP paradigm.
+
+The corrupt motorcycle dataset is an artiﬁcial modiﬁcation to the benchmark motorcycle
+dataset (Silverman, 1985) and shows the models capabilities more clearly. The original
+motorcycle dataset has had 25 of its data randomly corrupted with Gaussian noise of
+N (0, 3), simulating spurious accelerometer readings. We hope that our method will be
+robust and ignore such outlying values. An input-dependent mean, µ, is set alongside an
+
+8
+
+4
+
+3
+
+2
+
+1
+
+G
+
+Lt
+
+CHG CHt
+
+Vt
+
+(a) NLPD motor
+
+G
+
+Lt
+
+CHG CHt
+
+Vt
+
+(b) NLPD Boston
+
+Figure 1: a) NLPD on corrupt motorcycle dataset. b) NLPD of Boston housing dataset.
+In NLPD lower is better, models shown in comparison are sparse Gaussian (G), Student-
+t Laplace approximation (Lt), Student-t VB approximation (Vt), chained heteroscedastic
+Gaussian (CHG), and chained heteroscedastic Student-t (CHt). Boxplots show the variation
+over 5 folds.
+
+input dependent scale which must be positive, σ. A constant degrees of freedom parameter
+ν, is initalized to 4.0 and then is optimized to its MAP solution.
+
+yi ∼ St(µ = f (xi), σ2 = eg(xi), ν)
+
+(9)
+
+likelihood,
+
+where f (x) = GP(µf , kf (x, x(cid:48))) and g(x) = GP(µg, kg(x, x(cid:48))).
+This provides
+likelihood. We compare the model
+a heteroscedastic extension to the Student-t
+with a Gaussian process with homogeneous Student-t
+approximated
+variationally (Hensman et al., 2015) and the Laplace approximation. Figure 2 shows
+the improved quality of the error bars with the chained heteroscedastic Student-t model.
+Learning a model with heavy tails allows outliers to be ignored, and so its input dependent
+variance can be collapsed around just points close to the underlying function, which in this
+case is known to be well modelled with a heteroscedastic Gaussian process (Lazaro-Gredilla
+and Titsias, 2011; Goldberg et al., 1998). It is also interesting to note the heteroscedastic
+Gaussian’s performance, although not able to completely ignore outliers the model has learnt
+a very short lengthscale. This renders the prior over the scale parameter independent across
+the data, meaning that the resulting likelihood is more akin to a scale-mixture of Gaussians
+(which endows appropriate robustness characteristics). The main diﬀerence is that the
+scale-mixture is based on a log-Gaussian prior, as opposed to the Student-t which is based
+on an inverse Gamma.
+
+Figure 1 shows the NLPD on the corrupt motorcycle dataset and Boston housing dataset.
+The Boston housing dataset shows the median house prices throughout the Boston area,
+quantiﬁed by 506 data points, with 13 explanatory input variables (Kuß, 2006). We ﬁnd
+that the chained heteroscedastic Gaussian process model already outperforms the Student-t
+model on this dataset, and the additional ability to use heavier tails in the chained Student-t
+is not used. This ability to regress back to an already powerful model is a useful property
+of the chained Student-t model.
+
+0.6
+
+0.4
+
+0.2
+
+0
+
+−0.2
+
+9
+
+Standard Gaussian Process
+
+Heteroscedastic Gaussian
+
+Heteroscedastic Student-t
+
+6
+
+4
+
+2
+
+0
+
+−2
+
+−4
+
+−6
+
+−2
+
+6
+
+4
+
+2
+
+0
+
+−2
+
+−4
+
+−6
+
+−2
+
+6
+
+4
+
+2
+
+0
+
+−2
+
+−4
+
+−6
+
+−2
+
+−1
+
+0
+
+1
+
+2
+
+−1
+
+0
+
+1
+
+2
+
+−1
+
+0
+
+1
+
+2
+
+Figure 2: Corrupted motorcycle dataset, ﬁtted with a Gaussian process model with a
+Gaussian likelihood, a Gaussian process with input dependent noise (heteroscedastic) with
+a Gaussian likelihood, and a Gaussian process with Student-t likelihood, with an input
+dependent shape parameter. The mean is shown in solid and the variance is shown as
+dotted
+
+Figure 3: Twitter sentiment from the UK general election modelled using a heteroscedastic
+beta distribution. The timing of the exit poll is marked and is followed by a night of tweets
+as election counts come in. Other night time periods have a reduced volume of tweets and
+a corresponding increase in sentiment variance. Ticks on the x-axis indicate midnight.
+
+10
+
+Data
+
+leuk
+Surv
+
+NLPD
+
+G
+4.03 ± .08
+5.45 ± .06
+
+LSurv
+1.57 ± .01
+2.52 ± .02
+
+VSurv
+1.57 ± .01
+2.52 ± .02
+
+CHSurv
+1.56 ± .01
+2.16 ± .02
+
+Table 2: Results NLPD over 5 cross-validation folds with 10 replicates each. Models shown
+in comparison are sparse Gaussian (G), survival Laplace approximation (LSurv), survival
+VB approximation (VSurv), chained heteroscedastic survival (CHSurv).
+
+4.2.1 Survival Analysis
+
+Survival analysis focuses on the analysis of time-to-event data. This data arises frequently in
+clinical trials, though it is also commonly found in failure tests within engineering. In these
+settings it is common to observe censoring. Censoring occurs when an event is only observed
+to exist between two times, but no further information is available. For right-censoring, the
+most common type of censoring, the event time T ∈ [t, ∞).
+
+A common model to analyse this type of data is an accelerated failure time model. This
+suggests that the distribution of when an random event, T , may occur, is multiplicatively
+eﬀected by some function of the covariates, f (x), thus accelerating or retarding time; akin
+to notion of dog years.
+In a generalized linear model we may write this as log T =
+log T0 + log f (x), where T is the random variable for failure time of the individual with
+covariates x, and T0 follows a parametric distribution describing a non-accelerated failure
+time.
+
+To account for censoring the cumulative distribution needs to be computable and event
+times are restricted to be positive. A common parametric distribution for T0 that fulﬁlls
+these restrictions is the log-logistic distribution, with the median being some function of
+the covariates, f (x). This however is restrictive as the shape of failure time distribution is
+assumed to be the same for all patients. We relax this assumption by allowing the shape
+parameter of the log-logistic distribution to vary with response to the input,
+
+yi ∼ LL(α = ef (xi), β = eg(xi)),
+
+where f (x) = GP(µf , kf (x, x(cid:48))) and g(x) = GP(µg, kg(x, x(cid:48))). This allows both skewed
+unimodal and exponential shaped distributions for the failure time distribution depending
+on the individual, as shown in Figure 4. Again there is no associated link-function in this
+case, and the model can be modelled as a chained-survival model.
+
+Table 2 shows the models performance a real and synthetic datasets. The leukemia
+dataset (Henderson et al., 2002) contains censored event times for 1043 leukemia patients
+and is known to have non-linear responses certain covariates (Gelman et al., 2013). We ﬁnd
+little advantage from using the chained-survival model, but as usual the model is robust
+such that performance isn’t degraded in this case. We additionally show the results on a
+synthetic dataset where the shape parameter is known to vary with response to the input,
+in this case an increase in performance is seen. See Appendix A.5 for more details on the
+model and synthetic dataset.
+
+11
+
+Figure 4: Resulting model on synthetic survival dataset. Shows variation of median survival
+time and shape of log-logistic distribution, in response to diﬀering covariate information.
+Background colour shows the chained-survivals predictions, coloured dots show ground
+truth. Lower ﬁgures show associated failure time distributions and hazards for two diﬀerent
+synthetic patients. Shapes can be both unimodal or exponential.
+
+12
+
+4.2.2 Twitter Sentiment Analysis in the UK Election
+
+The ﬁnal experiment shows the adaptability of the model even further, on a novel dataset
+and with a novel heteroscedastic model. We consider sentiment in the UK general election,
+focussing on tweets tagged as supporters of the Labour party. We used a sentiment analysis
+tagging system3 to evaluate the positiveness of 105,396 tweets containing hashtags relating
+to recent the major political parties, over the run in to the UK 2015 general election.
+
+We are interested in modeling the distribution of positive sentiment as a function of
+time. The sentiment value is constrained to be to be between zero and one, and we do
+not believe the distribution of tweets through time to be necessarily unimodal. A natural
+likelihood to use in this case is the beta likelihood. This allows us to accommodate bathtub
+shaped distributions, indicating tweets are either extremely positive or extremely negative.
+We then allow the distribution over tweets to be heterogenous throughout time by using
+Gaussian process models for each parameter of the beta distribution,
+
+yi ∼ B(α = ef (xi), β = eg(xi)),
+
+where f (x) = GP(µf , kf (x, x(cid:48))) and g(x) = GP(µg, kg(x, x(cid:48))).
+
+The upper section of Figure 3 shows the data and the probability of each sentiment value
+throughout time. The lower part shows the corresponding mean and variance functions
+induced by the above parameterization. This year’s general election was particularly
+interesting: polls throughout the election showed it to be a close race between the two
+major parties, Conservative and Labour. But at the end of polling an exit poll was released
+that predicted an outright win for the Conservatives. This exit poll proved accurate and
+is associated with a corresponding dip in the sentiment of the tweets. Other interesting
+aspects of the analysis include the reduction in number of tweets during the night and the
+corresponding increase in the variance of our estimates.
+
+4.2.3 Decomposition of Poisson Processes
+
+The intensity, λ(x), of a Poisson process can be modelled as the product of two positive
+latent functions, exp(f (x)) and exp(g(x)), as a generalrised linear model,
+
+log(λ) = f (x) + g(x)
+y ∼ Poisson(λ = exp(f + g) = exp(f (x)) exp(g(x))),
+
+using a log link function.
+
+Instead imagine we form a new process by combining two diﬀerent underlying Poisson
+processes through addition. The superposition property of Poissons means that the resulting
+process is also Poisson with rates given by the sum of the underlying rates.
+
+To model this via a Gaussian process we have to assume that the intensity of the
+resulting Poisson, λ(x) is a sum of two positive functions, which are denoted by exp(f (x))
+and exp(g(x)) respectively,
+
+y ∼ Poisson(λ = exp(f (x)) + exp(g(x))),
+
+(10)
+
+3. Available from https://www.twinword.com/
+
+13
+
+Figure 5: Even with 350 data we can start to see the diﬀerentiation of the addition of
+a long lengthscale positive process and a short lengthscale positive process. Red crosses
+denote observations, dotted lines are the true latent functions generating the data using
+Eq (10), the solid line and associated error bars are the approximate posterior predictions,
+q(f ∗), q(g∗), of the latent processes.
+
+there is no link function representation for this model, it takes the form of a chained-GP.
+
+Focusing purely on the generative model of the data, the lack of an link function does
+not present an issue. Figure 5 shows a simple demonstration of the idea in a simulated data
+set.
+
+Using an additive model for the rate rather than a multiplicative model for counting
+processes has been discussed previously in the context of linear models for survival analysis,
+with promising results Lin and Ying (1995).
+
+To illustrate the model on real data we considered homicide data in Chicago. Taking
+data from http://homicides.redeyechicago.com/ (see also Linderman and Adams (2014)) we
+aggregated data into three months periods by zip code. We considered an additive Poisson
+process with a particular structure for the covariance functions. We constructed a rate of
+the form:
+
+Λ(x, t) = λ1(x)µ1(t) + λ2(x)µ2(t)
+
+where λ1(x) = exp(f1(x)), λ2(x) = exp(g1(x)), µ1(t) = exp(f2(t)) and µ2(t) = exp(g2(t))
+where f1(x), g1(x) are spatial GPs and f2(t) and g2(t) are temporal GPs. The overall rate
+decomposes into two separable rate functions, but the overall rate function is not separable.
+We have a sum of separable ( ´Alvarez et al., 2012) rate functions. This structure allows us
+to decompose the homicide map into separate spatial maps that each evolve at diﬀerent
+time rates. We selected one spatial map with a length scale of 0.04 and one spatial map
+with a length scale of 0.09. The time scales and variances of the temporal rate functions
+were optimized by maximum likelihood. The results are shown in Figure 6. The long
+
+14
+
+Figure 6: Homicide rate maps for Chicago. The short length scale spatial process, λ1(x)
+(above-left) is multiplied in the model by a temporal process, µ1(t) (below-left) which
+ﬂuctuates with passing seasons. Contours of spatial process are plotted as deaths per
+month per zip code area. Error bars on temporal processes are at 5th and 95th percentile.
+The longer length scale spatial process, λ2(x) (above-right) has been modeled with little to
+no ﬂuctuation temporally µ2(t) (below-right).
+
+length scale process hardly ﬂuctuates across time, whereas the short lengthscale process,
+which represents more localized homicide activity, ﬂuctuates across the seasons with scaled
+increases of around 1.25 deaths per month per zip code. This decomposition is possible and
+interpretable due to the structured underlying nature of the GPs inside the chained model.
+
+5. Conclusions
+
+We have introduced “Chained Gaussian Process” models. They allow us to make predictions
+which are based on a non-linear combination of underlying latent functions. This gives a
+far more ﬂexible formalism than the generalized linear models that are classically applied
+in this domain.
+
+15
+
+Chained Gaussian processes are a general formalism and therefore are intractable in the
+base case. We derived an approximation framework that is applicable for any factorized
+likelihood. For the cases we considered, involving two latent functions, the approximation
+made use of two dimensional Gauss-Hermite quadrature. We speculated that when the idea
+is extended to higher numbers of latent functions it may be necessary to resort to Monte
+Carlo sampling.
+
+Our approximation is highly scalable through the use of stochastic variational inference.
+This enables the full range of standard stochastic optimizers to be applied in the framework.
+
+AS was supported by a University of Sheﬃeld, Faculty Scholarship, JH was supported by
+a MRC fellowship. The authors also thank Amazon for a donation of AWS compute time
+and the anonymous reviewers of a previous transcript of this work.
+
+Acknowledgments
+
+References
+
+Ryan Prescott Adams and Oliver Stegle. Gaussian process product models for nonparametric
+nonstationarity. In Proceedings of the 25th International Conference on Machine Learning, pages
+1–8, 2008.
+
+Mauricio ´Alvarez, Lorenzo Rosasco, and Neil D. Lawrence. Kernels for vector-valued functions:
+A review. Foundations and Trends in Machine Learning, 4(3):195–266, 2012. doi: 10.1561/
+2200000036.
+
+Amir Dezfouli and Edwin V Bonilla. Scalable inference for Gaussian process models with black-
+box likelihoods. In C. Cortes, N. D. Lawrence, D. D. Lee, M. Sugiyama, and R. Garnett, editors,
+Advances in Neural Information Processing Systems 28, pages 1414–1422. Curran Associates, Inc.,
+2015.
+
+John Duchi, Elad Hazan, and Yoram Singer. Adaptive subgradient methods for online learning and
+
+stochastic optimization. J. Mach. Learn. Res., 12:2121–2159, July 2011. ISSN 1532-4435.
+
+Yarin Gal, Mark van der Wilk, and Carl E. Rasmussen. Distributed variational inference in
+sparse Gaussian process regression and latent variable models.
+In Zoubin Ghahramani, Max
+Welling, Corinna Cortes, Neil D. Lawrence, and Kilian Q. Weinberger, editors, Advances in Neural
+Information Processing Systems, volume 27, Cambridge, MA, 2014.
+
+Andrew Gelman, John B. Carlin, Hal S. Stern, David B. Dunson, Aki Vehtari, and Donald B. Rubin.
+Bayesian Data Analysis, Third Edition. CRC Press, November 2013. ISBN 9781439840955.
+
+Paul W. Goldberg, Christopher K. I. Williams, and Christopher M. Bishop. Regression with input-
+dependent noise: A Gaussian process treatment. In Michael I. Jordan, Michael J. Kearns, and
+Sara A. Solla, editors, Advances in Neural Information Processing Systems, volume 10, pages
+493–499, Cambridge, MA, 1998. MIT Press.
+
+R. Henderson, S. Shimakura, and Gorst D. Modeling spatial variation in leukemia survival data.
+
+Journal of the American Statistical Association, 97:965–972, 2002.
+
+James Hensman, Nicol´o Fusi, and Neil D. Lawrence. Gaussian processes for big data.
+
+In Ann
+Nicholson and Padhraic Smyth, editors, Uncertainty in Artiﬁcial Intelligence, volume 29. AUAI
+Press, 2013a.
+
+16
+
+James Hensman, Neil D. Lawrence, and Magnus Rattray. Hierarchical Bayesian modelling of gene
+expression time series across irregularly sampled replicates and clusters. BMC Bioinformatics, 14
+(252), 2013b. doi: doi:10.1186/1471-2105-14-252.
+
+James Hensman, Alexander G D G Matthews, and Zoubin Ghahramani. Scalable variational
+In In 18th International Conference on Artiﬁcial Intelligence
+
+Gaussian process classiﬁcation.
+and Statistics, pages 1–9, San Diego, California, USA, May 2015.
+
+Daniel Hern´andez-Lobato, Viktoriia Sharmanska, Kristian Kersting, Christoph H Lampert, and
+Novi Quadrianto. Mind the nuisance: Gaussian process classiﬁcation using privileged noise. In
+Z. Ghahramani, M. Welling, C. Cortes, N.D. Lawrence, and K.Q. Weinberger, editors, Advances
+in Neural Information Processing Systems 27, pages 837–845. Curran Associates, Inc., 2014.
+
+Matthew D. Hoﬀman, David M. Blei, Chong Wang, and John Paisley. Stochastic variational
+
+inference. Journal of Machine Learning Research, 14:1303–1347, 2013.
+
+Pasi Jyl¨anki, Jarno Vanhatalo, and Aki Vehtari. Robust Gaussian process regression with a Student-t
+
+likelihood. J. Mach. Learn. Res., 12:3227–3257, November 2011. ISSN 1532-4435.
+
+D. P. Kingma and M. Welling. Stochastic gradient VB and the variational auto-encoder. In 2nd
+
+International Conference on Learning Representations (ICLR), Banﬀ, 2014.
+
+Malte Kuß. Gaussian Process Models for Robust Regression, Classiﬁcation, and Reinforcement
+
+Learning. PhD thesis, TU Darmstadt, April 2006.
+
+Miguel Lazaro-Gredilla and Michalis Titsias.
+
+Variational heteroscedastic Gaussian process
+In Lise Getoor and Tobias Scheﬀer, editors, Proceedings of the 28th International
+regression.
+Conference on Machine Learning (ICML-11), ICML ’11, pages 841–848, New York, NY, USA,
+June 2011. ACM. ISBN 978-1-4503-0619-5.
+
+D. Y. Lin and Zhiliang Ying. Semiparametric analysis of general additive-multiplicative hazard
+doi:
+
+models for counting processes. The Annals of Statistics, 23(5):1712–1734, 10 1995.
+10.1214/aos/1176324320.
+
+Scott Linderman and Ryan Adams. Discovering latent network structure in point process data. In
+
+ICML, 2014.
+
+John Nelder and Robert Wedderburn. Generalized linear models. Journal of the Royal Statistical
+
+Society, A, 135(3), 1972. doi: 10.2307/2344614.
+
+Trung V Nguyen and Edwin V Bonilla. Automated variational inference for Gaussian process models.
+In Z. Ghahramani, M. Welling, C. Cortes, N.D. Lawrence, and K.Q. Weinberger, editors, Advances
+in Neural Information Processing Systems 27, pages 1404–1412. Curran Associates, Inc., 2014.
+
+Manfred Opper and Cedric Archambeau. The variational Gaussian approximation revisited. Neural
+
+Computation, 21(3):786–792, 2009.
+
+Danilo Jimenez Rezende, Shakir Mohamed, and Daan Wierstra. Stochastic back-propagation and
+
+variational inference in deep latent Gaussian models. Technical report, 2014.
+
+H˚avard Rue, Sara Martino, and Nicolas Chopin. Approximate Bayesian inference for latent Gaussian
+models by using integrated nested Laplace approximations. Journal of the Royal Statistical
+Society: Series B (Statistical Methodology), 71(2):319–392, 2009. doi: 10.1111/j.1467-9868.2008.
+00700.x.
+
+17
+
+B. W. Silverman. Some aspects of the spline smoothing approach to non-parametric regression curve
+
+ﬁtting (with discussion). Journal of the Royal Statistical Society, B, 47(1):1–52, 1985.
+
+Edward Snelson and Zoubin Ghahramani. Sparse Gaussian processes using pseudo-inputs. In Yair
+Weiss, Bernhard Sch¨olkopf, and John C. Platt, editors, Advances in Neural Information Processing
+Systems, volume 18, Cambridge, MA, 2006. MIT Press.
+
+Edward Snelson, Carl Edward Rasmussen, and Zoubin Ghahramani. Warped Gaussian processes.
+In Sebastian Thrun, Lawrence Saul, and Bernhard Sch¨olkopf, editors, Advances in Neural
+Information Processing Systems, volume 16, Cambridge, MA, 2004. MIT Press.
+
+T. Tieleman and G Hinton. Divide the gradient by a running average of its recent magnitude. In:
+
+COURSERA: Neural Networks for Machine Learning, 2012.
+
+Michalis K. Titsias. Variational learning of inducing variables in sparse Gaussian processes.
+
+In
+David van Dyk and Max Welling, editors, Proceedings of the Twelfth International Workshop on
+Artiﬁcial Intelligence and Statistics, volume 5, pages 567–574, Clearwater Beach, FL, 16-18 April
+2009. JMLR W&CP 5.
+
+Ville Tolvanen, Pasi Jyl¨anki, and Aki Vehtari.
+
+Expectation propagation for nonstationary
+heteroscedastic Gaussian process regression. In Machine Learning for Signal Processing (MLSP),
+2014 IEEE International Workshop, 2014.
+
+Richard E. Turner and Maneesh Sahani. Demodulation as probabilistic inference. IEEE Transactions
+
+on Audio, Speech, and Language Processing, 19:2398–2411, 2011.
+
+Jarno Vanhatalo, Jaakko Riihim¨aki, Jouni Hartikainen, Pasi Jyl¨anki, Ville Tolvanen, and Aki
+Vehtari. GPstuﬀ: Bayesian modeling with Gaussian processes. Journal of Machine Learning
+Research, 14(1):1175–1179, 2013. http://mloss.org/software/view/451/.
+
+18
+
+Appendix A. Supplementary Material
+
+A.1 Collapsed Heteroscedastic
+
+Lazaro-Gredilla and Titsias (2011) form a bound by ‘collapsing out’ the q(f ) distribution,
+such that it need not take a Gaussian form. As a brief review their bound can be derived
+as follows.
+
+log p(y|f ) ≥ Eq(f )
+
+(cid:105)
+(cid:104)
+log p(y|f , g)
+
++ log Eq(g)
+
+(cid:16)
+
+= log N
+
+y|f , emf i−
+
+(cid:17)
+
+vf i
+2
+
+−
+
+(cid:105)
+
+(cid:104) p(g)
+q(g)
+
+1
+4
+
+n
+(cid:88)
+
+i=1
+
+vf i = L(cid:48)
+
+L =
+
+p(y|f )p(f )df
+
+eL(cid:48)
+
+p(f )df
+
+(cid:90)
+
+(cid:90)
+
+(cid:90)
+
+≥
+
+=
+
+(cid:16)
+
+N
+
+y|f , emf i−
+
+(cid:17)
+
+vf i
+2
+
+N (f |0, Kﬀ ) −
+
+1
+4
+
+n
+(cid:88)
+
+i=1
+
+vf i
+
+− KL (q(g) (cid:107) p(g))
+
+(cid:16)
+
+= N
+
+y|0, Kﬀ + emf i−
+
+(cid:17)
+
+vf i
+2
+
+−
+
+1
+4
+
+n
+(cid:88)
+
+i=1
+
+vf i
+
+− KL (q(g) (cid:107) p(g))
+
+The bound that we assumes a sparse approximation, however it also constrains q(f ) to be
+Gaussian. This leads to an additional KL divergence since the optimal is not chosen, and
+additional penalty term arising from the mismatch of the constrained form of q(f ).
+
+A.2 Quadrature and Monte Carlo
+
+Computing the expected likelihood requires many low-dimensional integrals. Recently, there
+has been progress in using stochastic methods to obtain unbiased estimates in this area using
+centered representations (Kingma and Welling, 2014; Rezende et al., 2014). In this section,
+we re-examine the eﬀectiveness of Gauss-Hermite quadrature in this setting. Gauss-Hermite
+quadrature approximates Gaussian integrals in one dimension using a pre-deﬁned grid. For
+expectations of polynomial functions, the method is exact when the grid size meets the
+degree of the polynomial; for non-polynomial functions as we will encounter in general, we
+must accept a small amount of bias. To integrate higher dimensional functions, we must
+nest the quadrature, doing an integral across one dimension for each quadrature point in the
+other. Our experiments suggest that even in this case, the amount of bias is negligible, as
+Figure 7 investigates, examining the accuracy of nested quadrature as compared to Monte
+Carlo estimates using the centered parameterization (Kingma and Welling, 2014). Inspired
+
+19
+
+3
+
+2
+
+1
+
+0
+
+−1
+
+−2
+
+0.5
+
+h
+t
+u
+r
+t
+
+d
+n
+u
+o
+r
+g
+C
+M
+m
+o
+r
+f
+
+r
+o
+r
+r
+e
+
+e
+t
+u
+l
+o
+s
+b
+A
+
+100
+
+10−1
+
+10−2
+
+10−3
+
+10−4
+
+10−5
+
+10−6
+
+h
+t
+u
+r
+t
+
+d
+n
+u
+o
+r
+g
+C
+M
+m
+o
+r
+f
+
+r
+o
+r
+r
+e
+
+e
+t
+u
+
+l
+o
+s
+b
+A
+
+h
+t
+u
+r
+t
+
+d
+n
+u
+o
+r
+g
+C
+M
+m
+o
+r
+f
+
+r
+o
+r
+r
+e
+
+e
+t
+u
+l
+o
+s
+b
+A
+
+101
+
+100
+
+10−1
+
+10−2
+
+10−3
+
+10−4
+
+10−5
+
+10−6
+
+100
+
+10−1
+
+10−2
+
+10−3
+
+10−4
+
+10−5
+
+10−6
+
+1
+
+1.5
+
+2
+
+2.5
+
+3
+
+(a) Test locations marked
+
+4
+
+16
+
+64
+
+256 1024 4096 16384
+
+Function evaluations
+
+(b) Student-t mode
+
+4
+
+16
+
+64
+
+256 1024 4096 16384
+
+4
+
+16
+
+64
+
+256 1024 4096 16384
+
+Function evaluations
+
+(c) Student-t shoulder
+
+Function evaluations
+
+(d) Student-t tail
+
+Figure 7: Two dimensional Gauss-Hermite quadrature vs Monte Carlo. Each plot shows the
+log absolute error in estimating the two dimension integral required by our Heteroscedastic
+Student-t model (see section 4.2). In each case, the bias introduced by quadrature (circles)
+is small: a long way into the tail of the variance from the MC approximation.
+In fact,
+for small numbers of quadrature points, we often do better than the expected value using
+many more MC samples. Boxplots shows the absolute error on 1000 separate reruns of MC,
+whereas quadrature is deterministic. The error was evaluated at various points in the tail
+of the distribution as shown in a).
+
+by an examination of quadrature for expectation propagation (Jyl¨anki et al., 2011), we
+examine the eﬀectiveness for a several positions of the integral of a Student-t.
+
+Gauss-Hermite quadrature is appropriate for our integral as the Gaussian posteriors
+q(fi)q(gi) are convolved with a function p(yi|gi, fi). Monte Carlo integration is exact in
+the limit of inﬁnite samples, however in practice a subset of samples must be used. Gauss-
+Hermite requires phb evaluations per point in the mini-batch, where h is the number of
+Gauss-Hermite points used, p is the number of output dimensions, and b is the number
+of latent functions. Since Monte Carlo is unbiased, using a stochastic optimizer with the
+stochastic estimates of the integral and its gradients will work eﬀectively (Nguyen and
+
+20
+
+Bonilla, 2014; Kingma and Welling, 2014), though we ﬁnd the bias introduced by the
+quadrature approach to be negligible. For higher number of latent functions it may be more
+eﬃcient to make use of low variance Monte Carlo estimates for the integrals. Gradients for
+the model can be computed in a similar way with the Gaussian idenities used by Opper
+and Archambeau (2009).
+
+A.3 Gradients and Optimization
+
+Gradients can be computed similarly to (Hensman et al., 2015) using the equalities,
+
+∂
+∂µ
+∂
+∂σ2
+
+EN (x|µ,σ2)
+
+(cid:105)
+(cid:104)
+f (x)
+
+= EN (x|µ,σ2)
+
+EN (x|µ,σ2)
+
+(cid:105)
+(cid:104)
+f (x)
+
+=
+
+EN (x|µ,σ2)
+
+1
+2
+
+(cid:105)
+
+f (x)
+
+(cid:104) ∂
+∂x
+(cid:104) ∂
+∂x2 f (x)
+
+(cid:105)
+
+(11)
+
+(12)
+
+and the chain rule.
+
+Since our posterior assumes factorization between q(f ) and q(g) we simply do the
+
+gradients independently. That is calculate
+
+N (xi|mf ,vf )
+
+(cid:104)
+
+(cid:105)
+log p(y|f , g)
+
+EN (xi|mg,vg)
+
+(cid:104)
+
+(cid:105)
+log p(y|f , g)
+
+N (xi|mf ,vf )
+
+(cid:104)
+
+(cid:105)
+log p(y|f , g)
+
+EN (xi|mg,vg)
+
+(cid:104)
+
+(cid:105)
+log p(y|f , g)
+,
+
+E
+
+E
+
+∂
+∂µf
+∂
+∂µg
+∂
+∂vf
+∂
+∂vg
+
+independently using (11) and (12). The expectations can then be done using quadrature,
+or Monte Carlo sampling. As before
+
+µf
+
+uf uf
+
+mf = Kfuf K−1
+vf = Kﬀ + Kfuf K−1
+mg = Kgug K−1
+vg = Kgg + Kgug K−1
+
+ugug µg
+
+uf uf (Sf − Kuf uf )K−1
+
+uf uf
+
+Kuf f
+
+ugug (Sg − Kugug )K−1
+(cid:105) ∂mf
+∂Kfuf
+
+log p(y|f , g)
+
+(cid:104)
+
+∂Kfuf
+∂θ
+
+ugug Kugg.
+
+We then can chain using
+
+∂
+∂mf
+
+E
+
+N (xi|mf ,vf )
+
+, where θ is a hyper
+
+parameter of the kernel kf . Similar chain rules can be written for the other derivatives.
+
+The model contains variational parameters corresponding to q(uf ) = N (uf |µf , Sf ) and
+q(ug) = N (ug|µg, Sg) and the latent input locations, Z. As such the parameters do not
+scale with n. Naively the number of parameters is O(b(m2 + m) + m) however we can
+reduce this to O(b( m2
+2 + m)) by parameterizing the Choleksy of the covariance matrices,
+Sf = Lf L(cid:62)
+g . This has the added beneﬁt of enforcing that Sf and Sg are
+symmetrical and positive deﬁnite.
+
+f and Sg = LgL(cid:62)
+
+We initialize the model with random or informed lengthscales within the right region, µf
+and µg are assigned small random values, Sg and Sf are given an identity form. In practice
+
+21
+
+during optimization we ﬁnd it helpful to initially ﬁx all the kernel hyperparameters and Z at
+their initial locations, optimize for a small number of steps, then allow the optimization to
+run freely. This allows the latent means µf and µg to move to sensible locations before the
+model is allowed to completely change the form of the function through the modiﬁcation
+of the kernel hyperparameters. True convergence can be diﬃcult to achieve due to the
+potentially number of strongly dependent parameters and the non-convex optimization
+It is important to
+problem, and in practice we ﬁnd it helpful to monitor convergence.
+note however that the number of parameters to be optimized is ﬁxed with respect to n.
+
+A.4 Further Twitter experiment details
+
+The model used to model the twitter data has some interesting properties, such as the
+ability to model a transition from a unimodal distribution to a bimodal distribution. The
+following plot shows how the distribution changes throughout time for the Labour dataset.
+
+The latent functions α and β which are modelled in Section 4.2.2 can be plotted
+If both latent functions went below 1.0 then the distribution at that time
+themselves.
+would turn into a bathtub shape. If both are larger than one but one is larger than the
+other, we have a skewed distribution. If one is below zero and the over above, it appears
+exponential or negative exponential.
+
+A.5 Survival details
+
+To generate the synthetic survival dataset we ﬁrst deﬁne latent functions that we wish to
+infer. These are a complex function of an input, x, with two dimensions,
+
+(cid:18)
+
+α = exp
+
+2 exp(−30(x:,0 −
+
+)2) + sin(πx2
+
+:,1) − 2
+
+(cid:19)
+
+β = exp (sin(2πx:,0) + cos(2πx:,1)) .
+
+1
+4
+
+22
+
+We then make 1000 synthetic individuals, with covariates sampled uniformly from
+
+xi,0 ∼ Uniform(0, 1) and xi,1 ∼ Uniform(0, 1).
+
+Using these two latent functions, αi and βi, computed using covariates xi for individual
+
+i, we sample a simulated failure time from a log-logistic distribution,
+
+y ∼ LL(α, β) =
+
+(cid:17) (cid:0) y
+α
+
+(cid:16) β
+α
+(cid:16)
+
+1 + y
+α
+
+(cid:1)β−1
+β(cid:17)2 .
+
+These are then the true failure times of individuals with covariates xi. 20% of the
+data is chosen to be censored censor. A time is uniformly drawn, and the observed time
+is truncated to this time, yi = ti. Otherwise ti = yi. Additionally a indicator δi = 1 is
+provided to the model if censoring occurs, and δi = 0 if the real failure time was observed.
+This mimics patients dropping out of a trial, with the assumption that the time at which
+they drop out is independent of the failure time and covariates. For these censored times,
+we only know that Ti > ti, and for the uncensored individuals it is known that Ti = ti.
+
+As such the likelihood is decomposed into P (ti ≤ yi < ti + δt|αi, βi, δi = 0) and
+
+P (yi|αi, βi, δi = 1) = 1 − P (yi > ti|αi, βi, δi = 1)
+
+p(y|α, β, δ) =
+
+K:δ(cid:54)=1
+(cid:89)
+
+i
+
+(cid:16) βi
+αi
+(cid:16)
+
+(cid:17) (cid:16) yi
+αi
+
+1 + yi
+αi
+
+(cid:17)βi−1
+
+βi(cid:17)2
+
+M :δ=1
+(cid:89)
+
+j
+
+1 +
+
+1
+(cid:16) yj
+αj
+
+(cid:17)βj
+
+The task is then to infer α and β, such that we know how the failure time distribution
+
+varies in response to covariate information.
+
+23
+

@@ -1,0 +1,3296 @@
+Accelerated Nearest Neighbor Search with Quick ADC
+
+Fabien André
+Technicolor
+fabien.andre@technicolor.com
+
+Anne-Marie Kermarrec
+Inria
+anne-marie.kermarrec@inria.fr
+
+Nicolas Le Scouarnec
+Technicolor
+nicolas.lescouarnec@technicolor.com
+
+7
+1
+0
+2
+ 
+r
+p
+A
+ 
+4
+2
+ 
+ 
+]
+
+V
+C
+.
+s
+c
+[
+ 
+ 
+1
+v
+5
+5
+3
+7
+0
+.
+4
+0
+7
+1
+:
+v
+i
+X
+r
+a
+
+ABSTRACT
+Efficient Nearest Neighbor (NN) search in high-dimensional spaces
+is a foundation of many multimedia retrieval systems. Because it
+offers low responses times, Product Quantization (PQ) is a pop-
+ular solution. PQ compresses high-dimensional vectors into short
+codes using several sub-quantizers, which enables in-RAM storage
+of large databases. This allows fast answers to NN queries, with-
+out accessing the SSD or HDD. The key feature of PQ is that it
+can compute distances between short codes and high-dimensional
+vectors using cache-resident lookup tables. The efficiency of this
+technique, named Asymmetric Distance Computation (ADC), re-
+mains limited because it performs many cache accesses.
+
+In this paper, we introduce Quick ADC, a novel technique that
+achieves a 3 to 6 times speedup over ADC by exploiting Single In-
+struction Multiple Data (SIMD) units available in current CPUs. Ef-
+ficiently exploiting SIMD requires algorithmic changes to the ADC
+procedure. Namely, Quick ADC relies on two key modifications of
+ADC: (i) the use 4-bit sub-quantizers instead of the standard 8-bit
+sub-quantizers and (ii) the quantization of floating-point distances.
+This allows Quick ADC to exceed the performance of state-of-the-
+art systems, e.g., it achieves a Recall@100 of 0.94 in 3.4 ms on 1
+billion SIFT descriptors (128-bit codes).
+
+KEYWORDS
+Large-Scale Multimedia Search; Multimedia Search Acceleration;
+Product Quantization; SIMD
+
+ACM Reference format:
+Fabien André, Anne-Marie Kermarrec, and Nicolas Le Scouarnec. 2017. Ac-
+celerated Nearest Neighbor Search with Quick ADC. In Proceedings of ICMR
+’17, Bucharest, Romania, June 06-09, 2017, 8 pages.
+DOI: http://dx.doi.org/10.1145/3078971.3078992
+
+1 INTRODUCTION
+The Nearest Neighbor (NN) search problem consists in finding the
+closest vector x to a query vector y among a database of N d-
+dimensional vectors. Efficient NN search in high-dimensional spaces
+is a requirement in many multimedia retrieval applications, such as
+image similarity search, image classification, or object recognition.
+These problems typically involve extracting high-dimensional fea-
+ture vectors, or descriptors, and finding the NN of the extracted
+descriptors among a database of descriptors. For images, SIFT [10]
+and GIST descriptors [12] are commonly used.
+
+Although efficient NN search solutions have been proposed for
+low-dimensional spaces, exact NN search remains challenging in
+
+ICMR ’17, Bucharest, Romania
+© 2017 Copyright held by the owner/author(s). Publication rights licensed to ACM.
+This is the author’s version of the work. It is posted here for your personal use. Not
+for redistribution. The definitive Version of Record was published in Proceedings of
+ICMR ’17, June 06-09, 2017 , https://doi.org/http://dx.doi.org/10.1145/3078971.3078992.
+
+high-dimensional spaces due to the notorious curse of dimension-
+ality. As a consequence, much research work has been devoted to
+Approximate Nearest Neighbor (ANN) search. ANN search returns
+sufficiently close neighbors instead of the exact NN. Product Quan-
+tization (PQ) [7] is a widely used [9, 14] ANN search approach.
+PQ compresses high-dimensional vectors into short codes of a few
+bytes, enabling in-RAM storage of large databases. This allows fast
+answers to ANN queries, without SSD or HDD accesses.
+
+The key feature of PQ is that it allows computing distances be-
+tween uncompressed query vectors and compressed database vec-
+tors. This technique, known as Asymmetric Distance Computation
+(ADC), relies on cache-resident lookup tables. Although ADC is
+faster than distance computations in high-dimensional spaces, its
+efficiency remains low because it performs many cache accesses.
+To date, much of the research work has been devoted to the de-
+velopment of efficient inverted indexes [3, 13], which reduce the
+number of ADCs required to answer NN queries. Recently, there
+also has been an interest in increasing the performance of the ADC
+procedure itself with the introduction of PQ Fast Scan [1]. Unfor-
+tunately, PQ Fast Scan cannot be combined with efficient inverted
+indexes, limiting its usefulness in practical cases. In this paper, we
+introduce Quick ADC, a high-performance ADC procedure that
+can be combined with inverted indexes. More specifically, this pa-
+per makes two contributions, detailed in the next two paragraphs.
+First, we detail the design of Quick ADC. Like PQ Fast Scan,
+Quick ADC replaces cache accesses by SIMD in-register shuffles
+to accelerate the ADC procedure. Exploiting SIMD in-register shuf-
+fles requires storing the lookup tables used by the ADC procedure
+in SIMD registers. However, these registers are much smaller than
+the lookup tables used by the conventional ADC procedure. There-
+fore, algorithmic changes are required to obtain small lookup ta-
+bles that fit SIMD registers. PQ Fast Scan obtains such small lookup
+tables by grouping the codes of the database. This approach pre-
+vents PQ Fast Scan from being combined with inverted indexes.
+Quick ADC takes a different approach to obtain small lookup ta-
+bles, which is compatible with inverted indexes. Namely, Quick
+ADC relies on two key ideas: (i) the use of 4-bit sub-quantizers, in-
+stead of the standard 8-bit sub-quantizers, and (ii) the quantization
+of floating-point distances to 8-bit integers.
+
+Second, we implement Quick ADC and evaluate its performance
+in a wide range of scenarios. It is known that the use of 4-bit quan-
+tizers instead of the common 8-bit quantizer can cause a loss of
+recall [7]. However, we show that this loss is small or negligible,
+especially when combining Quick ADC with inverted indexes and
+Optimized Product Quantization (OPQ), a variant of PQ. On the
+SIFT1B dataset, Quick ADC achieves a better speed-accuracy trade-
+off than the state-of-art OMulti-D-OADC system [3, 5], e.g., Quick
+ADC achieves a Recall@100 of 0.94 in 3.4 ms (128-bit codes).
+
+ICMR ’17, June 06-09, 2017, Bucharest, Romania
+
+Fabien André, Anne-Marie Kermarrec, and Nicolas Le Scouarnec
+
+2 BACKGROUND
+In this section, we describe how Product Quantizers (PQ) and Op-
+timized Product Quantizers (OPQ) encode vectors into short codes.
+We then detail the ANN search process in databases of short codes.
+Lastly, we analyze the impact of PQ parameters on ANN search
+speed and recall.
+
+2.1 Vector Encoding
+Vector Quantizers. To encode vectors as short codes, PQ builds on
+vector quantizers. A vector quantizer, or quantizer, is a function
+q which maps a vector x ∈ Rd , to a vector ci ∈ Rd belonging to
+a predefined set of vectors C. Vectors ci are called centroids, and
+the set of centroids C, of cardinality k, is the codebook. For a given
+codebook C, a quantizer which minimizes the quantization error
+must satisfy Lloyd’s condition and map the vector x to its closest
+centroid ci :
+
+q(x) = arg min
+
+||x − ci ||.
+
+ci ∈C
+A vector quantizer can be used to encode a vector x ∈ Rd into a
+short code i ∈ {0 . . . k − 1} using the encoder enc:
+
+enc(x) = i, such that q(x) = ci
+The short code i only occupies b = ⌈log2(k)⌉ bits, which is typically
+much lower the d · 32 bits occupied by a vector x ∈ Rd stored
+as an array of d single-precision floats (32 bit each). To maintain
+the quantization error low enough for ANN search, a very large
+codebook e.g., k = 264 or k = 2128 is required. However, training
+such codebooks is not tractable both in terms of processing and
+memory requirements.
+
+Product Quantizers. Product quantizers overcome this issue by
+dividing a vector x ∈ Rd into m sub-vectors, x = (x0, . . . , xm−1),
+assuming that d is a multiple of m. Each sub-vector x j ∈ Rd /m,
+j ∈ {0, . . . , m − 1} is quantized using a sub-quantizer qj . Each sub-
+quantizer qj has a distinct codebook Cj = (c j
+i )k−1
+i =0 of cardinality k.
+A product quantizer pq maps a vector x ∈ Rd as follows:
+
+pq(x) =
+
+q0(x0), . . . , qm−1(xm−1)
+
+(cid:16)
+= (c0
+i0
+
+, . . . , cm−1
+im−1
+
+)
+
+(cid:17)
+
+The codebook C of the product quantizer q is given by the cartesian
+product of the sub-quantizers codebooks:
+
+C = C0 × · · · × Cm−1
+The cardinality of the product quantizer codebook C is km . Thus,
+a product quantizer is able to produce a large number of centroids
+km while only requiring storing and training m codebooks of cardi-
+nality k. A product quantizer can be used to encode a vector x into
+a short code, by concatenating codes produced by sub-quantizers:
+
+enc(x) = (i0, . . . , im−1), such that q(x) = (c0
+i0
+
+, . . . , cm−1
+im−1
+
+)
+
+The short code (i0, . . . , im−1) requires ⌈log2(km )⌉ = m · b bits of
+storage, where b = ⌈log2(k)⌉.
+
+Optimized Product Quantizers. Cartesian k-means (CKM) [11]
+and Optimized Product Quantizers (OPQ) [5] and optimize the sub-
+space decomposition by multiplying the vector x by an orthonor-
+mal matrix R ∈ Rd ×d before quantization. The matrix R allows
+
+for arbitrary rotation and permutation of vector components. An
+optimized product quantizer opq maps a vector x as follows:
+
+opq(x) = pq(Rx), such that RT R = I ,
+
+where pq is a product quantizer. Optimized product quantizers can
+be used to encode vectors into short codes like product quantizers.
+
+2.2 Inverted Indexes
+The simplest search strategy, exhaustive search, involves encoding
+database vectors as short codes using PQ or OPQ and storing short
+codes in RAM. At query time, the whole database is scanned for
+nearest neighbors.
+
+The more refined non-exhaustive search strategy relies on in-
+verted indexes (or IVF) [7, 8] to avoid scanning the whole database.
+An inverted index uses a quantizer qi to partition the input vector
+space into K Voronoi cells. Vectors lying in each cell are stored in
+an inverted list. At query time, the inverted index is used to find
+the closest cells to the query vector, which are then scanned. In-
+verted indexes therefore offer a lower query response time. When
+adding a vector x to an indexed database, its residual r(x) is first
+computed:
+
+r(x) = x − qi(x)
+The residual r(x) is then encoded into a short code using a prod-
+uct quantizer. This code is then stored in the appropriate inverted
+list of the inverted index. Indexed databases therefore use two quan-
+tizers: a quantizer for the index (qi) and a product quantizer to
+encode residuals into short codes. The energy of residuals r(x) is
+smaller than the energy of input vectors x, thus there is a lower
+quantization error when encoding residuals into short codes. Non-
+exhaustive search therefore offers a higher recall than exhaustive
+search in addition to the lower response time. Inverted indexes
+however incur a memory overhead (usually 4 bytes per database
+vector). This memory overhead is negligible in the case of small
+databases (∼ 4MB for 1 million vectors) and for large databases, ex-
+haustive search is anyway hardly tractable. Non-exhaustive search
+is therefore preferred to exhaustive search in most cases.
+
+2.3 ANN Search
+ANN search in a database of short codes consists in three steps:
+Index, which involves retrieving inverted lists from the index, Ta-
+bles, which involves computing lookup tables to speed up distance
+computations and Scan which involves computing distances be-
+tween the query vector and short codes using the pre-computed
+lookup tables. Obviously, the step Index is only required for non-
+exhaustive search, and is skipped in the case of exhaustive search.
+We detail these three steps in the three following paragraphs.
+
+Index. In this step, the Voronoi cell of the inverted index quan-
+tizer qi in which the query vector y lies is determined. The residual
+r(y) of the query vector is also computed. In practice, to improve
+recall, the ma closest cells (typically, ma = 8 to 64) are selected.
+For the sake of simplicity, this section describes the ANN search
+process for ma = 1, but each operation is repeated ma times: ma
+cells are selected, ma sets of lookup tables are computed and ma
+cells are searched. In the case of exhaustive search no residual is
+computed and the query vector is used as-is. In the remainder of
+
+Accelerated Nearest Neighbor Search with Quick ADC
+
+ICMR ’17, June 06-09, 2017, Bucharest, Romania
+
+3:
+
+, database, y, R)
+
+Algorithm 1 ANN Search
+1: function nns({Cj }m
+j=0
+list, y′ ←index_get_list(database, y)
+2:
+j=0 ← compute_tables(y′, {Cj }m
+{D j }m
+return scan(list, {D j }m
+4:
+5: function scan(list, {D j }m
+j=0
+neighbors ← binheap(R)
+6:
+for i ← 0 to |list| − 1 do
+
+j=0)
+, R)
+
+7:
+
+j=0)
+
+⊲ binary heap of size R
+
+⊲ ith pqcode
+
+8:
+
+9:
+
+10:
+
+c ← list[i]
+d ← adc(p, {D j }m
+j=0)
+neighbors. add((i, d))
+
+return neighbors
+11:
+12: function adc(c, {D j }m−1
+j=0 )
+13:
+
+d ← 0
+for j ← 0 to m do
+
+14:
+
+15:
+
+d ← d + D j [c[j]]
+
+return d
+
+this section, y′ = r(y) for non-exhaustive search, and y′ = y for
+exhaustive search.
+
+Tables. In this step, a set ofm lookup tables are computed {D j }m
+j=0,
+where m is the number of sub-quantizers of the product quantizer.
+The jth lookup table comprises the distance between the j sub-
+vector of y′ and all centroids of the jth sub-quantizer:
+
+D j =
+
+y′j − Cj [0]
+(cid:18)(cid:13)
+(cid:13)
+(cid:13)
+
+(cid:13)
+(cid:13)
+(cid:13)
+
+2
+
+, . . . ,
+
+y′j − Cj [k − 1]
+(cid:13)
+(cid:13)
+(cid:13)
+
+(cid:13)
+(cid:13)
+(cid:13)
+
+2
+
+(cid:19)
+
+Scan. In this step, the cells of the inverted index selected during the
+step Index are searched for nearest neighbors. This requires com-
+puting the distance between the query vectors and short codes us-
+ing Asymmetric Distance Computation (ADC). ADC computes the
+distance between the query vector y and a short code c as follows:
+
+(1)
+
+adc(y, c) =
+
+D j [c[j]]
+
+(2)
+
+m−1
+
+Õj=0
+
+Equation 2 is equivalent to:
+
+m−1
+
+2
+
+(cid:13)
+(cid:13)
+(cid:13)
+
+(3)
+
+adc(y, c) =
+
+y′j − Cj [c[j]]
+Õj=0 (cid:13)
+(cid:13)
+(cid:13)
+Thus, ADC computes the distance between a query vector y′ and a
+code c by summing the distances between the sub-vectors of y′ and
+centroids associated with code c in the m sub-spaces of the prod-
+uct quantizer. When the number of codes in cells is large compared
+to k, the number of centroids of sub-quantizers, using lookup ta-
+bles avoids computing ky′j − Cj [i]k2 for the same i multiple times.
+Thus, lookup tables therefore provide a significant speedup. While
+scanning inverted lists, neighbors and their associated distances
+are stored in a binary heap of size R (Algorithm 1, line 6).
+
+2.4 Impact of PQ Parameters
+The two parameters of a product quantizer, m, the number of sub-
+quantizers and k, the number of centroids of each sub-quantizer
+impact: (1) the memory usage of codes, (2) the recall of ANN search
+
+Table 1: Speed-Accuracy tradeoff for 64-bit codes (SIFT1M,
+Exhaustive search)
+
+m×b
+
+Size
+
+Cache R@100 Tables
+
+16×4
+8×8
+4×16
+
+L1
+1 KiB
+8 KiB
+L1
+1 MiB L3
+
+83.1%
+91.6%
+96.5%
+
+0.001 ms
+0.005 ms
+0.77 ms
+
+Scan
+
+6.1 ms
+2.7 ms
+7.8 ms
+
+and (3) search speed. In practice, 64-bit codes (264 centroids) or 128-
+bit codes (2128 centroids) are used in most cases.
+
+The second tradeoff is between ANN accuracy and search speed.
+For a constant memory budget of m ·b bits per code, the respective
+values of m and b impact accuracy and speed. Decreasing m, which
+implies increasing b, increases accuracy [7]. We discuss the effect
+of m and b on the time cost of the Tables and Scan steps of ANN
+search (Section 2.3). Each lookup table requires k = 2b l2-norm
+computations in sub-spaces of dimensionality d/m. Thus, the com-
+plexity of computing allm lookup tables is O(m·2b·d/m) = O(2b ·d),
+and increases exponentially with b. In conclusion, decreasing m
+makes the Tables step more costly.
+
+During the Scan step, each Asymmetric Distance Computation
+(ADC) (Algorithm 1, line 12) requires m accesses to lookup tables
+and m additions (Algorithm 1, line 15). Therefore, decreasing m de-
+creases the number of operations required for each ADC, which
+is beneficial for search speed. However, decreasing m implies in-
+creasing b, and thus increasing the size of lookup tables. The size
+j=0 is m · k · sizeof(float) = m · 2b · 4. It in-
+of all lookup tables {D j }m
+creases linearly with m and exponentially with b. Thus, decreasing
+m increases the size of lookup tables. As the size of lookup tables
+increases, they need to be stored in larger and slower cache levels
+which is detrimental to performance [1]. In conclusion, decreas-
+ing m, makes the Tables step less costly, except if it causes lookup
+tables to be stored in slower cache.
+
+To illustrate this, we measure the recall (R@100) and the time
+cost of the Tables and Scan steps of ANN search for different m×b
+configurations producing 64-bit codes (Table 1). For 16×4 and 8×8,
+tables fit the L1 cache. The 8×8 configuration has a lower Scan time
+because it requires less additions and less accesses to lookup tables.
+The 4×16 configuration requires even less additions and table ac-
+cesses but lookup tables are stored in the much slower L3 cache.
+Overall, the 4×16 configuration therefore has a higher Scan time.
+In all cases, the time cost of the Tables step increases with b.
+
+3 QUICK ADC
+3.1 Overview
+The performance gains of Quick ADC are achieved by exploiting
+SIMD. Single Instruction Multiple Data (SIMD) instructions per-
+form the same operation e.g., additions, on multiple data elements
+in one instruction. Consequently, SIMD enables large performance
+improvements. Thus, optimized linear algebra libraries rely on SIMD
+to offer high performance. Current CPUs include an SIMD unit in
+each core. SIMD therefore offers an additional level of parallelism
+over multi-core processing. ANN search parallelizes naturally over
+multiple cores by processing a distinct query on each core. With
+
+ICMR ’17, June 06-09, 2017, Bucharest, Romania
+
+Fabien André, Anne-Marie Kermarrec, and Nicolas Le Scouarnec
+
+indexes
+
+a0
+
+b0
+
+c0
+
+table
+
+D 0[0]
+
+D 0[1]
+
+D 0[2]
+
+. . .
+
+. . .
+
+p0
+
+D 0[15]
+
+simd_shuffle
+
+D 0[a0]
+
+D 0[b0]
+
+D 0[c0]
+
+. . .
+
+D 0[p0]
+
+Figure 1: SIMD in-register shuffle
+
+Quick ADC, we propose further increasing performance by speed-
+ing up ADC for each query, thanks to the use of SIMD. To process
+multiple data elements at once, SIMD instructions operate on wide
+registers. SSE instructions use 128-bit registers, while the newer
+AVX instructions use 256-bit registers.
+
+The Scan step computes asymmetric distances between the query
+vector and all codes stored in selected cells. Each ADC requires (1)
+m accesses to cache-resident lookup tables and (2) m additions. If
+implementing additions using SIMD is straightforward, SIMD does
+not allow an efficient implementation of table lookup, even using
+gather instructions introduced in recent processors [1, 6]. SIMD
+can add 4 floating-point numbers (128 bits) or 8 floating-point num-
+bers (256 bits) at once, there are only 2 cache read ports in each
+CPU core. Therefore, it is not possible to perform more than 2
+cache accesses concurrently.
+
+Therefore, efficiently implementing ADC using SIMD requires
+storing lookup tables in SIMD registers and performing lookups
+using SIMD in-register shuffles. The main challenge is that SIMD
+registers (128 bits) are much smaller than lookup tables, for com-
+mon PQ configurations. In most cases, product quantizers use 8-
+bit sub-quantizers, which results in lookup tables of k = 28 = 256
+floats (8192 bits). For this reason, Quick ADC relies on (i) the use
+of 4-bit quantizers instead of the common 8-bit quantizers, and (ii)
+the quantization of floats to 8-bit integers. We obtain lookup tables
+of k = 24 = 16 floats, which are then quantized to 8-bit integers.
+The resulting lookup tables comprise 16 8-bit integers (128 bits),
+and can be stored in SIMD registers. Once lookup tables are stored
+in SIMD registers, in-register shuffles can be used to perform 16
+lookups in 1 cycle (Figure 1), enabling large performance gains.
+
+In addition to the use of 4-bit quantizers and the quantization
+of floats to 8-bit integers, Quick ADC requires a minor change of
+memory layout. In the next sections, we detail this change of mem-
+ory layout as well as our lookup tables quantization process and
+the SIMD implementation of distance computations.
+
+3.2 Memory Layout
+An SIMD in-register shuffle performs 16 lookups at once, but in
+a single lookup table e.g., D0 (Figure 1). Therefore, to use shuffles
+efficiently, we need to operate on the first component of 16 codes
+(a0, . . . , p0) at once instead of the 16 components of a single code
+(a0, . . . , a15). Its is crucial for efficiency that all values in an SIMD
+register can be loaded in a single memory read. This requires that
+a0, . . . , p0 are contiguous in memory, which is not the case with the
+standard memory layout of inverted lists (Figure 2a). We therefore
+transpose inverted lists by blocks of 16 codes, so that analogous
+components of 16 codes are stored in adjacent bytes (Figure 2b).
+
+am−1 am−2
+bm−1 bm−2
+. . .
+
+pm−1 pm−2
+
+a
+
+b
+
+p
+
+a1 a0
+b1 b0
+. . .
+
+p1 p0
+
+b
+
+b1 b0
+. . .
+
+a
+
+a1 a0
+. . .
+
+. . .
+
+. . .
+
+. . .
+
+. . .
+
+c
+
+c1 c0
+. . .
+
+(a) Standard layout
+
+p
+
+p1 p0
+. . .
+
+. . .
+
+. . .
+
+. . .
+
+am−1 am−2 bm−1 bm−2 cm−1 cm−2
+
+am−1 am−2
+
+(b) Transposed layout
+
+Figure 2: Inverted list memory layouts. Each table cell rep-
+resents a byte.
+
+We divide each inverted list in blocks of 16 codes and transpose
+each block independently. Figure 2 shows the transposition of one
+block of 16 codes (a, . . . , p). This transposition is performed offline,
+and does not increase ANN query response time. The transposition
+is moreover very fast; the overhead on database creation time is
+less than 1%.
+
+3.3 Quantization of Lookup Tables
+In standard ADC, lookup tables store 32-bit floats. To be able to
+store tables of 16 elements in 128-bit registers, we quantize 32-bit
+floats to 8-bit integers using a scalar quantizer. Because there is no
+SIMD instruction to compare unsigned 8-bit integers, we quantize
+distances to signed 8-bit integers, only using their positive range.
+We quantize distances between a qmin and qmax bound into n =
+127 bins (0-126) uniformly. The size of each bin is ∆ = (qmax −
+qmin)/n. Values larger than qmax are quantized to 127.
+
+We choose the minimum value accross all lookup tables {D j }m
+j=0,
+which is the smallest distance we need to represent, as the qmin
+value. Using the maximum possible distance i.e., the sum of the
+maximums of all lookup tables results in a too high quantization
+error. Therefore, to set qmax we scan init vectors (typical init=200-
+1000) to find a temporary set of R nearest neighbor candidates,
+where R is the number of nearest neighbors requested by the user
+(Section 2.3). We use the distance of the query vector to the Rth
+nearest neighbor candidate i.e., the farthest nearest neighbor can-
+didate, as the qmax bound. All subsequent candidates will need to
+be closer to the query vector, thus qmax is the maximum distance
+we need to represent.
+
+3.4 SIMD Distance Computation
+Although recent Intel CPUs offer 256-bit SIMD, we describe a ver-
+sion of Quick ADC which uses 128-bit SIMD for the sake of sim-
+plicity. Yet, we explain how to generalize it to 256-bit at the end
+of the section. Moreover, the 128-bit version of Quick ADC offers
+the best compatibility, notably with older Intel CPUs or ARM CPUs.
+In Algortihm 2, SIMD instructions are denoted by the prefix simd_.
+SIMD instructions use 128-bit variables, denoted by r128.
+
+⊲ Fig. 4
+
+simd_add_saturated
+
+acc
+
+Accelerated Nearest Neighbor Search with Quick ADC
+
+ICMR ’17, June 06-09, 2017, Bucharest, Romania
+
+comps
+
+a1 a0
+
+b1 b0
+
+c1 c0
+
+. . .
+
+p1 p0
+
+⊲ Fig. 3
+
+simd_and (0x0f)
+
+Algorithm 2 ANN Search with Quick ADC
+1: function lookup_add(comps, D j , acc)
+2:
+
+r128 masked ← simd_and(comps, 0x0f)
+r128 partial ← simd_shuffle(comps, D j )
+return simd_add_saturated(acc, partial)
+
+4:
+5: function qick_adc_block(blk, {D j }m−1
+j=0 )
+6:
+
+3:
+
+r128 acc ← {0}
+for j ← 0 to m/2 − 1 do
+
+r128 comps ← simd_load(blk + j · 16)
+acc ← lookup_add(comps, D2j , acc)
+comps ← simd_right_shift(comps, 4)
+acc ← lookup_add(comps, D2j+1, acc)
+
+return acc
+
+12: function qick_adc_scan(tlist, {D j }m−1
+j=0
+13:
+
+neighbors ← binheap(R)
+for blk in tlist do
+
+, R)
+
+r128 acc ← qick_adc_block(blk, {D j }m−1
+j=0 )
+extract_matches(acc, neighbors)
+
+return neighbors
+
+7:
+
+8:
+
+9:
+
+10:
+
+11:
+
+14:
+
+15:
+
+16:
+
+17:
+
+The qick_adc_scan function (Algorithm 2, line 12) scans a
+block-transposed inverted list tlist (Section 3.2) using m quantized
+lookup tables {D j }m−1
+j=0 , where m is the number of sub-quantizers
+of the product quantizer. Each lookup table is stored in a distinct
+SIMD register. The qick_adc_scan function iterates over blocks
+blk of 16 codes (Algorithm 2, line 14). The qick_adc_block func-
+tion computes the distance between the query vector and the 16
+codes (a, . . . , p) of the block blk.
+
+Each block comprises m/2 rows of 16 bytes (128 bits). Each row
+stores the jth and (j + 1)th components of 16 codes (Figure 2b).
+The qick_adc_block function iterates over each row (Alorithm
+2, line 7), and loads it in the comps register sequentially (Algo-
+rithm 2, line 8). Two lookup-add operations are performed on each
+row (Algorithm 2, line 9 and line 11): one for the (2j)th components,
+and one for (2j + 1)th components of the codes. Figure 3 describes
+the succession of operations performed by the lookup_add func-
+tion for the first row (j = 0). As each byte of the first row stores
+two components, e.g., the first byte of the first row stores a1 and a0
+(Figure 3), we start by masking the lower 4 bits of each byte (and
+with 0x0f), to obtain the first components (a0, . . . , p0) only. The
+remainder of the function looks up values in the D0 table and ac-
+cumulates distances in acc variable. Before the lookup_add func-
+tion can be used to process the second components (a1, . . . , p1), it
+is necessary that (a1, . . . , p1) are in the lowest 4 bits of each byte
+of the register. We therefore right shift the comps register by 4 bits
+(Figure 4) before calling lookup_add (Algorithm 2, line 10). The
+extract_matches function (Algorithm 2, line 16), the implemen-
+tation of which is not shown, extracts distances from the acc reg-
+ister and inserts them in the binary heap neighbors.
+
+Among 256-bit SIMD instructions (AVX and AVX2 instruction
+sets) supported on recent CPUs, some, like in-register shuffles, op-
+erate concurrently on two independent 128-bit lanes. This prevents
+use of 256-bit lookup tables (32 8-bit integers) but allows an easy
+
+masked
+
+a0
+
+b0
+
+c0
+
+D 0[0]
+
+D 0[1]
+
+D 0[2]
+
+. . .
+
+. . .
+
+p0
+
+D 0[15]
+
+simd_shuffle
+
+partial
+
+D 0[a0] D 0[b0]
+
+D 0[c0]
+
+. . .
+
+D 0[p0]
+
+acc
+
+acc[0] +
+D 0[a0]
+
+acc[1] +
+D 0[b0]
+
+acc[2] +
+D 0[c0]
+
+. . .
+
+acc[15]+
+D 0[p0]
+
+Figure 3: SIMD Lookup-add (j = 0)
+
+comps
+
+a1 a0
+
+b1 b0
+
+c1 c0
+
+. . .
+
+p1 p0
+
+simd_right_shift (4 bits)
+
+comps
+
+a1
+
+a0 b1
+
+b0 c1
+
+. . .
+
+o0 p1
+
+Figure 4: SIMD 4-bit Right Shift (j = 0)
+
+generalization of the 128-bit version of Quick ADC. While the 128-
+bit version of Quick ADC iterates on block rows one by one (Algo-
+rithm 2, line 7), the 256-bit version processes two rows at once: one
+row in each 128-bit lane. The number of iterations is thus reduced
+from m/2 to m/4. Lastly, instead of storing each D j table in a dis-
+tinct 128-bit register, the tables D j and D2j , j ∈ {0, . . . , m/2 − 1},
+are stored in each of the two lanes of a 256-bit register.
+
+4 EVALUATION
+4.1 Experimental Setup
+We implemented 256-bit Quick ADC in C++, using compiler intrin-
+sics to access SIMD instructions. Our implementation is released
+under the Clear BSD license1 and uses the AVX and AVX2 instruc-
+tion sets. We used the g++ compiler version 5.3, with the options
+-03 -ffast-math -m64 -march=native. Exhaustive search and
+non-exhaustive search (inverted indexes, IVF) were implemented
+as described in [7]. We use the yael library and the ATLAS library
+version 3.10.2. We compiled an optimized version of ATLAS on our
+system. To learn product quantizers and optimized product quan-
+tizers, we used the implementation 2 of the authors of [2, 4]. Unless
+otherwise noted, experiments were performed on our workstation
+(Table 2). To get accurate timings, we processed queries sequen-
+tially on a single core. We evaluate our approach on two publicly
+available3 datasets of SIFT descriptors, one dataset of GIST descrip-
+tors, and one dataset of PCA-compressed deep features4 (Table 3).
+For SIFT1B, the learning set is needlessly large to train product
+
+1https://github.com/technicolor-research/quick-adc
+2https://github.com/arbabenko/Quantizations
+3http://corpus-texmex.irisa.fr/
+4http://sites.skoltech.ru/compvision/projects/aqtq/
+
+ICMR ’17, June 06-09, 2017, Bucharest, Romania
+
+Fabien André, Anne-Marie Kermarrec, and Nicolas Le Scouarnec
+
+(a) PQ recall
+
+(b) OPQ recall
+
+(c) PQ response time
+
+1
+
+0.8
+
+0.6
+
+0.4
+
+0.2
+
+R
+@
+
+l
+l
+a
+c
+e
+R
+
+R
+@
+
+l
+l
+a
+c
+e
+R
+
+1
+
+0.8
+
+0.6
+
+0.4
+
+0.2
+
+PQ 8×8 ADC
+PQ 16×4 ADC
+PQ 16×4 QADC
+
+OPQ 8×8 ADC
+OPQ 16×4 ADC
+OPQ 16×4 QADC
+
+1
+
+2
+
+5
+
+10 20
+
+50 100 200 500 1K
+
+1
+
+2
+
+5
+
+10 20
+
+50 100 200 500 1K
+
+0
+
+2
+
+4
+
+6
+
+R
+
+R
+
+Total query time [ms]
+
+Figure 5: ADC and QADC response time and recall with PQ and OPQ (SIFT1M, Exhaustive search)
+
+0.43
+
+2.6
+
+5.9
+
+PQ 8×8 ADC
+PQ 16×4 ADC
+PQ 16×4 QADC
+
+workstation
+server
+
+Xeon E5-1650v3
+Xeon E5-2630v3
+
+16GB DDR4 2133Mhz
+128GB DDR4 1866Mhz
+
+Table 2: Systems
+
+CPU
+
+RAM
+
+Table 3: Datasets
+
+Base set
+
+Learning set Query set
+
+Dim.
+
+SIFT1M 1M
+SIFT1B
+GIST1M 1M
+Deep1M 1M
+
+1000M
+
+100K
+100M (2M)
+500K
+300K
+
+10K (1K)
+10K (1K)
+1K
+1K
+
+128
+128
+960
+256
+
+quantizers, so we used the first 2 million vectors. We used a query
+set of 1000 vectors for all experiments.
+
+4.2 Exhaustive Search in SIFT1M
+Using 16×4 Quick ADC (QADC) instead of 8×8 ADC offers a large
+performance gain, thanks to the use of SIMD in-register shuffles.
+It however also causes a decrease in recall which is cause by two
+factors: (1) use of 16×4 quantizers instead of 8×8 quantizers (Sec-
+tion 2.4) and (2) use of quantized lookup tables (Section 3.3). In this
+section, we evaluate the global decrease in recall caused by the use
+of 16×4 QADC instead of 8×8 ADC, but also the relative impact of
+factors (1) and (2). To do so, we use the SIFT1M dataset and follow
+an exhaustive search strategy. We do not use an inverted index and
+we encode the original vectors into short codes, not residuals. This
+maximizes quantization error and thus represents a worst-case sce-
+nario for QADC. We scan init = 200 vectors to set the qmax bound
+for quantization of lookup tables (Section 3.3).
+
+We observe that 16×4 ADC slightly decreases recall (Figure 5a).
+However, 16×4 QADC, which uses quantized lookup tables, does
+not further decrease recall in comparison with 16×4 ADC. OPQ
+yields better results than PQ in all cases (Figure 5b), which is con-
+sistent with [5, 11]. Moreover, the difference in recall between 8×8
+ADC and 16×4 QADC is lower for OPQ than it is for PQ. OPQ
+
+optimizes the decomposition of the input vector space into m sub-
+spaces, which are used by the optimized product quantizer (Section
+2.1). For m = 16, OPQ has more degrees of freedom than for m = 8
+and is therefore able to bring a greater level of optimization.
+
+For an exhaustive search in 1 million vectors, 16×4 QADC is ∼14
+times faster than 16×4 ADC and 6 times faster than 8×8 ADC (Fig-
+ure 5c) (85% decrease in response time). Response times for PQ and
+OPQ are similar, so we report results for PQ. In practice, 8×8 ADC
+is much more common than 16×4 ADC [2–4, 11, 15], thus we only
+compare 16×4 QADC with 8×8 ADC in the remainder of this sec-
+tion. Overall, QADC therefore proposes trading a small decrease
+in recall, for a large improvement in response time.
+
+Non-exhaustive search offers both a lower response time and a
+higher recall than exhaustive search (Section 2.2). For this reason,
+non-exhaustive search is preferred to exhaustive search in practi-
+cal systems. Therefore, in the remainder of this section, we eval-
+uate QADC in the context of non-exhaustive search, for a wide
+range of scenarios: SIFT, GIST descriptors, deep feature, PQ and
+OPQ, 64 and 128 bit codes. We show that in most cases, when com-
+bined with OPQ and inverted indexes, QADC offers a decrease in
+response time close to 70% for a small or negligible loss of accuracy.
+
+4.3 Non-exhaustive Search in SIFT1M
+Table 4 compares the Recall@100 (R@100) and total ANN search
+time (Total). The time spent in each of the search steps (Index, Ta-
+bles, and Scan) detailed in Section 2.3 is also reported. All times
+are in milliseconds (ms). OPQ requires a rotation of the input vec-
+tor before computing lookup tables (Section 2.1). We include the
+time to perform this rotation in the Tables column. When using in-
+verted indexes, the parameters K, the total number of cells of the
+inverted index, and ma, the number of cells scanned to answer a
+query, impact response time and recall (Section 2.3). For datasets
+of 1 million vectors, we have found the parameters ma = 24 and
+K = 256 to offer the best tradeoff.
+
+For this configuration, QADC offers a 75% decrease in scan time.
+In addition, QADC offers a 50-70% decrease in tables computation
+time, thanks to the use of 4-bit quantizers, which result in smaller
+and faster to compute small tables. Overall, this translates into a
+decrease of approximately 70% in total response time. The loss of
+recall is significantly lower with OPQ (-1.5%) than with PQ (-4.4%),
+as OPQ offers a lower quantization error than PQ.
+
+Accelerated Nearest Neighbor Search with Quick ADC
+
+ICMR ’17, June 06-09, 2017, Bucharest, Romania
+
+Table 4: Non-exhaustive search, SIFT1M, 64 bit
+
+Table 6: Non-exhaustive search, Deep1M, 64 bit
+
+PQ
+
+ADC *
+
+R@100
+
+Index Tables
+
+Scan
+
+Total
+
+PQ
+
+ADC *
+
+R@100
+
+Index Tables
+
+Scan
+
+Total
+
+SIFT1M, IVF, K=256, ma=24
+
+Deep1M, IVF, K=256, ma=24
+
+PQ
+
+ADC
+QADC
+
+OPQ ADC
+
+QADC
+
+0.949
+0.907
+-4.4%
+
+0.963
+0.949
+-1.5%
+
+0.008
+0.008
+
+0.008
+0.008
+
+0.18
+0.055
+-69%
+
+0.21
+0.089
+-59%
+
+0.3
+0.072
+-76%
+
+0.29
+0.073
+-75%
+
+0.48
+0.14
+-72%
+
+0.52
+0.17
+-67%
+
+PQ
+
+ADC
+QADC
+
+OPQ ADC
+
+QADC
+
+0.772
+0.669
+-13%
+
+0.922
+0.902
+-2.2%
+
+0.015
+0.013
+
+0.013
+0.013
+
+0.24
+0.082
+-66%
+
+0.34
+0.16
+-53%
+
+0.33
+0.076
+-77%
+
+0.32
+0.08
+-75%
+
+0.58
+0.17
+-71%
+
+0.67
+0.25
+-62%
+
+* ADC: 8×8 ADC, QADC: 16×4 QADC
+
+* ADC: 8×8 ADC, QADC: 16×4 QADC
+
+PQ
+
+ADC *
+
+R@100
+
+Index Tables
+
+Scan Total
+
+the gain in total response time (-62%), due to the time spent per-
+forming rotations.
+
+Table 5: Non-exhaustive search, GIST1M, 128 bit
+
+GIST1M, IVF, K=256, ma=24
+
+PQ
+
+ADC
+QADC
+
+OPQ ADC
+
+QADC
+
+0.675
+0.515
+-24%
+
+0.918
+0.872
+-5%
+
+0.038
+0.038
+
+0.039
+0.038
+
+0.77
+0.26
+-67%
+
+1.7
+1.2
+-32%
+
+1.5
+0.71
+0.15
+0.45
+-79% -71%
+
+2.5
+1.4
+
+0.73
+0.16
+-78% -45%
+
+* ADC: 16×8 ADC, QADC: 32×4 QADC
+
+4.4 Non-exhaustive Search in GIST1M
+GIST descriptors have a much higher dimensionality (960 dimen-
+sions) than SIFT descriptors (128 dimensions). For this reason, GIST
+descriptors are often encoded into 128-bit codes instead of 64-bit
+codes [3, 11]. This corresponds to 16×8 codes for ADC and 32×4
+codes for QADC. In this case, when combined with PQ, QADC of-
+fers a decrease of approximately 70% in total response time, as with
+64-bit codes and SIFT descriptors (Table 5). However, the decrease
+in recall when using QADC with PQ is higher for GIST descriptors
+(-24%) than for SIFT descriptors (-4.4%). This loss of recall is lim-
+ited to 5% when combining QADC with OPQ. The decrease in total
+response time is however less important for OPQ (-45%) than for
+PQ (-71%). This is because OPQ requires rotating the query vector
+when computing distance tables. Rotating 960-dimensional GIST
+descriptors is costly, increasing the time to compute distance ta-
+bles, which in turn limits the gain in total response time.
+
+4.5 Non-exhaustive Search in Deep1M
+The Deep1M dataset comprises L2-normalized deep features that
+are PCA-compressed to 256 dimensions. Due to their relatively low
+dimensionality, these vectors can be encoded into 64-bit codes. As
+for SIFT and GIST descriptors, QADC offers a 70% decrease in re-
+sponse time when combined with PQ. The decrease in recall (-13%)
+for Deep1M vectors is between the decrease in recall for SIFT de-
+scriptors (-4.4%) and the decrease in recall for GIST descriptors (-
+24%), which is consistent with the dimensionality of vectors. Once
+again, OPQ strongly limits the loss of recall (-2.2%). It also limits
+
+4.6 Non-exhaustive Search in SIFT1B
+We conclude our experimental section by performing experiments
+on a large dataset of 1 billion SIFT descriptors. For this dataset, we
+use an inverted index with K = 65536 cells and scan ma = 64 cells
+to answer queries. This configuration has been shown to offer best
+performance [3]. We scan init = 1000 vectors before quantizing
+lookup tables (Section 3.3). For SIFT descriptors, we have shown
+that combining QADC with OPQ allows a higher recall, with no
+impact on total response time (Section 4.3). For this reason, we per-
+form experiments with OPQ. As with the SIFT1M dataset, QADC
+offers a decrease of approximately 70% in response time (Table 7).
+However, for 64-bit codes the loss of recall is higher on SIFT1B (-
+7.3%) than on SIFT1M (-1.5%). Using 128-bit codes makes the loss of
+recall negligible (-1.1%) but increases memory use (Table 8). With
+128-bit codes, the database uses 20GB of RAM, therefore we had to
+run this experiment on our server (Table 2).
+
+4.7 Summary
+Our experiments show that QADC offers large performance gains
+in all cases, at the expense of a small or negligible decrease in recall.
+For SIFT descriptors, this decrease is always negligible, even when
+using PQ (Section 4.3). For descriptors of higher dimensionality,
+the decrease in recall is greater (Section 4.4 and 4.5). Using OPQ
+brings this loss of recall down to low levels, but also slightly limits
+the gain in response time (-50% to -60% decrease in response time).
+Overall, QADC offers an interesting speed-accuracy tradeoff: a loss
+in recall of 1-5% for a decrease of response time of 50-70%. The case
+of large datasets is slightly less favorable for QADC: we observe a
+7% decrease in accuracy on the SIFT1B dataset, even when using
+OPQ. However, even in this scenario, QADC exhibits similar or
+better performance than state-of-the-art systems. Thus, with 64-
+bit codes, QADC achieves a recall of 0.747 on the SIFT1B dataset in
+1.7 ms, while the state-of-the-art OMulti-D-OADC system achieves
+the same recall in 2 ms [3]. With 128-bit codes, QADC achieves a
+recall of 0.94 in 3.4 ms while OMulti-D-OADC achieves a recall of
+0.901 in 5 ms [3].
+
+ICMR ’17, June 06-09, 2017, Bucharest, Romania
+
+Fabien André, Anne-Marie Kermarrec, and Nicolas Le Scouarnec
+
+Table 7: Non-exhaustive search, SIFT1B, 64 bit
+
+PQ
+
+ADC *
+
+R@100
+
+Index Tables
+
+Scan Total
+
+SIFT1B, IVF, K=65536, ma=64
+
+OPQ ADC
+
+QADC
+
+0.806
+0.747
+-7.3%
+
+0.52
+0.53
+
+0.51
+0.22
+-57%
+
+5.2
+1.7
+
+4.2
+0.92
+-78% -68%
+
+* ADC: 8×8 ADC, QADC: 16×4 QADC
+
+Table 8: Non-exhaustive search, SIFT1B, 128 bits
+
+PQ
+
+ADC *
+
+R@100
+
+Index Tables
+
+Scan Total
+
+SIFT1B, IVF, K=65536, ma=64
+
+OPQ ADC
+
+QADC
+
+0.95
+0.94
+-1.1%
+
+0.73
+0.72
+
+1.1
+0.49
+-57%
+
+12
+3.4
+
+10
+2.2
+-78% -72%
+
+* ADC: 16×8 ADC, QADC: 32×4 QADC
+
+5 RELATED WORK
+PQ Fast Scan. Both PQ Fast Scan [1] and Quick ADC speed up the
+scan of lists of short codes by taking advantage of SIMD. More
+specifically, PQ Fast Scan and Quick ADC store lookup tables in
+SIMD registers and use SIMD in-register shuffles in place of cache
+accesses. The main challenge is that lookup tables used for ANN
+search are much larger than SIMD registers. PQ Fast Scan tackles
+this issue by both altering (i) inverted lists (vector grouping) and
+(ii) lookup tables (minimum tables). PQ Fast Scan uses the standard
+8-bit sub-quantizers, hence it incurs no loss of recall. However, be-
+cause of the transformations it applies, PQ Fast Scan requires a
+minimum list size of 3 million codes [1]. This limits the applicabil-
+ity of PQ Fast Scan to exhaustive search or to very coarse (and thus
+inefficient [3, 7]) inverted indexes. On the contrary, Quick ADC
+imposes no constraints on list sizes, and may be combined with
+efficient inverted indexes (lists of 1000-10000 vectors) as shown in
+our experiments (Section 4).
+
+Inverted Multi-index. Inverted multi-indexes [3] provide a finer
+partition (typical K = 228) of the vector space than inverted in-
+dexes (typical K = 65536). At query time, this finer partition allows
+scanning less vectors to achieve the same recall, therefore provid-
+ing a significant speedup. Unlike PQ Fast Scan, Quick ADC does
+not require lists of a minimum size. Therefore, Quick ADC can also
+be combined with multi-indexes to further decrease response time.
+Compositional Quantization Models. Recently, compositional vec-
+tor quantization models inspired by PQ have been proposed. These
+models offer a lower quantization error than PQ or OPQ. Among
+these models are Additive Quantization (AQ) [2], Tree Quantiza-
+tion (TQ) [4] and Composite Quantization (CQ) [15]. These models
+also use cache-resident lookup tables to compute distances, there-
+fore Quick ADC may be combined with them. However, this may
+require additional work as some of these models use more lookup
+tables than PQ or OPQ.
+
+6 CONCLUSION
+In this paper, we presented Quick ADC, a novel distance computa-
+tion method for ANN search. Quick ADC achieves a 3 to 6 times
+speedup over the standard ADC method by efficiently exploiting
+SIMD. This efficient use of SIMD is enabled by two changes to the
+ADC procedure: (i) the use of 4-bit quantizers instead of the usual 8-
+bit quantizers, and (ii) the quantization of floating-point distances
+to 8-bit integers.
+
+It is known that using 4-bit quantizers may cause a loss in re-
+call [7]. However, through an extensive evaluation, we have shown
+that this loss is small or negligible when 4-bit quantizers are com-
+bined with OPQ and inverted indexes. In addition, we have shown
+that Quick ADC integrates well with other search acceleration meth-
+odes, in particular inverted indexes. Lastly, upcoming SIMD in-
+struction sets (e.g., 512-bit AVX in Xeon Skylake CPUs), will allow
+Quick ADC to offer both greater speedups (twice more codes pro-
+cessed per cycle) and an even smaller loss of recall (6-bit quantizers
+instead of 4-bit quantizers).
+
+ACKNOWLEDGEMENTS
+Experiments presented in this paper were carried out using the
+Grid’5000 testbed, supported by a scientific interest group hosted
+by Inria and including CNRS, RENATER and several Universities
+as well as other organizations (see https://www.grid5000.fr).
+
+REFERENCES
+[1] Fabien André, Anne-Marie Kermarrec, and Nicolas Le Scouarnec. 2015. Cache
+locality is not enough: High-Performance Nearest Neighbor Search with Prod-
+uct Quantization Fast Scan. PVLDB 9, 4 (2015).
+
+[2] Artem Babenko and Victor Lempitsky. 2014. Additive Quantization for Extreme
+
+[3] Artem Babenko and Victor Lempitsky. 2015. The Inverted Multi-Index. TPAMI
+
+Vector Compression. In CVPR.
+
+37, 6 (2015).
+
+[4] Artem Babenko and Victor Lempitsky. 2015. Tree Quantization for Large-Scale
+
+Similarity Search and Classification. In CVPR.
+
+[5] Tiezheng Ge, Kaiming He, Qifa Ke, and Jian Sun. 2014. Optimized Product Quan-
+
+tization. TPAMI 36, 4 (2014).
+
+[6] Johannes Hofmann, Jan Treibig, Georg Hager, and Gerhard Wellein. 2014. Com-
+paring the Performance of Different x86 SIMD Instruction Sets for a Medical
+Imaging Application on Modern Multi- and Manycore Chips. In WPMVP.
+[7] Hervé Jégou, Matthijs Douze, and Cordelia Schmid. 2011. Product Quantization
+
+for Nearest Neighbor Search. TPAMI 33, 1 (2011).
+
+[8] Hervé Jégou, Romain Tavenard, Matthijs Douze, and Laurent Amsaleg. 2011.
+Searching in one billion vectors: Re-rank with source coding. In ICASSP.
+[9] Josip Krapac, Florent Perronnin, Teddy Furon, and Hervé Jégou. 2014. Instance
+
+Classification with Prototype Selection. In ICMR.
+
+[10] David G. Lowe. 1999. Object Recognition from Local Scale-Invariant Features.
+
+In ICCV.
+
+ICCV.
+
+[11] Mohammad Norouzi and David J. Fleet. 2013. Cartesian K-Means. In CVPR.
+[12] Aude Oliva and Antonio Torralba. 2001. Modeling the Shape of the Scene: A
+
+Holistic Representation of the Spatial Envelope. IJCV 42, 3 (2001).
+
+[13] Yan Xia, Kaiming He, Fang Wen, and Jian Sun. 2013. Joint Inverted Indexing. In
+
+[14] Lingxi Xie, Richang Hong, Bo Zhang, and Qi Tian. 2015. Image Classification
+
+and Retrieval are ONE. In ICMR.
+
+[15] Ting Zhang, Chao Du, and Jingdong Wang. 2014. Composite Quantization for
+
+Approximate Nearest Neighbor Search. In ICML.
+
+Accelerated Nearest Neighbor Search with Quick ADC
+
+Fabien André
+Technicolor
+fabien.andre@technicolor.com
+
+Anne-Marie Kermarrec
+Inria
+anne-marie.kermarrec@inria.fr
+
+Nicolas Le Scouarnec
+Technicolor
+nicolas.lescouarnec@technicolor.com
+
+7
+1
+0
+2
+ 
+r
+p
+A
+ 
+4
+2
+ 
+ 
+]
+
+V
+C
+.
+s
+c
+[
+ 
+ 
+1
+v
+5
+5
+3
+7
+0
+.
+4
+0
+7
+1
+:
+v
+i
+X
+r
+a
+
+ABSTRACT
+Efficient Nearest Neighbor (NN) search in high-dimensional spaces
+is a foundation of many multimedia retrieval systems. Because it
+offers low responses times, Product Quantization (PQ) is a pop-
+ular solution. PQ compresses high-dimensional vectors into short
+codes using several sub-quantizers, which enables in-RAM storage
+of large databases. This allows fast answers to NN queries, with-
+out accessing the SSD or HDD. The key feature of PQ is that it
+can compute distances between short codes and high-dimensional
+vectors using cache-resident lookup tables. The efficiency of this
+technique, named Asymmetric Distance Computation (ADC), re-
+mains limited because it performs many cache accesses.
+
+In this paper, we introduce Quick ADC, a novel technique that
+achieves a 3 to 6 times speedup over ADC by exploiting Single In-
+struction Multiple Data (SIMD) units available in current CPUs. Ef-
+ficiently exploiting SIMD requires algorithmic changes to the ADC
+procedure. Namely, Quick ADC relies on two key modifications of
+ADC: (i) the use 4-bit sub-quantizers instead of the standard 8-bit
+sub-quantizers and (ii) the quantization of floating-point distances.
+This allows Quick ADC to exceed the performance of state-of-the-
+art systems, e.g., it achieves a Recall@100 of 0.94 in 3.4 ms on 1
+billion SIFT descriptors (128-bit codes).
+
+KEYWORDS
+Large-Scale Multimedia Search; Multimedia Search Acceleration;
+Product Quantization; SIMD
+
+ACM Reference format:
+Fabien André, Anne-Marie Kermarrec, and Nicolas Le Scouarnec. 2017. Ac-
+celerated Nearest Neighbor Search with Quick ADC. In Proceedings of ICMR
+’17, Bucharest, Romania, June 06-09, 2017, 8 pages.
+DOI: http://dx.doi.org/10.1145/3078971.3078992
+
+1 INTRODUCTION
+The Nearest Neighbor (NN) search problem consists in finding the
+closest vector x to a query vector y among a database of N d-
+dimensional vectors. Efficient NN search in high-dimensional spaces
+is a requirement in many multimedia retrieval applications, such as
+image similarity search, image classification, or object recognition.
+These problems typically involve extracting high-dimensional fea-
+ture vectors, or descriptors, and finding the NN of the extracted
+descriptors among a database of descriptors. For images, SIFT [10]
+and GIST descriptors [12] are commonly used.
+
+Although efficient NN search solutions have been proposed for
+low-dimensional spaces, exact NN search remains challenging in
+
+ICMR ’17, Bucharest, Romania
+© 2017 Copyright held by the owner/author(s). Publication rights licensed to ACM.
+This is the author’s version of the work. It is posted here for your personal use. Not
+for redistribution. The definitive Version of Record was published in Proceedings of
+ICMR ’17, June 06-09, 2017 , https://doi.org/http://dx.doi.org/10.1145/3078971.3078992.
+
+high-dimensional spaces due to the notorious curse of dimension-
+ality. As a consequence, much research work has been devoted to
+Approximate Nearest Neighbor (ANN) search. ANN search returns
+sufficiently close neighbors instead of the exact NN. Product Quan-
+tization (PQ) [7] is a widely used [9, 14] ANN search approach.
+PQ compresses high-dimensional vectors into short codes of a few
+bytes, enabling in-RAM storage of large databases. This allows fast
+answers to ANN queries, without SSD or HDD accesses.
+
+The key feature of PQ is that it allows computing distances be-
+tween uncompressed query vectors and compressed database vec-
+tors. This technique, known as Asymmetric Distance Computation
+(ADC), relies on cache-resident lookup tables. Although ADC is
+faster than distance computations in high-dimensional spaces, its
+efficiency remains low because it performs many cache accesses.
+To date, much of the research work has been devoted to the de-
+velopment of efficient inverted indexes [3, 13], which reduce the
+number of ADCs required to answer NN queries. Recently, there
+also has been an interest in increasing the performance of the ADC
+procedure itself with the introduction of PQ Fast Scan [1]. Unfor-
+tunately, PQ Fast Scan cannot be combined with efficient inverted
+indexes, limiting its usefulness in practical cases. In this paper, we
+introduce Quick ADC, a high-performance ADC procedure that
+can be combined with inverted indexes. More specifically, this pa-
+per makes two contributions, detailed in the next two paragraphs.
+First, we detail the design of Quick ADC. Like PQ Fast Scan,
+Quick ADC replaces cache accesses by SIMD in-register shuffles
+to accelerate the ADC procedure. Exploiting SIMD in-register shuf-
+fles requires storing the lookup tables used by the ADC procedure
+in SIMD registers. However, these registers are much smaller than
+the lookup tables used by the conventional ADC procedure. There-
+fore, algorithmic changes are required to obtain small lookup ta-
+bles that fit SIMD registers. PQ Fast Scan obtains such small lookup
+tables by grouping the codes of the database. This approach pre-
+vents PQ Fast Scan from being combined with inverted indexes.
+Quick ADC takes a different approach to obtain small lookup ta-
+bles, which is compatible with inverted indexes. Namely, Quick
+ADC relies on two key ideas: (i) the use of 4-bit sub-quantizers, in-
+stead of the standard 8-bit sub-quantizers, and (ii) the quantization
+of floating-point distances to 8-bit integers.
+
+Second, we implement Quick ADC and evaluate its performance
+in a wide range of scenarios. It is known that the use of 4-bit quan-
+tizers instead of the common 8-bit quantizer can cause a loss of
+recall [7]. However, we show that this loss is small or negligible,
+especially when combining Quick ADC with inverted indexes and
+Optimized Product Quantization (OPQ), a variant of PQ. On the
+SIFT1B dataset, Quick ADC achieves a better speed-accuracy trade-
+off than the state-of-art OMulti-D-OADC system [3, 5], e.g., Quick
+ADC achieves a Recall@100 of 0.94 in 3.4 ms (128-bit codes).
+
+ICMR ’17, June 06-09, 2017, Bucharest, Romania
+
+Fabien André, Anne-Marie Kermarrec, and Nicolas Le Scouarnec
+
+2 BACKGROUND
+In this section, we describe how Product Quantizers (PQ) and Op-
+timized Product Quantizers (OPQ) encode vectors into short codes.
+We then detail the ANN search process in databases of short codes.
+Lastly, we analyze the impact of PQ parameters on ANN search
+speed and recall.
+
+2.1 Vector Encoding
+Vector Quantizers. To encode vectors as short codes, PQ builds on
+vector quantizers. A vector quantizer, or quantizer, is a function
+q which maps a vector x ∈ Rd , to a vector ci ∈ Rd belonging to
+a predefined set of vectors C. Vectors ci are called centroids, and
+the set of centroids C, of cardinality k, is the codebook. For a given
+codebook C, a quantizer which minimizes the quantization error
+must satisfy Lloyd’s condition and map the vector x to its closest
+centroid ci :
+
+q(x) = arg min
+
+||x − ci ||.
+
+ci ∈C
+A vector quantizer can be used to encode a vector x ∈ Rd into a
+short code i ∈ {0 . . . k − 1} using the encoder enc:
+
+enc(x) = i, such that q(x) = ci
+The short code i only occupies b = ⌈log2(k)⌉ bits, which is typically
+much lower the d · 32 bits occupied by a vector x ∈ Rd stored
+as an array of d single-precision floats (32 bit each). To maintain
+the quantization error low enough for ANN search, a very large
+codebook e.g., k = 264 or k = 2128 is required. However, training
+such codebooks is not tractable both in terms of processing and
+memory requirements.
+
+Product Quantizers. Product quantizers overcome this issue by
+dividing a vector x ∈ Rd into m sub-vectors, x = (x0, . . . , xm−1),
+assuming that d is a multiple of m. Each sub-vector x j ∈ Rd /m,
+j ∈ {0, . . . , m − 1} is quantized using a sub-quantizer qj . Each sub-
+quantizer qj has a distinct codebook Cj = (c j
+i )k−1
+i =0 of cardinality k.
+A product quantizer pq maps a vector x ∈ Rd as follows:
+
+pq(x) =
+
+q0(x0), . . . , qm−1(xm−1)
+
+(cid:16)
+= (c0
+i0
+
+, . . . , cm−1
+im−1
+
+)
+
+(cid:17)
+
+The codebook C of the product quantizer q is given by the cartesian
+product of the sub-quantizers codebooks:
+
+C = C0 × · · · × Cm−1
+The cardinality of the product quantizer codebook C is km . Thus,
+a product quantizer is able to produce a large number of centroids
+km while only requiring storing and training m codebooks of cardi-
+nality k. A product quantizer can be used to encode a vector x into
+a short code, by concatenating codes produced by sub-quantizers:
+
+enc(x) = (i0, . . . , im−1), such that q(x) = (c0
+i0
+
+, . . . , cm−1
+im−1
+
+)
+
+The short code (i0, . . . , im−1) requires ⌈log2(km )⌉ = m · b bits of
+storage, where b = ⌈log2(k)⌉.
+
+Optimized Product Quantizers. Cartesian k-means (CKM) [11]
+and Optimized Product Quantizers (OPQ) [5] and optimize the sub-
+space decomposition by multiplying the vector x by an orthonor-
+mal matrix R ∈ Rd ×d before quantization. The matrix R allows
+
+for arbitrary rotation and permutation of vector components. An
+optimized product quantizer opq maps a vector x as follows:
+
+opq(x) = pq(Rx), such that RT R = I ,
+
+where pq is a product quantizer. Optimized product quantizers can
+be used to encode vectors into short codes like product quantizers.
+
+2.2 Inverted Indexes
+The simplest search strategy, exhaustive search, involves encoding
+database vectors as short codes using PQ or OPQ and storing short
+codes in RAM. At query time, the whole database is scanned for
+nearest neighbors.
+
+The more refined non-exhaustive search strategy relies on in-
+verted indexes (or IVF) [7, 8] to avoid scanning the whole database.
+An inverted index uses a quantizer qi to partition the input vector
+space into K Voronoi cells. Vectors lying in each cell are stored in
+an inverted list. At query time, the inverted index is used to find
+the closest cells to the query vector, which are then scanned. In-
+verted indexes therefore offer a lower query response time. When
+adding a vector x to an indexed database, its residual r(x) is first
+computed:
+
+r(x) = x − qi(x)
+The residual r(x) is then encoded into a short code using a prod-
+uct quantizer. This code is then stored in the appropriate inverted
+list of the inverted index. Indexed databases therefore use two quan-
+tizers: a quantizer for the index (qi) and a product quantizer to
+encode residuals into short codes. The energy of residuals r(x) is
+smaller than the energy of input vectors x, thus there is a lower
+quantization error when encoding residuals into short codes. Non-
+exhaustive search therefore offers a higher recall than exhaustive
+search in addition to the lower response time. Inverted indexes
+however incur a memory overhead (usually 4 bytes per database
+vector). This memory overhead is negligible in the case of small
+databases (∼ 4MB for 1 million vectors) and for large databases, ex-
+haustive search is anyway hardly tractable. Non-exhaustive search
+is therefore preferred to exhaustive search in most cases.
+
+2.3 ANN Search
+ANN search in a database of short codes consists in three steps:
+Index, which involves retrieving inverted lists from the index, Ta-
+bles, which involves computing lookup tables to speed up distance
+computations and Scan which involves computing distances be-
+tween the query vector and short codes using the pre-computed
+lookup tables. Obviously, the step Index is only required for non-
+exhaustive search, and is skipped in the case of exhaustive search.
+We detail these three steps in the three following paragraphs.
+
+Index. In this step, the Voronoi cell of the inverted index quan-
+tizer qi in which the query vector y lies is determined. The residual
+r(y) of the query vector is also computed. In practice, to improve
+recall, the ma closest cells (typically, ma = 8 to 64) are selected.
+For the sake of simplicity, this section describes the ANN search
+process for ma = 1, but each operation is repeated ma times: ma
+cells are selected, ma sets of lookup tables are computed and ma
+cells are searched. In the case of exhaustive search no residual is
+computed and the query vector is used as-is. In the remainder of
+
+Accelerated Nearest Neighbor Search with Quick ADC
+
+ICMR ’17, June 06-09, 2017, Bucharest, Romania
+
+3:
+
+, database, y, R)
+
+Algorithm 1 ANN Search
+1: function nns({Cj }m
+j=0
+list, y′ ←index_get_list(database, y)
+2:
+j=0 ← compute_tables(y′, {Cj }m
+{D j }m
+return scan(list, {D j }m
+4:
+5: function scan(list, {D j }m
+j=0
+neighbors ← binheap(R)
+6:
+for i ← 0 to |list| − 1 do
+
+j=0)
+, R)
+
+7:
+
+j=0)
+
+⊲ binary heap of size R
+
+⊲ ith pqcode
+
+8:
+
+9:
+
+10:
+
+c ← list[i]
+d ← adc(p, {D j }m
+j=0)
+neighbors. add((i, d))
+
+return neighbors
+11:
+12: function adc(c, {D j }m−1
+j=0 )
+13:
+
+d ← 0
+for j ← 0 to m do
+
+14:
+
+15:
+
+d ← d + D j [c[j]]
+
+return d
+
+this section, y′ = r(y) for non-exhaustive search, and y′ = y for
+exhaustive search.
+
+Tables. In this step, a set ofm lookup tables are computed {D j }m
+j=0,
+where m is the number of sub-quantizers of the product quantizer.
+The jth lookup table comprises the distance between the j sub-
+vector of y′ and all centroids of the jth sub-quantizer:
+
+D j =
+
+y′j − Cj [0]
+(cid:18)(cid:13)
+(cid:13)
+(cid:13)
+
+(cid:13)
+(cid:13)
+(cid:13)
+
+2
+
+, . . . ,
+
+y′j − Cj [k − 1]
+(cid:13)
+(cid:13)
+(cid:13)
+
+(cid:13)
+(cid:13)
+(cid:13)
+
+2
+
+(cid:19)
+
+Scan. In this step, the cells of the inverted index selected during the
+step Index are searched for nearest neighbors. This requires com-
+puting the distance between the query vectors and short codes us-
+ing Asymmetric Distance Computation (ADC). ADC computes the
+distance between the query vector y and a short code c as follows:
+
+(1)
+
+adc(y, c) =
+
+D j [c[j]]
+
+(2)
+
+m−1
+
+Õj=0
+
+Equation 2 is equivalent to:
+
+m−1
+
+2
+
+(cid:13)
+(cid:13)
+(cid:13)
+
+(3)
+
+adc(y, c) =
+
+y′j − Cj [c[j]]
+Õj=0 (cid:13)
+(cid:13)
+(cid:13)
+Thus, ADC computes the distance between a query vector y′ and a
+code c by summing the distances between the sub-vectors of y′ and
+centroids associated with code c in the m sub-spaces of the prod-
+uct quantizer. When the number of codes in cells is large compared
+to k, the number of centroids of sub-quantizers, using lookup ta-
+bles avoids computing ky′j − Cj [i]k2 for the same i multiple times.
+Thus, lookup tables therefore provide a significant speedup. While
+scanning inverted lists, neighbors and their associated distances
+are stored in a binary heap of size R (Algorithm 1, line 6).
+
+2.4 Impact of PQ Parameters
+The two parameters of a product quantizer, m, the number of sub-
+quantizers and k, the number of centroids of each sub-quantizer
+impact: (1) the memory usage of codes, (2) the recall of ANN search
+
+Table 1: Speed-Accuracy tradeoff for 64-bit codes (SIFT1M,
+Exhaustive search)
+
+m×b
+
+Size
+
+Cache R@100 Tables
+
+16×4
+8×8
+4×16
+
+L1
+1 KiB
+8 KiB
+L1
+1 MiB L3
+
+83.1%
+91.6%
+96.5%
+
+0.001 ms
+0.005 ms
+0.77 ms
+
+Scan
+
+6.1 ms
+2.7 ms
+7.8 ms
+
+and (3) search speed. In practice, 64-bit codes (264 centroids) or 128-
+bit codes (2128 centroids) are used in most cases.
+
+The second tradeoff is between ANN accuracy and search speed.
+For a constant memory budget of m ·b bits per code, the respective
+values of m and b impact accuracy and speed. Decreasing m, which
+implies increasing b, increases accuracy [7]. We discuss the effect
+of m and b on the time cost of the Tables and Scan steps of ANN
+search (Section 2.3). Each lookup table requires k = 2b l2-norm
+computations in sub-spaces of dimensionality d/m. Thus, the com-
+plexity of computing allm lookup tables is O(m·2b·d/m) = O(2b ·d),
+and increases exponentially with b. In conclusion, decreasing m
+makes the Tables step more costly.
+
+During the Scan step, each Asymmetric Distance Computation
+(ADC) (Algorithm 1, line 12) requires m accesses to lookup tables
+and m additions (Algorithm 1, line 15). Therefore, decreasing m de-
+creases the number of operations required for each ADC, which
+is beneficial for search speed. However, decreasing m implies in-
+creasing b, and thus increasing the size of lookup tables. The size
+j=0 is m · k · sizeof(float) = m · 2b · 4. It in-
+of all lookup tables {D j }m
+creases linearly with m and exponentially with b. Thus, decreasing
+m increases the size of lookup tables. As the size of lookup tables
+increases, they need to be stored in larger and slower cache levels
+which is detrimental to performance [1]. In conclusion, decreas-
+ing m, makes the Tables step less costly, except if it causes lookup
+tables to be stored in slower cache.
+
+To illustrate this, we measure the recall (R@100) and the time
+cost of the Tables and Scan steps of ANN search for different m×b
+configurations producing 64-bit codes (Table 1). For 16×4 and 8×8,
+tables fit the L1 cache. The 8×8 configuration has a lower Scan time
+because it requires less additions and less accesses to lookup tables.
+The 4×16 configuration requires even less additions and table ac-
+cesses but lookup tables are stored in the much slower L3 cache.
+Overall, the 4×16 configuration therefore has a higher Scan time.
+In all cases, the time cost of the Tables step increases with b.
+
+3 QUICK ADC
+3.1 Overview
+The performance gains of Quick ADC are achieved by exploiting
+SIMD. Single Instruction Multiple Data (SIMD) instructions per-
+form the same operation e.g., additions, on multiple data elements
+in one instruction. Consequently, SIMD enables large performance
+improvements. Thus, optimized linear algebra libraries rely on SIMD
+to offer high performance. Current CPUs include an SIMD unit in
+each core. SIMD therefore offers an additional level of parallelism
+over multi-core processing. ANN search parallelizes naturally over
+multiple cores by processing a distinct query on each core. With
+
+ICMR ’17, June 06-09, 2017, Bucharest, Romania
+
+Fabien André, Anne-Marie Kermarrec, and Nicolas Le Scouarnec
+
+indexes
+
+a0
+
+b0
+
+c0
+
+table
+
+D 0[0]
+
+D 0[1]
+
+D 0[2]
+
+. . .
+
+. . .
+
+p0
+
+D 0[15]
+
+simd_shuffle
+
+D 0[a0]
+
+D 0[b0]
+
+D 0[c0]
+
+. . .
+
+D 0[p0]
+
+Figure 1: SIMD in-register shuffle
+
+Quick ADC, we propose further increasing performance by speed-
+ing up ADC for each query, thanks to the use of SIMD. To process
+multiple data elements at once, SIMD instructions operate on wide
+registers. SSE instructions use 128-bit registers, while the newer
+AVX instructions use 256-bit registers.
+
+The Scan step computes asymmetric distances between the query
+vector and all codes stored in selected cells. Each ADC requires (1)
+m accesses to cache-resident lookup tables and (2) m additions. If
+implementing additions using SIMD is straightforward, SIMD does
+not allow an efficient implementation of table lookup, even using
+gather instructions introduced in recent processors [1, 6]. SIMD
+can add 4 floating-point numbers (128 bits) or 8 floating-point num-
+bers (256 bits) at once, there are only 2 cache read ports in each
+CPU core. Therefore, it is not possible to perform more than 2
+cache accesses concurrently.
+
+Therefore, efficiently implementing ADC using SIMD requires
+storing lookup tables in SIMD registers and performing lookups
+using SIMD in-register shuffles. The main challenge is that SIMD
+registers (128 bits) are much smaller than lookup tables, for com-
+mon PQ configurations. In most cases, product quantizers use 8-
+bit sub-quantizers, which results in lookup tables of k = 28 = 256
+floats (8192 bits). For this reason, Quick ADC relies on (i) the use
+of 4-bit quantizers instead of the common 8-bit quantizers, and (ii)
+the quantization of floats to 8-bit integers. We obtain lookup tables
+of k = 24 = 16 floats, which are then quantized to 8-bit integers.
+The resulting lookup tables comprise 16 8-bit integers (128 bits),
+and can be stored in SIMD registers. Once lookup tables are stored
+in SIMD registers, in-register shuffles can be used to perform 16
+lookups in 1 cycle (Figure 1), enabling large performance gains.
+
+In addition to the use of 4-bit quantizers and the quantization
+of floats to 8-bit integers, Quick ADC requires a minor change of
+memory layout. In the next sections, we detail this change of mem-
+ory layout as well as our lookup tables quantization process and
+the SIMD implementation of distance computations.
+
+3.2 Memory Layout
+An SIMD in-register shuffle performs 16 lookups at once, but in
+a single lookup table e.g., D0 (Figure 1). Therefore, to use shuffles
+efficiently, we need to operate on the first component of 16 codes
+(a0, . . . , p0) at once instead of the 16 components of a single code
+(a0, . . . , a15). Its is crucial for efficiency that all values in an SIMD
+register can be loaded in a single memory read. This requires that
+a0, . . . , p0 are contiguous in memory, which is not the case with the
+standard memory layout of inverted lists (Figure 2a). We therefore
+transpose inverted lists by blocks of 16 codes, so that analogous
+components of 16 codes are stored in adjacent bytes (Figure 2b).
+
+am−1 am−2
+bm−1 bm−2
+. . .
+
+pm−1 pm−2
+
+a
+
+b
+
+p
+
+a1 a0
+b1 b0
+. . .
+
+p1 p0
+
+b
+
+b1 b0
+. . .
+
+a
+
+a1 a0
+. . .
+
+. . .
+
+. . .
+
+. . .
+
+. . .
+
+c
+
+c1 c0
+. . .
+
+(a) Standard layout
+
+p
+
+p1 p0
+. . .
+
+. . .
+
+. . .
+
+. . .
+
+am−1 am−2 bm−1 bm−2 cm−1 cm−2
+
+am−1 am−2
+
+(b) Transposed layout
+
+Figure 2: Inverted list memory layouts. Each table cell rep-
+resents a byte.
+
+We divide each inverted list in blocks of 16 codes and transpose
+each block independently. Figure 2 shows the transposition of one
+block of 16 codes (a, . . . , p). This transposition is performed offline,
+and does not increase ANN query response time. The transposition
+is moreover very fast; the overhead on database creation time is
+less than 1%.
+
+3.3 Quantization of Lookup Tables
+In standard ADC, lookup tables store 32-bit floats. To be able to
+store tables of 16 elements in 128-bit registers, we quantize 32-bit
+floats to 8-bit integers using a scalar quantizer. Because there is no
+SIMD instruction to compare unsigned 8-bit integers, we quantize
+distances to signed 8-bit integers, only using their positive range.
+We quantize distances between a qmin and qmax bound into n =
+127 bins (0-126) uniformly. The size of each bin is ∆ = (qmax −
+qmin)/n. Values larger than qmax are quantized to 127.
+
+We choose the minimum value accross all lookup tables {D j }m
+j=0,
+which is the smallest distance we need to represent, as the qmin
+value. Using the maximum possible distance i.e., the sum of the
+maximums of all lookup tables results in a too high quantization
+error. Therefore, to set qmax we scan init vectors (typical init=200-
+1000) to find a temporary set of R nearest neighbor candidates,
+where R is the number of nearest neighbors requested by the user
+(Section 2.3). We use the distance of the query vector to the Rth
+nearest neighbor candidate i.e., the farthest nearest neighbor can-
+didate, as the qmax bound. All subsequent candidates will need to
+be closer to the query vector, thus qmax is the maximum distance
+we need to represent.
+
+3.4 SIMD Distance Computation
+Although recent Intel CPUs offer 256-bit SIMD, we describe a ver-
+sion of Quick ADC which uses 128-bit SIMD for the sake of sim-
+plicity. Yet, we explain how to generalize it to 256-bit at the end
+of the section. Moreover, the 128-bit version of Quick ADC offers
+the best compatibility, notably with older Intel CPUs or ARM CPUs.
+In Algortihm 2, SIMD instructions are denoted by the prefix simd_.
+SIMD instructions use 128-bit variables, denoted by r128.
+
+⊲ Fig. 4
+
+simd_add_saturated
+
+acc
+
+Accelerated Nearest Neighbor Search with Quick ADC
+
+ICMR ’17, June 06-09, 2017, Bucharest, Romania
+
+comps
+
+a1 a0
+
+b1 b0
+
+c1 c0
+
+. . .
+
+p1 p0
+
+⊲ Fig. 3
+
+simd_and (0x0f)
+
+Algorithm 2 ANN Search with Quick ADC
+1: function lookup_add(comps, D j , acc)
+2:
+
+r128 masked ← simd_and(comps, 0x0f)
+r128 partial ← simd_shuffle(comps, D j )
+return simd_add_saturated(acc, partial)
+
+4:
+5: function qick_adc_block(blk, {D j }m−1
+j=0 )
+6:
+
+3:
+
+r128 acc ← {0}
+for j ← 0 to m/2 − 1 do
+
+r128 comps ← simd_load(blk + j · 16)
+acc ← lookup_add(comps, D2j , acc)
+comps ← simd_right_shift(comps, 4)
+acc ← lookup_add(comps, D2j+1, acc)
+
+return acc
+
+12: function qick_adc_scan(tlist, {D j }m−1
+j=0
+13:
+
+neighbors ← binheap(R)
+for blk in tlist do
+
+, R)
+
+r128 acc ← qick_adc_block(blk, {D j }m−1
+j=0 )
+extract_matches(acc, neighbors)
+
+return neighbors
+
+7:
+
+8:
+
+9:
+
+10:
+
+11:
+
+14:
+
+15:
+
+16:
+
+17:
+
+The qick_adc_scan function (Algorithm 2, line 12) scans a
+block-transposed inverted list tlist (Section 3.2) using m quantized
+lookup tables {D j }m−1
+j=0 , where m is the number of sub-quantizers
+of the product quantizer. Each lookup table is stored in a distinct
+SIMD register. The qick_adc_scan function iterates over blocks
+blk of 16 codes (Algorithm 2, line 14). The qick_adc_block func-
+tion computes the distance between the query vector and the 16
+codes (a, . . . , p) of the block blk.
+
+Each block comprises m/2 rows of 16 bytes (128 bits). Each row
+stores the jth and (j + 1)th components of 16 codes (Figure 2b).
+The qick_adc_block function iterates over each row (Alorithm
+2, line 7), and loads it in the comps register sequentially (Algo-
+rithm 2, line 8). Two lookup-add operations are performed on each
+row (Algorithm 2, line 9 and line 11): one for the (2j)th components,
+and one for (2j + 1)th components of the codes. Figure 3 describes
+the succession of operations performed by the lookup_add func-
+tion for the first row (j = 0). As each byte of the first row stores
+two components, e.g., the first byte of the first row stores a1 and a0
+(Figure 3), we start by masking the lower 4 bits of each byte (and
+with 0x0f), to obtain the first components (a0, . . . , p0) only. The
+remainder of the function looks up values in the D0 table and ac-
+cumulates distances in acc variable. Before the lookup_add func-
+tion can be used to process the second components (a1, . . . , p1), it
+is necessary that (a1, . . . , p1) are in the lowest 4 bits of each byte
+of the register. We therefore right shift the comps register by 4 bits
+(Figure 4) before calling lookup_add (Algorithm 2, line 10). The
+extract_matches function (Algorithm 2, line 16), the implemen-
+tation of which is not shown, extracts distances from the acc reg-
+ister and inserts them in the binary heap neighbors.
+
+Among 256-bit SIMD instructions (AVX and AVX2 instruction
+sets) supported on recent CPUs, some, like in-register shuffles, op-
+erate concurrently on two independent 128-bit lanes. This prevents
+use of 256-bit lookup tables (32 8-bit integers) but allows an easy
+
+masked
+
+a0
+
+b0
+
+c0
+
+D 0[0]
+
+D 0[1]
+
+D 0[2]
+
+. . .
+
+. . .
+
+p0
+
+D 0[15]
+
+simd_shuffle
+
+partial
+
+D 0[a0] D 0[b0]
+
+D 0[c0]
+
+. . .
+
+D 0[p0]
+
+acc
+
+acc[0] +
+D 0[a0]
+
+acc[1] +
+D 0[b0]
+
+acc[2] +
+D 0[c0]
+
+. . .
+
+acc[15]+
+D 0[p0]
+
+Figure 3: SIMD Lookup-add (j = 0)
+
+comps
+
+a1 a0
+
+b1 b0
+
+c1 c0
+
+. . .
+
+p1 p0
+
+simd_right_shift (4 bits)
+
+comps
+
+a1
+
+a0 b1
+
+b0 c1
+
+. . .
+
+o0 p1
+
+Figure 4: SIMD 4-bit Right Shift (j = 0)
+
+generalization of the 128-bit version of Quick ADC. While the 128-
+bit version of Quick ADC iterates on block rows one by one (Algo-
+rithm 2, line 7), the 256-bit version processes two rows at once: one
+row in each 128-bit lane. The number of iterations is thus reduced
+from m/2 to m/4. Lastly, instead of storing each D j table in a dis-
+tinct 128-bit register, the tables D j and D2j , j ∈ {0, . . . , m/2 − 1},
+are stored in each of the two lanes of a 256-bit register.
+
+4 EVALUATION
+4.1 Experimental Setup
+We implemented 256-bit Quick ADC in C++, using compiler intrin-
+sics to access SIMD instructions. Our implementation is released
+under the Clear BSD license1 and uses the AVX and AVX2 instruc-
+tion sets. We used the g++ compiler version 5.3, with the options
+-03 -ffast-math -m64 -march=native. Exhaustive search and
+non-exhaustive search (inverted indexes, IVF) were implemented
+as described in [7]. We use the yael library and the ATLAS library
+version 3.10.2. We compiled an optimized version of ATLAS on our
+system. To learn product quantizers and optimized product quan-
+tizers, we used the implementation 2 of the authors of [2, 4]. Unless
+otherwise noted, experiments were performed on our workstation
+(Table 2). To get accurate timings, we processed queries sequen-
+tially on a single core. We evaluate our approach on two publicly
+available3 datasets of SIFT descriptors, one dataset of GIST descrip-
+tors, and one dataset of PCA-compressed deep features4 (Table 3).
+For SIFT1B, the learning set is needlessly large to train product
+
+1https://github.com/technicolor-research/quick-adc
+2https://github.com/arbabenko/Quantizations
+3http://corpus-texmex.irisa.fr/
+4http://sites.skoltech.ru/compvision/projects/aqtq/
+
+ICMR ’17, June 06-09, 2017, Bucharest, Romania
+
+Fabien André, Anne-Marie Kermarrec, and Nicolas Le Scouarnec
+
+(a) PQ recall
+
+(b) OPQ recall
+
+(c) PQ response time
+
+1
+
+0.8
+
+0.6
+
+0.4
+
+0.2
+
+R
+@
+
+l
+l
+a
+c
+e
+R
+
+R
+@
+
+l
+l
+a
+c
+e
+R
+
+1
+
+0.8
+
+0.6
+
+0.4
+
+0.2
+
+PQ 8×8 ADC
+PQ 16×4 ADC
+PQ 16×4 QADC
+
+OPQ 8×8 ADC
+OPQ 16×4 ADC
+OPQ 16×4 QADC
+
+1
+
+2
+
+5
+
+10 20
+
+50 100 200 500 1K
+
+1
+
+2
+
+5
+
+10 20
+
+50 100 200 500 1K
+
+0
+
+2
+
+4
+
+6
+
+R
+
+R
+
+Total query time [ms]
+
+Figure 5: ADC and QADC response time and recall with PQ and OPQ (SIFT1M, Exhaustive search)
+
+0.43
+
+2.6
+
+5.9
+
+PQ 8×8 ADC
+PQ 16×4 ADC
+PQ 16×4 QADC
+
+workstation
+server
+
+Xeon E5-1650v3
+Xeon E5-2630v3
+
+16GB DDR4 2133Mhz
+128GB DDR4 1866Mhz
+
+Table 2: Systems
+
+CPU
+
+RAM
+
+Table 3: Datasets
+
+Base set
+
+Learning set Query set
+
+Dim.
+
+SIFT1M 1M
+SIFT1B
+GIST1M 1M
+Deep1M 1M
+
+1000M
+
+100K
+100M (2M)
+500K
+300K
+
+10K (1K)
+10K (1K)
+1K
+1K
+
+128
+128
+960
+256
+
+quantizers, so we used the first 2 million vectors. We used a query
+set of 1000 vectors for all experiments.
+
+4.2 Exhaustive Search in SIFT1M
+Using 16×4 Quick ADC (QADC) instead of 8×8 ADC offers a large
+performance gain, thanks to the use of SIMD in-register shuffles.
+It however also causes a decrease in recall which is cause by two
+factors: (1) use of 16×4 quantizers instead of 8×8 quantizers (Sec-
+tion 2.4) and (2) use of quantized lookup tables (Section 3.3). In this
+section, we evaluate the global decrease in recall caused by the use
+of 16×4 QADC instead of 8×8 ADC, but also the relative impact of
+factors (1) and (2). To do so, we use the SIFT1M dataset and follow
+an exhaustive search strategy. We do not use an inverted index and
+we encode the original vectors into short codes, not residuals. This
+maximizes quantization error and thus represents a worst-case sce-
+nario for QADC. We scan init = 200 vectors to set the qmax bound
+for quantization of lookup tables (Section 3.3).
+
+We observe that 16×4 ADC slightly decreases recall (Figure 5a).
+However, 16×4 QADC, which uses quantized lookup tables, does
+not further decrease recall in comparison with 16×4 ADC. OPQ
+yields better results than PQ in all cases (Figure 5b), which is con-
+sistent with [5, 11]. Moreover, the difference in recall between 8×8
+ADC and 16×4 QADC is lower for OPQ than it is for PQ. OPQ
+
+optimizes the decomposition of the input vector space into m sub-
+spaces, which are used by the optimized product quantizer (Section
+2.1). For m = 16, OPQ has more degrees of freedom than for m = 8
+and is therefore able to bring a greater level of optimization.
+
+For an exhaustive search in 1 million vectors, 16×4 QADC is ∼14
+times faster than 16×4 ADC and 6 times faster than 8×8 ADC (Fig-
+ure 5c) (85% decrease in response time). Response times for PQ and
+OPQ are similar, so we report results for PQ. In practice, 8×8 ADC
+is much more common than 16×4 ADC [2–4, 11, 15], thus we only
+compare 16×4 QADC with 8×8 ADC in the remainder of this sec-
+tion. Overall, QADC therefore proposes trading a small decrease
+in recall, for a large improvement in response time.
+
+Non-exhaustive search offers both a lower response time and a
+higher recall than exhaustive search (Section 2.2). For this reason,
+non-exhaustive search is preferred to exhaustive search in practi-
+cal systems. Therefore, in the remainder of this section, we eval-
+uate QADC in the context of non-exhaustive search, for a wide
+range of scenarios: SIFT, GIST descriptors, deep feature, PQ and
+OPQ, 64 and 128 bit codes. We show that in most cases, when com-
+bined with OPQ and inverted indexes, QADC offers a decrease in
+response time close to 70% for a small or negligible loss of accuracy.
+
+4.3 Non-exhaustive Search in SIFT1M
+Table 4 compares the Recall@100 (R@100) and total ANN search
+time (Total). The time spent in each of the search steps (Index, Ta-
+bles, and Scan) detailed in Section 2.3 is also reported. All times
+are in milliseconds (ms). OPQ requires a rotation of the input vec-
+tor before computing lookup tables (Section 2.1). We include the
+time to perform this rotation in the Tables column. When using in-
+verted indexes, the parameters K, the total number of cells of the
+inverted index, and ma, the number of cells scanned to answer a
+query, impact response time and recall (Section 2.3). For datasets
+of 1 million vectors, we have found the parameters ma = 24 and
+K = 256 to offer the best tradeoff.
+
+For this configuration, QADC offers a 75% decrease in scan time.
+In addition, QADC offers a 50-70% decrease in tables computation
+time, thanks to the use of 4-bit quantizers, which result in smaller
+and faster to compute small tables. Overall, this translates into a
+decrease of approximately 70% in total response time. The loss of
+recall is significantly lower with OPQ (-1.5%) than with PQ (-4.4%),
+as OPQ offers a lower quantization error than PQ.
+
+Accelerated Nearest Neighbor Search with Quick ADC
+
+ICMR ’17, June 06-09, 2017, Bucharest, Romania
+
+Table 4: Non-exhaustive search, SIFT1M, 64 bit
+
+Table 6: Non-exhaustive search, Deep1M, 64 bit
+
+PQ
+
+ADC *
+
+R@100
+
+Index Tables
+
+Scan
+
+Total
+
+PQ
+
+ADC *
+
+R@100
+
+Index Tables
+
+Scan
+
+Total
+
+SIFT1M, IVF, K=256, ma=24
+
+Deep1M, IVF, K=256, ma=24
+
+PQ
+
+ADC
+QADC
+
+OPQ ADC
+
+QADC
+
+0.949
+0.907
+-4.4%
+
+0.963
+0.949
+-1.5%
+
+0.008
+0.008
+
+0.008
+0.008
+
+0.18
+0.055
+-69%
+
+0.21
+0.089
+-59%
+
+0.3
+0.072
+-76%
+
+0.29
+0.073
+-75%
+
+0.48
+0.14
+-72%
+
+0.52
+0.17
+-67%
+
+PQ
+
+ADC
+QADC
+
+OPQ ADC
+
+QADC
+
+0.772
+0.669
+-13%
+
+0.922
+0.902
+-2.2%
+
+0.015
+0.013
+
+0.013
+0.013
+
+0.24
+0.082
+-66%
+
+0.34
+0.16
+-53%
+
+0.33
+0.076
+-77%
+
+0.32
+0.08
+-75%
+
+0.58
+0.17
+-71%
+
+0.67
+0.25
+-62%
+
+* ADC: 8×8 ADC, QADC: 16×4 QADC
+
+* ADC: 8×8 ADC, QADC: 16×4 QADC
+
+PQ
+
+ADC *
+
+R@100
+
+Index Tables
+
+Scan Total
+
+the gain in total response time (-62%), due to the time spent per-
+forming rotations.
+
+Table 5: Non-exhaustive search, GIST1M, 128 bit
+
+GIST1M, IVF, K=256, ma=24
+
+PQ
+
+ADC
+QADC
+
+OPQ ADC
+
+QADC
+
+0.675
+0.515
+-24%
+
+0.918
+0.872
+-5%
+
+0.038
+0.038
+
+0.039
+0.038
+
+0.77
+0.26
+-67%
+
+1.7
+1.2
+-32%
+
+1.5
+0.71
+0.15
+0.45
+-79% -71%
+
+2.5
+1.4
+
+0.73
+0.16
+-78% -45%
+
+* ADC: 16×8 ADC, QADC: 32×4 QADC
+
+4.4 Non-exhaustive Search in GIST1M
+GIST descriptors have a much higher dimensionality (960 dimen-
+sions) than SIFT descriptors (128 dimensions). For this reason, GIST
+descriptors are often encoded into 128-bit codes instead of 64-bit
+codes [3, 11]. This corresponds to 16×8 codes for ADC and 32×4
+codes for QADC. In this case, when combined with PQ, QADC of-
+fers a decrease of approximately 70% in total response time, as with
+64-bit codes and SIFT descriptors (Table 5). However, the decrease
+in recall when using QADC with PQ is higher for GIST descriptors
+(-24%) than for SIFT descriptors (-4.4%). This loss of recall is lim-
+ited to 5% when combining QADC with OPQ. The decrease in total
+response time is however less important for OPQ (-45%) than for
+PQ (-71%). This is because OPQ requires rotating the query vector
+when computing distance tables. Rotating 960-dimensional GIST
+descriptors is costly, increasing the time to compute distance ta-
+bles, which in turn limits the gain in total response time.
+
+4.5 Non-exhaustive Search in Deep1M
+The Deep1M dataset comprises L2-normalized deep features that
+are PCA-compressed to 256 dimensions. Due to their relatively low
+dimensionality, these vectors can be encoded into 64-bit codes. As
+for SIFT and GIST descriptors, QADC offers a 70% decrease in re-
+sponse time when combined with PQ. The decrease in recall (-13%)
+for Deep1M vectors is between the decrease in recall for SIFT de-
+scriptors (-4.4%) and the decrease in recall for GIST descriptors (-
+24%), which is consistent with the dimensionality of vectors. Once
+again, OPQ strongly limits the loss of recall (-2.2%). It also limits
+
+4.6 Non-exhaustive Search in SIFT1B
+We conclude our experimental section by performing experiments
+on a large dataset of 1 billion SIFT descriptors. For this dataset, we
+use an inverted index with K = 65536 cells and scan ma = 64 cells
+to answer queries. This configuration has been shown to offer best
+performance [3]. We scan init = 1000 vectors before quantizing
+lookup tables (Section 3.3). For SIFT descriptors, we have shown
+that combining QADC with OPQ allows a higher recall, with no
+impact on total response time (Section 4.3). For this reason, we per-
+form experiments with OPQ. As with the SIFT1M dataset, QADC
+offers a decrease of approximately 70% in response time (Table 7).
+However, for 64-bit codes the loss of recall is higher on SIFT1B (-
+7.3%) than on SIFT1M (-1.5%). Using 128-bit codes makes the loss of
+recall negligible (-1.1%) but increases memory use (Table 8). With
+128-bit codes, the database uses 20GB of RAM, therefore we had to
+run this experiment on our server (Table 2).
+
+4.7 Summary
+Our experiments show that QADC offers large performance gains
+in all cases, at the expense of a small or negligible decrease in recall.
+For SIFT descriptors, this decrease is always negligible, even when
+using PQ (Section 4.3). For descriptors of higher dimensionality,
+the decrease in recall is greater (Section 4.4 and 4.5). Using OPQ
+brings this loss of recall down to low levels, but also slightly limits
+the gain in response time (-50% to -60% decrease in response time).
+Overall, QADC offers an interesting speed-accuracy tradeoff: a loss
+in recall of 1-5% for a decrease of response time of 50-70%. The case
+of large datasets is slightly less favorable for QADC: we observe a
+7% decrease in accuracy on the SIFT1B dataset, even when using
+OPQ. However, even in this scenario, QADC exhibits similar or
+better performance than state-of-the-art systems. Thus, with 64-
+bit codes, QADC achieves a recall of 0.747 on the SIFT1B dataset in
+1.7 ms, while the state-of-the-art OMulti-D-OADC system achieves
+the same recall in 2 ms [3]. With 128-bit codes, QADC achieves a
+recall of 0.94 in 3.4 ms while OMulti-D-OADC achieves a recall of
+0.901 in 5 ms [3].
+
+ICMR ’17, June 06-09, 2017, Bucharest, Romania
+
+Fabien André, Anne-Marie Kermarrec, and Nicolas Le Scouarnec
+
+Table 7: Non-exhaustive search, SIFT1B, 64 bit
+
+PQ
+
+ADC *
+
+R@100
+
+Index Tables
+
+Scan Total
+
+SIFT1B, IVF, K=65536, ma=64
+
+OPQ ADC
+
+QADC
+
+0.806
+0.747
+-7.3%
+
+0.52
+0.53
+
+0.51
+0.22
+-57%
+
+5.2
+1.7
+
+4.2
+0.92
+-78% -68%
+
+* ADC: 8×8 ADC, QADC: 16×4 QADC
+
+Table 8: Non-exhaustive search, SIFT1B, 128 bits
+
+PQ
+
+ADC *
+
+R@100
+
+Index Tables
+
+Scan Total
+
+SIFT1B, IVF, K=65536, ma=64
+
+OPQ ADC
+
+QADC
+
+0.95
+0.94
+-1.1%
+
+0.73
+0.72
+
+1.1
+0.49
+-57%
+
+12
+3.4
+
+10
+2.2
+-78% -72%
+
+* ADC: 16×8 ADC, QADC: 32×4 QADC
+
+5 RELATED WORK
+PQ Fast Scan. Both PQ Fast Scan [1] and Quick ADC speed up the
+scan of lists of short codes by taking advantage of SIMD. More
+specifically, PQ Fast Scan and Quick ADC store lookup tables in
+SIMD registers and use SIMD in-register shuffles in place of cache
+accesses. The main challenge is that lookup tables used for ANN
+search are much larger than SIMD registers. PQ Fast Scan tackles
+this issue by both altering (i) inverted lists (vector grouping) and
+(ii) lookup tables (minimum tables). PQ Fast Scan uses the standard
+8-bit sub-quantizers, hence it incurs no loss of recall. However, be-
+cause of the transformations it applies, PQ Fast Scan requires a
+minimum list size of 3 million codes [1]. This limits the applicabil-
+ity of PQ Fast Scan to exhaustive search or to very coarse (and thus
+inefficient [3, 7]) inverted indexes. On the contrary, Quick ADC
+imposes no constraints on list sizes, and may be combined with
+efficient inverted indexes (lists of 1000-10000 vectors) as shown in
+our experiments (Section 4).
+
+Inverted Multi-index. Inverted multi-indexes [3] provide a finer
+partition (typical K = 228) of the vector space than inverted in-
+dexes (typical K = 65536). At query time, this finer partition allows
+scanning less vectors to achieve the same recall, therefore provid-
+ing a significant speedup. Unlike PQ Fast Scan, Quick ADC does
+not require lists of a minimum size. Therefore, Quick ADC can also
+be combined with multi-indexes to further decrease response time.
+Compositional Quantization Models. Recently, compositional vec-
+tor quantization models inspired by PQ have been proposed. These
+models offer a lower quantization error than PQ or OPQ. Among
+these models are Additive Quantization (AQ) [2], Tree Quantiza-
+tion (TQ) [4] and Composite Quantization (CQ) [15]. These models
+also use cache-resident lookup tables to compute distances, there-
+fore Quick ADC may be combined with them. However, this may
+require additional work as some of these models use more lookup
+tables than PQ or OPQ.
+
+6 CONCLUSION
+In this paper, we presented Quick ADC, a novel distance computa-
+tion method for ANN search. Quick ADC achieves a 3 to 6 times
+speedup over the standard ADC method by efficiently exploiting
+SIMD. This efficient use of SIMD is enabled by two changes to the
+ADC procedure: (i) the use of 4-bit quantizers instead of the usual 8-
+bit quantizers, and (ii) the quantization of floating-point distances
+to 8-bit integers.
+
+It is known that using 4-bit quantizers may cause a loss in re-
+call [7]. However, through an extensive evaluation, we have shown
+that this loss is small or negligible when 4-bit quantizers are com-
+bined with OPQ and inverted indexes. In addition, we have shown
+that Quick ADC integrates well with other search acceleration meth-
+odes, in particular inverted indexes. Lastly, upcoming SIMD in-
+struction sets (e.g., 512-bit AVX in Xeon Skylake CPUs), will allow
+Quick ADC to offer both greater speedups (twice more codes pro-
+cessed per cycle) and an even smaller loss of recall (6-bit quantizers
+instead of 4-bit quantizers).
+
+ACKNOWLEDGEMENTS
+Experiments presented in this paper were carried out using the
+Grid’5000 testbed, supported by a scientific interest group hosted
+by Inria and including CNRS, RENATER and several Universities
+as well as other organizations (see https://www.grid5000.fr).
+
+REFERENCES
+[1] Fabien André, Anne-Marie Kermarrec, and Nicolas Le Scouarnec. 2015. Cache
+locality is not enough: High-Performance Nearest Neighbor Search with Prod-
+uct Quantization Fast Scan. PVLDB 9, 4 (2015).
+
+[2] Artem Babenko and Victor Lempitsky. 2014. Additive Quantization for Extreme
+
+[3] Artem Babenko and Victor Lempitsky. 2015. The Inverted Multi-Index. TPAMI
+
+Vector Compression. In CVPR.
+
+37, 6 (2015).
+
+[4] Artem Babenko and Victor Lempitsky. 2015. Tree Quantization for Large-Scale
+
+Similarity Search and Classification. In CVPR.
+
+[5] Tiezheng Ge, Kaiming He, Qifa Ke, and Jian Sun. 2014. Optimized Product Quan-
+
+tization. TPAMI 36, 4 (2014).
+
+[6] Johannes Hofmann, Jan Treibig, Georg Hager, and Gerhard Wellein. 2014. Com-
+paring the Performance of Different x86 SIMD Instruction Sets for a Medical
+Imaging Application on Modern Multi- and Manycore Chips. In WPMVP.
+[7] Hervé Jégou, Matthijs Douze, and Cordelia Schmid. 2011. Product Quantization
+
+for Nearest Neighbor Search. TPAMI 33, 1 (2011).
+
+[8] Hervé Jégou, Romain Tavenard, Matthijs Douze, and Laurent Amsaleg. 2011.
+Searching in one billion vectors: Re-rank with source coding. In ICASSP.
+[9] Josip Krapac, Florent Perronnin, Teddy Furon, and Hervé Jégou. 2014. Instance
+
+Classification with Prototype Selection. In ICMR.
+
+[10] David G. Lowe. 1999. Object Recognition from Local Scale-Invariant Features.
+
+In ICCV.
+
+ICCV.
+
+[11] Mohammad Norouzi and David J. Fleet. 2013. Cartesian K-Means. In CVPR.
+[12] Aude Oliva and Antonio Torralba. 2001. Modeling the Shape of the Scene: A
+
+Holistic Representation of the Spatial Envelope. IJCV 42, 3 (2001).
+
+[13] Yan Xia, Kaiming He, Fang Wen, and Jian Sun. 2013. Joint Inverted Indexing. In
+
+[14] Lingxi Xie, Richang Hong, Bo Zhang, and Qi Tian. 2015. Image Classification
+
+and Retrieval are ONE. In ICMR.
+
+[15] Ting Zhang, Chao Du, and Jingdong Wang. 2014. Composite Quantization for
+
+Approximate Nearest Neighbor Search. In ICML.
+

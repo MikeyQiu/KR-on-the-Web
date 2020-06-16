@@ -1,0 +1,4082 @@
+8
+1
+0
+2
+ 
+t
+c
+O
+ 
+6
+2
+ 
+ 
+]
+
+O
+C
+
+.
+t
+a
+t
+s
+[
+ 
+ 
+2
+v
+7
+3
+1
+7
+0
+.
+6
+0
+8
+1
+:
+v
+i
+X
+r
+a
+
+Large-Scale Stochastic Sampling from the Probability
+Simplex
+
+Jack Baker
+STOR-i CDT, Mathematics and Statistics
+Lancaster University
+j.baker1@lancaster.ac.uk
+
+Paul Fearnhead
+Mathematics and Statistics
+Lancaster University
+p.fearnhead@lancaster.ac.uk
+
+Emily B. Fox
+Computer Science & Engineering and Statistics
+University of Washington
+ebfox@uw.edu
+
+Christopher Nemeth
+Mathematics and Statistics
+Lancaster University
+c.nemeth@lancaster.ac.uk
+
+Abstract
+
+Stochastic gradient Markov chain Monte Carlo (SGMCMC) has become a popular
+method for scalable Bayesian inference. These methods are based on sampling a
+discrete-time approximation to a continuous time process, such as the Langevin
+diffusion. When applied to distributions deﬁned on a constrained space the time-
+discretization error can dominate when we are near the boundary of the space.
+We demonstrate that because of this, current SGMCMC methods for the simplex
+struggle with sparse simplex spaces; when many of the components are close to
+zero. Unfortunately, many popular large-scale Bayesian models, such as network
+or topic models, require inference on sparse simplex spaces. To avoid the biases
+caused by this discretization error, we propose the stochastic Cox-Ingersoll-Ross
+process (SCIR), which removes all discretization error and we prove that samples
+from the SCIR process are asymptotically unbiased. We discuss how this idea can
+be extended to target other constrained spaces. Use of the SCIR process within a
+SGMCMC algorithm is shown to give substantially better performance for a topic
+model and a Dirichlet process mixture model than existing SGMCMC approaches.
+
+1
+
+Introduction
+
+Stochastic gradient Markov chain Monte Carlo (SGMCMC) has become a popular method for
+scalable Bayesian inference (Welling and Teh, 2011; Chen et al., 2014; Ding et al., 2014; Ma et al.,
+2015). The foundation of SGMCMC methods are a class of continuous processes that explore a target
+distribution—e.g., the posterior—using gradient information. These processes converge to a Markov
+chain which samples from the posterior distribution exactly. SGMCMC methods replace the costly
+full-data gradients with minibatch-based stochastic gradients, which provides one source of error.
+Another source of error arises from the fact that the continuous processes are almost never tractable to
+simulate; instead, discretizations are relied upon. In the non-SG scenario, the discretization errors are
+corrected for using Metropolis-Hastings. However, this is not (generically) feasible in the SG setting.
+The result of these two sources of error is that SGMCMC targets an approximate posterior (Welling
+and Teh, 2011; Teh et al., 2016; Vollmer et al., 2016).
+
+Another signiﬁcant limitation of SGMCMC methods is that they struggle to sample from constrained
+spaces. Naively applying SGMCMC can lead to invalid, or inaccurate values being proposed. The
+result is large errors near the boundary of the space (Patterson and Teh, 2013; Ma et al., 2015; Li
+et al., 2016). A particularly important constrained space is the simplex space, which is used to model
+
+Preprint. Work in progress.
+
+discrete probability distributions. A parameter ω of dimension d lies in the simplex if it satisﬁes
+the following conditions: ωj ≥ 0 for all j = 1, . . . , d and (cid:80)d
+j=1 ωj = 1. Many popular models
+contain simplex parameters. For example, latent Dirichlet allocation (LDA) is deﬁned by a set of
+topic-speciﬁc distributions on words and document-speciﬁc distributions on topics. Probabilistic
+network models often deﬁne a link probability between nodes. More generally, mixture and mixed
+membership models have simplex-constrained mixture weights; even the hidden Markov model
+can be cast in this framework with simplex-constrained transition distributions. As models become
+large-scale, these vectors ω often become sparse–i.e., many ωj are close to zero—pushing them to
+the boundaries of the simplex. All the models mentioned have this tendency. For example in network
+data, nodes often have relatively few links compared to the size of the network, e.g., the number of
+friends the average social network user has will be small compared with the size of the whole social
+network. In these cases the problem of sampling from the simplex space becomes even harder; since
+many values will be very close to the boundary of the space.
+
+Patterson and Teh (2013) develop an improved SGMCMC method for sampling from the probability
+simplex: stochastic gradient Riemannian Langevin dynamics (SGRLD). The improvements achieved
+are through an astute transformation of the simplex parameters, as well as developing a Riemannian
+(see Girolami and Calderhead, 2011) variant of SGMCMC. This method achieved state-of-the-art
+results on an LDA model. However, we show that despite the improvements over standard SGMCMC,
+the discretization error of SGRLD still causes problems on the simplex. In particular, it leads to
+asymptotic biases which dominate at the boundary of the space and causes signiﬁcant inaccuracy.
+
+To counteract this, we design an SGMCMC method based on the Cox-Ingersoll-Ross (CIR) process.
+The resulting process, which we refer to as the stochastic CIR process (SCIR), has no discretization
+error. This process can be used to simulate from gamma random variables directly, which can then be
+moved into the simplex space using a well known transformation. The CIR process has a lot of nice
+properties. One is that the transition equation is known exactly, which is what allows us to simulate
+from the process without discretization error. We are also able to characterize important theoretical
+properties of the SCIR algorithm, such as the non-asymptotic moment generating function, and thus
+its mean and variance. We discuss how these ideas can be used to simulate efﬁciently from other
+constrained spaces, such as (0, ∞).
+
+We demonstrate the impact of this SCIR method on a broad class of models. Included in these
+experiments is the development of a scalable sampler for Dirichlet processes, based on the slice
+sampler of Walker (2007); Papaspiliopoulos (2008); Kalli et al. (2011). To our knowledge the
+application of SGMCMC methods to Bayesian nonparametric models has not been explored. All
+proofs in this article are relegated to the Supplementary Material. All code for the experiments is
+available online1, and full details of hyperparameter and tuning constant choices has been detailed in
+the Supplementary Material.
+
+2 Stochastic Gradient MCMC on the Probability Simplex
+
+2.1 Stochastic Gradient MCMC
+
+Consider Bayesian inference for continuous parameters θ ∈ Rd based on data x = {xi}N
+i=1. Denote
+the density of xi as p(xi|θ) and assign a prior on θ with density p(θ). The posterior is then deﬁned,
+up to a constant of proportionality, as p(θ|x) ∝ p(θ) (cid:81)N
+i=1 p(xi|θ), and has distribution π. We deﬁne
+f (θ) := − log p(θ|x). Whilst MCMC can be used to sample from π, such algorithms require access
+to the full data set at each iteration. Stochastic gradient MCMC (SGMCMC) is an approximate
+MCMC algorithm that reduces this per-iteration computational and memory cost by using only a
+small subset of data points at each step.
+
+The most common SGMCMC algorithm is stochastic gradient Langevin dynamics (SGLD), ﬁrst
+introduced by Welling and Teh (2011). This sampler uses the Langevin diffusion, deﬁned as the
+solution to the stochastic differential equation
+
+(2.1)
+where Wt is a d-dimensional Wiener process. Similar to MCMC, the Langevin diffusion deﬁnes a
+Markov chain whose stationary distribution is π.
+
+dθt = −∇f (θt)dt +
+
+2dWt,
+
+√
+
+1Code available at https://github.com/jbaker92/scir.
+
+2
+
+Unfortunately, simulating from (2.1) is rarely possible, and the cost of calculating ∇f is O(N ) since
+it involves a sum over all data points. The idea of SGLD is to introduce two approximations to
+circumvent these issues. First, the continuous dynamics are approximated by discretizing them, in
+a similar way to Euler’s method for ODEs. This approximation is known as the Euler-Maruyama
+method. Next, in order to reduce the cost of calculating ∇f , it is replaced with a cheap, unbiased
+estimate. This leads to the following update equation, with user chosen stepsize h
+
+θm+1 = θm − h∇ ˆf (θ) +
+
+2hηm,
+
+ηm ∼ N (0, 1).
+
+(2.2)
+
+√
+
+Here, ∇ ˆf is an unbiased estimate of ∇f whose computational cost is O(n) where n (cid:28) N . Typically,
+we set ∇ ˆf (θ) := −∇ log p(θ) − N/n (cid:80)
+∇ log p(xi|θ), where Sm ⊂ {1, . . . , N } resampled at
+each iteration with |Sm| = n. Applying (2.2) repeatedly deﬁnes a Markov chain that approximately
+targets π (Welling and Teh, 2011). There are a number of alternative SGMCMC algorithms to SGLD,
+based on approximations to other diffusions that also target the posterior distribution (Chen et al.,
+2014; Ding et al., 2014; Ma et al., 2015).
+
+i∈Sm
+
+Recent work has investigated reducing the error introduced by approximating the gradient using
+minibatches (Dubey et al., 2016; Nagapetyan et al., 2017; Baker et al., 2017; Chatterji et al., 2018).
+While, by comparison, the discretization error is generally smaller, in this work we investigate an
+important situation where it degrades performance considerably.
+
+2.2 SGMCMC on the Probability Simplex
+
+We aim to make inference on the simplex parameter ω of dimension d, where ωj ≥ 0 for all
+j = 1, . . . , d and (cid:80)d
+j=1 ωj = 1. We assume we have categorical data zi of dimension d for
+i = 1, . . . , N , so zij will be 1 if data point i belongs to category j and zik will be zero for all
+k (cid:54)= j. We assume a Dirichlet prior Dir(α) on ω, with density p(ω) ∝ (cid:81)d
+d , and that the
+data is drawn from zi | ω ∼ Categorical(ω) leading to a Dir(α + (cid:80)N
+i=1 zi) posterior. An important
+transformation we will use repeatedly throughout this article is as follows: if we have d random
+gamma variables Xj ∼ Gamma(αj, 1). Then (X1, . . . , Xd)/ (cid:80)
+j Xj will have Dir(α) distribution,
+where α = (α1, . . . , αd).
+
+j=1 ωαj
+
+In this simple case the posterior of ω can be calculated exactly. However, in the applications we
+consider the zi are latent variables, and they are also simulated as part of a larger Gibbs sampler.
+Thus the zi will change at each iteration of the algorithm. We are interested in the situation where this
+is the case, and N is large, so that standard MCMC runs prohibitively slowly. The idea of SGMCMC
+in this situation is to use subsamples of z to propose appropriate moves to ω.
+
+Applying SGMCMC to models which contain simplex parameters is challenging due to their con-
+straints. Naively applying SGMCMC can lead to invalid values being proposed. The ﬁrst SGMCMC
+algorithm developed speciﬁcally for the probability simplex was the SGRLD algorithm of Pat-
+terson and Teh (2013). Patterson and Teh (2013) try a variety of transformations for ω which
+move the problem onto a space in Rd, where standard SGMCMC can be applied. They also
+build upon standard SGLD by developing a Riemannian variant. Riemannian MCMC (Girolami
+and Calderhead, 2011) takes the geometry of the space into account, which assists with errors at
+the boundary of the space. The parameterization Patterson and Teh (2013) ﬁnd numerically per-
+forms best is ωj = |θj|/ (cid:80)d
+j=1 |θj|. They use a mirrored gamma prior for θj, which has density
+p(θj) ∝ |θj|αj −1e−|θj |. This means the prior for ω remains the required Dirichlet distribution. They
+calculate the density of zi given θ using a change of variables and use a (Riemannian) SGLD update
+to update θ.
+
+2.3 SGRLD on Sparse Simplex Spaces
+
+Patterson and Teh (2013) suggested that the boundary of the space is where most problems occur using
+these kind of samplers; motivating their introduction of Riemannian ideas for SGLD. In many popular
+applications, such as LDA and modeling sparse networks, many of the components ωj will be close
+to 0. We refer to such ω as being sparse. In other words, there are many j for which (cid:80)N
+i=1 zij = 0.
+In order to demonstrate the problems with using SGRLD in this case, we provide a similar experiment
+to Patterson and Teh (2013). We use SGRLD to simulate from a sparse simplex parameter ω of
+
+3
+
+Figure 1: Boxplots of a 1000 iteration sample from SGRLD and SCIR ﬁt to a sparse Dirichlet
+posterior, compared to 1000 exact independent samples. On the log scale.
+
+i=1 zi1 = 800, (cid:80)N
+
+dimension d = 10 with N = 1000. We set (cid:80)N
+i=1 zi3 = 100, and
+(cid:80)N
+i=1 zij = 0, for 3 < j ≤ 10. The prior parameter α was set to 0.1 for all components. Leading to
+a highly sparse Dirichlet posterior. We will refer back to this experiment as the running experiment.
+In Figure 1 we provide boxplots from a sample of the ﬁfth component of ω using SGRLD after 1000
+iterations with 1000 iterations of burn-in, compared with boxplots from an exact sample. The method
+SCIR will be introduced later. We can see from Figure 1 that SGRLD rarely proposes small values of
+ω. This becomes a signiﬁcant issue for sparse Dirichlet distributions, since the lack of small values
+leads to a poor approximation to the posterior, as we can see from the boxplots.
+
+i=1 zi2 = (cid:80)N
+
+We hypothesize that the reason SGRLD struggles when ωj is near the boundary is due to the
+discretization by h, and we now try to diagnose this issue in detail. The problem relates to the bias of
+SGLD caused by the discretization of the algorithm. We use the results of Vollmer et al. (2016) to
+characterize this bias for a ﬁxed stepsize h. For similar results when the stepsize scheme is decreasing,
+we refer the reader to Teh et al. (2016). Proposition 2.1 is a simple application of Vollmer et al.
+(2016, Theorem 3.3), so we refer the reader to that article for full details of the assumptions. For
+simplicity of the statement, we assume that θ is 1-dimensional, but the results are easily adapted to
+the d-dimensional case.
+Proposition 2.1. (Vollmer et al., 2016) Under Vollmer et al. (2016, Assumptions 3.1 and 3.2), assume
+θ is 1-dimensional. Let θm be iteration m of an SGLD algorithm for m = 1, . . . , M , then the
+asymptotic bias deﬁned by limM→∞
+
+(cid:12)
+E[θm] − Eπ[θ]
+(cid:12)
+(cid:12) has leading term O(h).
+
+(cid:12)
+(cid:12)1/M (cid:80)M
+(cid:12)
+
+m=1
+
+While ordinarily this asymptotic bias is hard to disentangle from other sources of error, as Eπ[θ] gets
+close to zero h has to be set prohibitively small to give a good approximation to θ. The crux of the
+issue is that, while the absolute error remains the same, at the boundary of the space the relative
+error is large since θ is small, and biased upwards due to the positivity constraint. To counteract this,
+in the next section we introduce a method which has no discretization error. This allows us to prove
+that the asymptotic bias, as deﬁned in Proposition 2.1, will be zero for any choice of stepsize h.
+
+3 The Stochastic Cox-Ingersoll-Ross Algorithm
+
+We now wish to counteract the problems with SGRLD on sparse simplex spaces. First, we make the
+following observation: rather than applying a reparameterization of the prior for ω, we can model
+the posterior for each θj directly and independently as θj | z ∼ Gamma(αj + (cid:80)N
+i=1 zij, 1). Then
+using the gamma reparameterization ω = θ/ (cid:80)
+j θj still leads to the desired Dirichlet posterior. This
+leaves the θj in a much simpler form, and this simpler form enables us to remove all discretization
+error. We do this by using an alternative underlying process to the Langevin diffusion, known as the
+Cox-Ingersoll-Ross (CIR) process, commonly used in mathematical ﬁnance. A CIR process θt with
+parameter a and stationary distribution Gamma(a, 1) has the following form
+
+dθt = (a − θt)dt +
+
+2θtdWt.
+
+(cid:112)
+
+(3.1)
+
+The standard CIR process has more parameters, but we found changing these made no difference to the
+properties of our proposed scalable sampler, so we omit them (for exact details see the Supplementary
+Material).
+
+4
+
+The CIR process has many nice properties. One that is particularly useful for us is that the transition
+density is known exactly. Deﬁne χ2(ν, µ) to be the non-central chi-squared distribution with ν
+degrees of freedom and non-centrality parameter µ. If at time t we are at state ϑt, then the probability
+distribution of θt+h is given by
+
+θt+h | θt = ϑt ∼
+
+1 − e−h
+2
+
+W,
+
+(cid:18)
+
+W ∼ χ2
+
+2a, 2ϑt
+
+e−h
+1 − e−h
+
+(cid:19)
+
+.
+
+(3.2)
+
+This transition density allows us to simulate directly from the CIR process with no discretization error.
+Furthermore, it has been proven that the CIR process is negative with probability zero (Cox et al.,
+1985), meaning we will not need to take absolute values as is required for the SGRLD algorithm.
+
+3.1 Adapting for Large Datasets
+
+The next issue we need to address is how to sample from this process when the dataset is large.
+Suppose that zi is data for i = 1, . . . , N , for some large N , and that our target distribution is
+Gamma(a, 1), where a = α + (cid:80)N
+i=1 zi. We want to approximate the target by simulating from the
+CIR process using only a subset of z at each iteration. A natural thing to do would be at each iteration
+to replace a in the transition density equation (3.2) with an unbiased estimate ˆa = α + N/n (cid:80)
+i∈S zi,
+where S ⊂ {1, . . . , N }, similar to SGLD. We will refer to a CIR process using unbiased estimates
+in this way as the stochastic CIR process (SCIR). Fix some stepsize h, which now determines how
+often ˆa is resampled rather than the granularity of the discretization. Suppose ˆθm follows the SCIR
+process, then it will have the following update
+
+ˆθm+1 | ˆθm = ϑm ∼
+
+1 − e−h
+2
+
+W,
+
+(cid:18)
+
+W ∼ χ2
+
+2ˆam, 2ϑm
+
+e−h
+1 − e−h
+
+(cid:19)
+
+,
+
+(3.3)
+
+zi.
+
+i∈Sm
+
+where ˆam = α + N/n (cid:80)
+We can show that this algorithm will approximately target the true posterior distribution in the same
+sense as SGLD. To do this, we draw a connection between the SCIR process and an SGLD algorithm,
+which allows us to use the arguments of SGLD to show that the SCIR process will target the desired
+distribution. More formally, we have the following relationship:
+Theorem 3.1. Let θt be a CIR process with transition 3.2. Then Ut := g(θt) = 2
+Langevin diffusion for a generalized gamma distribution.
+
+θt follows the
+
+√
+
+Theorem 3.1, allows us to show that applying the transformation g(·) to the approximate SCIR
+process, leads to a discretization free SGLD algorithm for a generalized gamma distribution. Similarly,
+applying g−1(·) to the approximate target of this SGLD algorithm leads to the desired Gamma(a, 1)
+distribution. Full details are given after the proof of Theorem 3.1. The result means that similar to
+SGLD, we can replace the CIR parameter a with an unbiased estimate ˆa created from a minibatch
+of data. Provided we re-estimate a from one iteration to the next using different minibatches, the
+approximate target distribution will still be Gamma(a, 1). As in SGLD, there will be added error
+based on the noise in the estimate ˆa. However, from the desirable properties of the CIR process we
+are able to quantify this error more easily than for the SGLD algorithm, and we do this in Section 4.
+
+Algorithm 1 below summarizes how SCIR can be used to sample from the simplex parameter
+ω | z ∼ Dir(α + (cid:80)N
+i=1 zi). This can be done in a similar way to SGRLD, with the same per-iteration
+computational cost, so the improvements we demonstrate later are essentially for free.
+
+Algorithm 1: Stochastic Cox-Ingersoll-Ross (SCIR) for sampling from the probability simplex.
+Input: Starting points θ0, stepsize h, minibatch size n.
+Result: Approximate sample from ω | z.
+for m = 1 to M do
+
+Sample minibatch Sm from {1, . . . , N }
+for j = 1 to d do
+
+Set ˆaj ← α + N/n (cid:80)
+Sample ˆθmj | ˆθ(m−1)j using (3.3) with parameter ˆaj and stepsize h.
+
+zij.
+
+i∈Sm
+
+end
+Set ωm ← θm/ (cid:80)
+
+j θmj.
+
+end
+
+5
+
+(a)
+
+(b)
+
+Figure 2: Kolmogorov-Smirnov distance for SGRLD and SCIR at different minibatch sizes when
+used to sample from (a), a sparse Dirichlet posterior and (b) a dense Dirichlet posterior.
+
+3.2 SCIR on Sparse Data
+
+We test the SCIR process on two synthetic experiments. The ﬁrst experiment is the running experiment
+on the sparse Dirichlet posterior of Section 2.3. The second experiment allocates 1000 datapoints
+equally to each component, leading to a highly dense Dirichlet posterior. For both experiments, we
+run 1000 iterations of optimally tuned SGRLD and SCIR algorithms and compare to an exact sampler.
+For the sparse experiment, Figure 1 shows boxplots of samples from the ﬁfth component of ω, which
+is sparse. For both experiments, Figure 2 plots the Kolmogorov-Smirnov distance (dKS) between
+the approximate samples and the true posterior (full details of the distance measure are given in the
+Supplementary Material). For the boxplots, a minibatch of size 10 is used; for the dKS plots, the
+proportion of data in the minibatch is varied from 0.001 to 0.5. The dKS plots show the runs of ﬁve
+different seeds, which gives some idea of variability.
+
+The boxplots of Figure 1 demonstrate that the SCIR process is able to handle smaller values of ω
+much more readily than SGRLD. The impact of this is demonstrated in Figure 2a, the sparse dKS
+plot. Here the SCIR process is achieving much better results than SGRLD, and converging towards
+the exact sampler at larger minibatch sizes. The dense dKS plot of Figure 2b shows that as we move
+to the dense setting the samplers have similar properties. The conclusion is that the SCIR algorithm
+is a good choice of simplex sampler for either the dense or sparse case.
+
+3.3 Extensions
+
+For simplicity, in this article we have focused on a popular usecase of SCIR: sampling from a
+Dir(α + (cid:80)N
+i=1 zi) distribution, with z categorical. This method can be easily generalized though.
+For a start, the SCIR algorithm is not limited to z being categorical, and it can be used to sample
+from most constructions that use Dirichlet distributions, provided the z are not integrated out. The
+method can also be used to sample from constrained spaces on (0, ∞) that are gamma distributed by
+just sampling from the SCIR process itself (since the stationary distribution of the CIR process is
+gamma). There are other diffusion processes that have tractable transition densities. These can be
+exploited in a similar way to create other discretization free SGMCMC samplers. One such process
+is called geometric Brownian motion, which has lognormal stationary distribution. This process can
+be adapted to create a stochastic sampler from the lognormal distribution on (0, ∞).
+
+4 Theoretical Analysis
+
+In the following theoretical analysis we wish to target a Gamma(a, 1) distribution, where a =
+α + (cid:80)N
+i=1 zi for some data z. We run an SCIR algorithm with stepsize h for M iterations, yielding
+the sample ˆθm for m = 1, . . . , M . We compare this to an exact CIR process with stationary
+distribution Gamma(a, 1), deﬁned by the transition equation in (3.2). We do this by deriving the
+moment generating function (MGF) of ˆθm in terms of the MGF of the exact CIR process. For
+simplicity, we ﬁx a stepsize h and, abusing notation slightly, set θm to be a CIR process that has been
+run for time mh.
+Theorem 4.1. Let ˆθM be the SCIR process deﬁned in (3.3) starting from θ0 after M steps with
+stepsize h. Let θM be the corresponding exact CIR process, also starting from θ0, run for time M h,
+
+6
+
+and with coupled noise. Then the MGF of ˆθM is given by
+
+MˆθM
+
+(s) = MθM (s)
+
+M
+(cid:89)
+
+m=1
+
+(cid:20) 1 − s(1 − e−mh)
+1 − s(1 − e−(m−1)h)
+
+(cid:21)−(ˆam−a)
+
+,
+
+(4.1)
+
+where we have
+
+MθM (s) = (cid:2)1 − s(1 − e−M h)(cid:3)−a
+
+exp
+
+(cid:20)
+θ0
+
+se−M h
+1 − s(1 − e−M h)
+
+(cid:21)
+
+.
+
+The proof of this result follows by induction from the properties of the non-central chi-squared
+distribution. The result shows that the MGF of the SCIR can be written as the MGF of the exact
+underlying CIR process, as well as an error term in the form of a product. Deriving the MGF enables
+us to ﬁnd the non-asymptotic bias and variance of the SCIR process, which is more interpretable than
+the MGF itself. The results are stated formally in the following Corollary.
+Corollary 4.2. Given the setup of Theorem 4.1,
+
+E[ˆθM ] = E[θM ] = θ0e−M h + a(1 − e−M h).
+
+Since Eπ[θ] = a, then limM→∞ | 1
+M
+Similarly,
+
+(cid:80)M
+
+m=1
+
+E[ˆθm]−Eπ[θ]| = 0 and SCIR is asymptotically unbiased.
+
+Var[ˆθM ] = Var[θM ] + (1 − e−2M h)
+
+1 − e−h
+1 + e−h
+
+Var[ˆa],
+
+where Var[ˆa] = Var[ˆam] for m = 1, . . . , M and
+
+Var[θM ] = 2θ0(e−M h − e−2M h) + a(1 − e−M h)2.
+
+The results show that the approximate process is asymptotically unbiased. We believe this explains
+the improvements the method has over SGRLD in the experiments of Sections 3.2 and 5. We also
+obtain the non-asymptotic variance as a simple sum of the variance of the exact underlying CIR
+process, and a quantity involving the variance of the estimate ˆa. This is of a similar form to the strong
+error of SGLD (Sato and Nakagawa, 2014), though without the contribution from the discretization.
+The variance of the SCIR is somewhat inﬂated over the variance of the CIR process. Reducing this
+variance would improve the properties of the SCIR process and would be an interesting avenue for
+further work. Control variate ideas could be applied for this purpose (Nagapetyan et al., 2017; Baker
+et al., 2017; Chatterji et al., 2018) and they may prove especially effective since the mode of a gamma
+distribution is known exactly.
+
+5 Experiments
+
+In this section we empirically compare SCIR to SGRLD on two challenging models: latent Dirichlet
+allocation (LDA) and a Bayesian nonparametric mixture. Performance is evaluated by measuring the
+predictive performance of the trained model on a held out test set over ﬁve different seeds. Stepsizes
+and hyperparameters are tuned using a grid search over the predictive performance of the method.
+The minibatch size is kept ﬁxed for both the experiments. In the Supplementary Material, we provide
+a comparison of the methods to a Gibbs sampler. This sampler is non-scalable, but will converge to
+the true posterior rather than an approximation. The aim of the comparison to Gibbs is to give the
+reader an idea of how the stochastic gradient methods compare to exact methods for the different
+models considered.
+
+5.1 Latent Dirichlet Allocation
+
+Latent Dirichlet allocation (LDA, see Blei et al., 2003) is a popular model used to summarize a
+collection of documents by clustering them based on underlying topics. The data for the model is a
+matrix of word frequencies, with a row for each document. LDA is based on a generative procedure.
+For each document l, a discrete distribution over the K potential topics, θl, is drawn as θl ∼ Dir(α)
+for some suitably chosen hyperparameter α. Each topic k is associated with a discrete distribution
+φk over all the words in a corpus, meant to represent the common words associated with particular
+topics. This is drawn as φk ∼ Dir(β), for some suitable β. Finally, each word in document l is drawn
+
+7
+
+(a)
+
+(b)
+
+Figure 3: (a) plots the perplexity of SGRLD and SCIR when used to sample from the LDA model of
+Section 5.1 applied to Wikipedia documents; (b) plots the log predictive on a test set of the anonymous
+Microsoft user dataset, sampling the mixture model deﬁned in Section 5.2 using SCIR and SGRLD.
+
+a topic k from θl and then the word itself is drawn from φk. LDA is a good example for this method
+because φk is likely to be very sparse, there are many words which will not be associated with a given
+topic at all.
+
+We apply SCIR and SGRLD to LDA on a dataset of scraped Wikipedia documents, by adapting
+the code released by Patterson and Teh (2013). At each iteration a minibatch of 50 documents
+is sampled in an online manner. We use the same vocabulary set as in Patterson and Teh (2013),
+which consists of approximately 8000 words. The exponential of the average log-predictive on a
+held out set of 1000 documents is calculated every 5 iterations to evaluate the model. This quantity
+is known as the perplexity, and we use a document completion approach to calculate it (Wallach
+et al., 2009). The perplexity is plotted for ﬁve runs using different seeds, which gives an idea of
+variability. Similar to Patterson and Teh (2013), for both methods we use a decreasing stepsize
+scheme of the form hm = h[1 + m/τ ]−κ. The results are plotted in Figure 3a. While the initial
+convergence rate is similar, SCIR keeps descending past where SGRLD begins to converge. This
+experiment illustrates the impact of removing the discretization error. We would expect to see further
+improvements of SCIR over SGRLD if a larger vocabulary size were used; as this would lead to
+sparser topic vectors. In real-world applications of LDA, it is quite common to use vocabulary sizes
+above 8000. The comparison to a collapsed Gibbs sampler, provided in the Supplementary Material,
+shows the methods are quite competetive to exact, non-scalable methods.
+
+5.2 Bayesian Nonparametric Mixture Model
+
+We apply SCIR to sample from a Bayesian nonparametric mixture model of categorical data, proposed
+by Dunson and Xing (2009). To the best of our knowledge, the development of SGMCMC methods
+for Bayesian nonparametric models has not been considered before. In particular, we develop a
+truncation free, scalable sampler based on SGMCMC for Dirichlet processes (DP, see Ferguson,
+1973). For more thorough details of DPs and the stochastic sampler developed, the reader is referred
+to the Supplementary Material. The model can be expressed as follows
+
+xi | θ, zi ∼ Multi(ni, θzi),
+
+θ, zi ∼ DP(Dir(a), α).
+
+(5.1)
+
+Here Multi(m, φ) is a multinomial distribution with m trials and associated discrete probability
+distribution φ; DP(G0, α) is a DP with base distribution G0 and concentration parameter α. The DP
+component parameters and allocations are denoted by θ and zi respectively. We deﬁne the number of
+observations N by N := (cid:80)
+i ni, and let L be the number of instances of xi, i = 1, . . . , L. This type
+of mixture model is commonly used to model the dependence structure of categorical data, such as
+for genetic or natural language data (Dunson and Xing, 2009). The use of DPs means we can account
+for the fact that we do not know the true dependence structure. DPs allow us to learn the number of
+mixture components in a penalized way during the inference procedure itself.
+
+We apply this model to the anonymous Microsoft user dataset (Breese et al., 1998). This dataset
+consists of approximately N = 105 instances of L = 30000 anonymized users. Each instance details
+part of the website the user visits, which is one of d = 294 categories (here d denotes the dimension
+of xi). We use the model to try and characterize the typical usage patterns of the website. Since
+
+8
+
+there are a lot of categories and only an average of three observations for any one user, these data are
+expected to be sparse.
+
+To infer the model, we devise a novel minibatched version of the slice sampler (Walker, 2007;
+Papaspiliopoulos, 2008; Kalli et al., 2011). We assign an uninformative gamma prior on α, and this
+is inferred similarly to Escobar and West (1995). We minibatch the users at each iteration using
+n = 1000. For multimodal mixture models such as this, SGMCMC methods are known to get stuck
+in local modes (Baker et al., 2017), so we use a ﬁxed stepsize for both SGRLD and SCIR. Once
+again, we plot runs over 5 seeds to give an idea of variability. The results are plotted in Figure 3b.
+They show that SCIR consistently converges to a lower log predictive test score, and appears to have
+lower variance than SGRLD. SGRLD also appears to be producing worse scores as the number of
+iterations increases. We found that SGRLD had a tendency to propose many more clusters than were
+required. This is probably due to the asymptotic bias of Proposition 2.1, since this would lead to an
+inferred model that has a higher α parameter than is set, meaning more clusters would be proposed
+than are needed. In fact, setting a higher α parameter appeared to alleviate this problem, but led to a
+worse ﬁt, which is more evidence that this is the case.
+
+In the Supplementary Material we provide plots comparing the stochastic gradient methods to the
+exact, but non-scalable Gibbs slice sampler (Walker, 2007; Papaspiliopoulos, 2008; Kalli et al.,
+2011). The comparison shows, while SCIR outperforms SGRLD, the scalable stochastic gradient
+approximation itself does not perform well in this case compared to the exact Gibbs sampler. This is
+to be expected for such a complicated model; the reason appears to be that the stochastic gradient
+methods get stuck in local stationary points. Improving the performance of stochastic gradient based
+samplers for Bayesian nonparametric problems is an important direction for future work.
+
+6 Discussion
+
+We presented an SGMCMC method, the SCIR algorithm, for simplex spaces. We show that the
+method has no discretization error and is asymptotically unbiased. Our experiments demonstrate that
+these properties give the sampler improved performance over other SGMCMC methods for sampling
+from sparse simplex spaces. Many important large-scale models are sparse, so this is an important
+contribution. A number of useful theoretical properties for the sampler were derived, including the
+non-asymptotic variance and moment generating function. We discuss how this sampler can be
+extended to target other constrained spaces discretization free. Finally, we demonstrate the impact
+of the sampler on a variety of interesting problems. An interesting line of further work would be
+reducing the non-asymptotic variance, which could be done by means of control variates.
+
+7 Acknowledgments
+
+Jack Baker gratefully acknowledges the support of the EPSRC funded EP/L015692/1 STOR-i
+Centre for Doctoral Training. Paul Fearnhead was supported by EPSRC grants EP/K014463/1 and
+EP/R018561/1. Christopher Nemeth acknowledges the support of EPSRC grants EP/S00159X/1 and
+EP/R01860X/1. Emily Fox acknowledges the support of ONR Grant N00014-15-1-2380 and NSF
+CAREER Award IIS-1350133.
+
+References
+
+Baker, J., Fearnhead, P., Fox, E. B., and Nemeth, C. (2017). Control variates for stochastic gradient
+
+MCMC. Available from https://arxiv.org/abs/1706.05439.
+
+Blackwell, D. and MacQueen, J. B. (1973). Ferguson distributions via Polya urn schemes. The
+
+Annals of Statistics, 1(2):353–355.
+
+Blei, D. M., Ng, A. Y., and Jordan, M. I. (2003). Latent Dirichlet allocation. Journal of Machine
+
+Learning Research, 3:993–1022.
+
+Breese, J. S., Heckerman, D., and Kadie, C. (1998). Empirical analysis of predictive algorithms for
+collaborative ﬁltering. In Proceedings of the Fourteenth Conference on Uncertainty in Artiﬁcial
+Intelligence, pages 43–52.
+
+9
+
+Chatterji, N. S., Flammarion, N., Ma, Y.-A., Bartlett, P. L., and Jordan, M. I. (2018). On the theory of
+variance reduction for stochastic gradient Monte Carlo. Available at https://arxiv.org/abs/
+1802.05431v1.
+
+Chen, T., Fox, E., and Guestrin, C. (2014). Stochastic gradient Hamiltonian Monte Carlo.
+
+In
+Proceedings of the 31st International Conference on Machine Learning, pages 1683–1691. PMLR.
+
+Cox, J. C., Ingersoll, J. E., and Ross, S. A. (1985). A theory of the term structure of interest rates.
+
+Econometrica, 53(2):385–407.
+
+Ding, N., Fang, Y., Babbush, R., Chen, C., Skeel, R. D., and Neven, H. (2014). Bayesian sampling
+using stochastic gradient thermostats. In Advances in Neural Information Processing Systems 27,
+pages 3203–3211.
+
+Dubey, K. A., Reddi, S. J., Williamson, S. A., Poczos, B., Smola, A. J., and Xing, E. P. (2016).
+Variance reduction in stochastic gradient Langevin dynamics. In Advances in Neural Information
+Processing Systems 29, pages 1154–1162.
+
+Dunson, D. B. and Xing, C. (2009). Nonparametric Bayes modeling of multivariate categorical data.
+
+Journal of the American Statistical Association, 104(487):1042–1051.
+
+Escobar, M. D. and West, M. (1995). Bayesian density estimation and inference using mixtures.
+
+Journal of the American Statistical Association, 90(430):577–588.
+
+Ferguson, T. S. (1973). A Bayesian analysis of some nonparametric problems. The Annals of
+
+Statistics, 1(2):209–230.
+
+Girolami, M. and Calderhead, B. (2011). Riemann manifold Langevin and Hamiltonian Monte
+Carlo methods. Journal of the Royal Statistical Society: Series B (Statistical Methodology),
+73(2):123–214.
+
+Grifﬁths, T. L. and Steyvers, M. (2004). Finding scientiﬁc topics. Proceedings of the National
+
+Academy of Sciences of the United States of America, 101:5228–5235.
+
+Kalli, M., Grifﬁn, J. E., and Walker, S. G. (2011). Slice sampling mixture models. Statistics and
+
+Computing, 21(1):93–105.
+
+Li, W., Ahn, S., and Welling, M. (2016). Scalable MCMC for mixed membership stochastic
+blockmodels. In Proceedings of the 19th International Conference on Artiﬁcial Intelligence and
+Statistics, pages 723–731.
+
+Liverani, S., Hastie, D., Azizi, L., Papathomas, M., and Richardson, S. (2015). PReMiuM: An R
+package for proﬁle regression mixture models using Dirichlet processes. Journal of Statistical
+Software, 64(7):1–30.
+
+Ma, Y.-A., Chen, T., and Fox, E. (2015). A complete recipe for stochastic gradient MCMC. In
+
+Advances in Neural Information Processing Systems, pages 2917–2925.
+
+Nagapetyan, T., Duncan, A., Hasenclever, L., Vollmer, S. J., Szpruch, L., and Zygalakis, K. (2017).
+The true cost of stochastic gradient Langevin dynamics. Available at https://arxiv.org/abs/
+1706.02692.
+
+Papaspiliopoulos, O. (2008). A note on posterior sampling from Dirichlet mixture models. Techni-
+cal Report. Available at http://wrap.warwick.ac.uk/35493/1/WRAP_papaspliiopoulos_
+08-20wv2.pdf.
+
+Papaspiliopoulos, O. and Roberts, G. O. (2008). Retrospective Markov chain Monte Carlo methods
+
+for Dirichlet process hierarchical models. Biometrika, 95(1):169–186.
+
+Patterson, S. and Teh, Y. W. (2013). Stochastic gradient Riemannian Langevin dynamics on the
+probability simplex. In Advances in Neural Information Processing Systems 26, pages 3102–3110.
+
+Rosenblatt, M. (1952). Remarks on a multivariate transformation. The Annals of Mathematical
+
+Statistics, 23(3):470–472.
+
+10
+
+Sato, I. and Nakagawa, H. (2014). Approximation analysis of stochastic gradient Langevin dynamics
+In Proceedings of the 31st International
+
+by using Fokker-Planck equation and Ito process.
+Conference on Machine Learning, pages 982–990. PMLR.
+
+Sethuraman, J. (1994). A constructive deﬁnition of Dirichlet priors. Statistica Sinica, 4(2):639–650.
+
+Teh, Y. W., Thiéry, A. H., and Vollmer, S. J. (2016). Consistency and ﬂuctuations for stochastic
+
+gradient Langevin dynamics. Journal of Machine Learning Research, 17(7):1–33.
+
+Vollmer, S. J., Zygalakis, K. C., and Teh, Y. W. (2016). Exploration of the (non-)asymptotic bias
+and variance of stochastic gradient Langevin dynamics. Journal of Machine Learning Research,
+17(159):1–48.
+
+Walker, S. G. (2007). Sampling the Dirichlet mixture model with slices. Communications in Statistics,
+
+36(1):45–54.
+
+Wallach, H. M., Murray, I., Salakhutdinov, R., and Mimno, D. (2009). Evaluation methods for topic
+models. In Proceedings of the 26th Annual International Conference on Machine Learning, pages
+1105–1112. PMLR.
+
+Welling, M. and Teh, Y. W. (2011). Bayesian learning via stochastic gradient Langevin dynamics. In
+Proceedings of the 28th International Conference on Machine Learning, pages 681–688. PMLR.
+
+Zygalakis, K. C. (2011). On the existence and the applications of modiﬁed equations for stochastic
+
+differential equations. SIAM Journal on Scientiﬁc Computing, 33(1):102–130.
+
+11
+
+A Proofs
+
+A.1 Proof of Proposition 2.1
+
+Proof. Deﬁne the local weak error of SGLD, starting from θ0 and with stepsize h, with test function
+φ by
+(cid:12)φ(θ1) − φ(¯θh)(cid:12)
+(cid:12) ,
+where ¯θh is the true underlying Langevin diffusion (2.1), run for time h with starting point θ0. Then
+it is shown by Vollmer et al. (2016) that if φ : Rd → R is a smooth test function, and that SGLD
+applied with test function φ has local weak error O(h), then
+
+E (cid:12)
+
+E
+
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+
+lim
+M→∞
+
+1/M
+
+M
+(cid:88)
+
+m=1
+
+(cid:12)
+(cid:12)
+φ(θm) − Eπ[φ(θ)]
+(cid:12)
+(cid:12)
+(cid:12)
+
+is also O(h). What remains to be checked is that using such a simple function for φ (the identity),
+does not cause things to disappear such that the local weak error of SGLD is no longer O(h). The
+identity function is inﬁnitely differentiable, thus is sufﬁciently smooth. For SGLD, we ﬁnd that
+
+E[θ1|θ0] = θ0 + hf (cid:48)(θ0).
+For the Langevin diffusion, we deﬁne the one step expectation using the weak Taylor expansion
+of Zygalakis (2011), which is valid since we have made Assumptions 3.1 and 3.2 of Vollmer et al.
+(2016). Deﬁne the inﬁnitesimal operator L of the Langevin diffusion (2.1) by
+
+Lφ = f (cid:48)(θ) · ∂θφ(θ) + ∂2
+
+θ φ(θ).
+
+Then Zygalakis (2011) shows that the weak Taylor expansion of Langevin diffusion (2.1) has the
+form
+
+E[¯θh|θ0] = θ0 + hLφ(θ0) +
+
+L2φ(θ0) + O(h3).
+
+This means when φ is the identity then
+
+E[¯θh|θ0] = θ0 + hf (cid:48)(θ0) +
+
+[f (θ)f (cid:48)(θ) + f (cid:48)(cid:48)(θ)] + O(h3).
+
+Since the terms agree up to O(h) then it follows that even when φ is the identity, SGLD still has local
+weak error of O(h). This completes the proof.
+
+h2
+2
+
+h2
+2
+
+A.2 Proof of Theorem 3.1
+
+Proof. Suppose we have a random variable U∞ following a generalized gamma posterior with data z
+and the following density
+
+f (u) ∝ u2(α+(cid:80)N
+
+i=1 zi)−1e−u2/4.
+i=1 zi), Then ∂ log f (u) = (2a − 1)/u − u/2, so that the Langevin diffusion for
+
+Set a := 2(α + (cid:80)N
+U∞ will have the following integral form
+(cid:90) t+h
+
+Ut+h | Ut = Ut +
+
+(cid:20) 2a − 1
+Us
+
+−
+
+(cid:21)
+
+Us
+2
+
+t
+
+√
+
+(cid:90) t+h
+
+ds +
+
+2
+
+dWt.
+
+t
+
+Applying Ito’s lemma to Ut to transform to θt = g−1(Ut) = U 2
+proof), we ﬁnd that
+
+t /4 (here g(·) has been stated in the
+
+θt+h | θt = θt +
+
+[a − θs] ds +
+
+2θtdWt.
+
+(cid:90) t+h
+
+t
+
+(cid:90) t+h
+
+(cid:112)
+
+t
+
+This is exactly the integral form for the CIR process. This completes the proof.
+
+Now we give more details of the connection between SGLD and SCIR. Let us deﬁne an SGLD
+algorithm that approximately targets U∞, but without the Euler discretization by
+(cid:90) (m+1)h
+
+(cid:90) (m+1)h
+
+(cid:21)
+
+(cid:20) 2ˆam − 1
+Us
+
+−
+
+Us
+2
+
+√
+
+ds +
+
+2
+
+mh
+
+mh
+
+dWt,
+
+(A.1)
+
+U(m+1)h | Umh = Umh +
+
+12
+
+where ˆam is an unbiased estimate of a; for example, the standard SGLD estimate ˆam = α +
+N/n (cid:80)
+zi; also h is a tuning constant which determines how much time is simulated before
+resampling ˆam.
+Again applying Ito’s lemma to Umh to transform to θmh = g(Umh) = U 2
+
+mh/4, we ﬁnd that
+
+i∈Sm
+
+θ(m+1)h = θmh +
+
+[ˆam − θs] ds +
+
+(cid:90) (m+1)h
+
+mh
+
+(cid:90) (m+1)h
+
+mh
+
+(cid:112)
+
+2θtdWt.
+
+This is exactly the integral form for the update equation of an SCIR process.
+
+Finally, to show SCIR has the desired approximate target, we use some properties of the gamma
+distribution. Firstly if θ∞ ∼ Gamma(a, 1) then 4θ∞ ∼ Gamma(a, 1
+θ∞ will
+have a generalized gamma distribution with density proportional to h(u) ∝ u2a−1e−u2/4. This is
+exactly the approximate target of the discretization free SGLD algorithm (A.1) we derived earlier.
+
+4 ), so that U∞ = 2
+
+√
+
+A.3 Proof of Theorem 4.1
+
+First let us deﬁne the following quantities
+
+r(s) =
+
+se−h
+1 − s(1 − e−h)
+
+,
+
+r(n)(s) = r ◦ · · · ◦ r
+(cid:125)
+(cid:124)
+
+(s).
+
+(cid:123)(cid:122)
+n
+
+Then we will make use of the following Lemmas:
+Lemma A.1. For all n ∈ N and s ∈ R
+
+r(n)(s) =
+
+se−nh
+1 − s(1 − e−nh)
+
+.
+
+Lemma A.2. For all n ∈ N, s ∈ R, set r(0)(s) := s, then
+
+(cid:105)
+(cid:104)
+1 − r(i)(s)(1 − e−h)
+
+= (cid:2)1 − s(1 − e−nh)(cid:3) .
+
+n−1
+(cid:89)
+
+i=0
+
+Both can be proved by induction, which is shown in Section B.
+
+Suppose that θ1|θ0 is a CIR process, starting at θ0 and run for time h. Then we can immediately write
+down the MGF of θ1, Mθ1(s), using the MGF of a non-central chi-squared distribution
+
+Mθ1(s) = E (cid:2)esθ1|θ0
+
+(cid:3) = (cid:2)1 − s(1 − e−h)(cid:3)−a
+
+exp
+
+(cid:20)
+
+sθ0e−h
+1 − s(1 − e−h)
+
+(cid:21)
+
+.
+
+(cid:3), and then take expectations of this with respect to
+We can use this to ﬁnd E (cid:2)esθM | θM −1
+θM −2, i.e. E (cid:2)E (cid:2)esθM | θM −1
+(cid:3) has the form
+C(s) exp[θM −1r(s)], where C(s) is a function only involving s, and r(s) is as deﬁned earlier.
+Thus repeatedly applying this and using Lemmas A.1 and A.2 we ﬁnd
+
+(cid:3). This is possible because E (cid:2)esθM |θM −1
+
+(cid:3) | θM −2
+
+MθM (s) = (cid:2)1 − s(1 − e−M h)(cid:3)−a
+
+exp
+
+(cid:20)
+
+sθ0e−M h
+1 − s(1 − e−M h)
+
+(cid:21)
+
+.
+
+(A.2)
+
+Although this was already known, we can use the same idea to ﬁnd the MGF of the SCIR process.
+
+The MGF of SCIR immediately follows using the same logic as before, as well as using the form of
+MθM (s) and Lemmas A.1 and A.2. Leading to
+
+MˆθM
+
+(s) =
+
+M
+(cid:89)
+
+(cid:104)
+
+m=1
+
+1 − r(m−1)(s)(1 − e−h)
+
+(cid:105)−ˆam
+
+(cid:104)
+
+(cid:105)
+θ0r(M )(s)
+
+exp
+
+= MθM (s)
+
+M
+(cid:89)
+
+m=1
+
+(cid:20) 1 − s(1 − e−mh)
+1 − s(1 − e−(m−1)h)
+
+(cid:21)−(ˆam−a)
+
+13
+
+A.4 Proof of Theorem 4.2
+
+Proof. From Theorem 4.1, we have
+
+MˆθM
+
+(s) = MθM (s)
+
+(cid:2)1 − s(1 − e−mh)(cid:3)−(ˆam−a)
+
+(cid:104)
+1 − s(1 − e−(m−1)h)
+
+(cid:105)−(a−ˆam)
+
+M
+(cid:89)
+
+m=1
+(cid:124)
+
+(cid:125)
+
+(cid:123)(cid:122)
+e0(s)
+
+(cid:123)(cid:122)
+e1(s)
+
+.
+
+(cid:125)
+
+We clearly have MθM (0) = e0(0) = e1(0) = 1. Differentiating we ﬁnd
+
+e(cid:48)
+0(s) =
+
+(ˆai − a)(1 − e−ih) (cid:2)1 − s(1 − e−ih)(cid:3)−1
+
+e0(s),
+
+similarly
+
+e(cid:48)
+1(s) =
+
+(a − ˆai)(1 − e−(i−1)h)
+
+1 − s(1 − e−(i−1)h)
+
+e1(s).
+
+(cid:104)
+
+(cid:105)−1
+
+M
+(cid:89)
+
+m=1
+(cid:124)
+
+M
+(cid:88)
+
+i=1
+
+M
+(cid:88)
+
+i=1
+
+It follows that, labeling the minibatch noise up to iteration M by BM , and using the fact that Eˆai = a
+for all i = 1, . . . , M we have
+
+EˆˆθM = E
+
+(cid:104)
+E
+
+(cid:17)(cid:105)
+
+(cid:16)ˆθM |BM
+(cid:105)
+(0)
+
+ˆθM
+
+(cid:104)
+= E
+M (cid:48)
+= E (cid:2)M (cid:48)
+θM
+= EθM .
+
+Now taking second derivatives we ﬁnd
+
+(0)e0(0)e1(0) + MθM (0)e(cid:48)
+
+0(0)e1(0) + MθM (0)e0(0)e(cid:48)
+
+1(0)(cid:3)
+
+e(cid:48)(cid:48)
+0 (s) =
+
+(ˆai − a)(ˆai − a − 1)(1 − e−ih)2 (cid:2)1 − s(1 − e−ih)(cid:3)−2
+
+e0(s)
+
+(ˆai − a)(ˆaj − a)(1 − e−ih)(1 − e−jh) (cid:2)1 − s(1 − e−ih)(cid:3)−1 (cid:2)1 − s(1 − e−jh)(cid:3)−1
+
+e0(s).
+
+M
+(cid:88)
+
+i=1
+
+(cid:88)
+
++
+
+i(cid:54)=j
+
+Now taking expectations with respect to the minibatch noise, noting independence of ˆai and ˆaj for
+i (cid:54)= j,
+
+By symmetry
+
+We also have
+
+E [e(cid:48)(cid:48)
+
+0 (0)] =
+
+(1 − e−ih)2Var(ˆai).
+
+E [e(cid:48)(cid:48)
+
+1 (0)] =
+
+(1 − e−(i−1)h)2Var(ˆai).
+
+M
+(cid:88)
+
+i=1
+
+M
+(cid:88)
+
+i=1
+
+M
+(cid:88)
+
+i=1
+
+14
+
+E [e(cid:48)
+
+0(0)e(cid:48)
+
+1(0)] = −
+
+(1 − e−ih)(1 − e−(i−1)h)Var(ˆai).
+
+Now we can calculate the second moment using the MGF as follows, note that E(e(cid:48)
+E(e(cid:48)
+
+1(0)) = 0,
+
+0(0)) =
+
+Eˆθ2
+
+M = E
+
+(cid:104)
+
+M (cid:48)(cid:48)
+ˆθM
+= E (cid:2)M (cid:48)(cid:48)
+θM
+
+(cid:105)
+(0)
+
+(0)e0(0)e1(0) + MθM (0)e(cid:48)(cid:48)
+0 (0)e1(0) + MθM (0)e0(0)e(cid:48)(cid:48)
+M
+M
+(cid:88)
+(cid:88)
+
+1 (0) + 2MθM (0)e(cid:48)
+
+0(0)e(cid:48)
+
+1(0)(cid:3)
+
+= Eθ2
+
+M +
+
+(1 − e−ih)2Var(ˆai) +
+
+(1 − e−(i−1)h)2Var(ˆai) − 2
+
+(1 − e−ih)(1 − e−(i−1)h)Var(ˆai)
+
+M
+(cid:88)
+
+i=1
+
+i=1
+
+= Eθ2
+
+M + Var(ˆa)
+
+(cid:34)
+e−2M h − 1 + 2
+
+(cid:16)
+
+e−2(i−1)h − e−(2i−1)h(cid:17)
+
+(cid:35)
+
+i=1
+
+M
+(cid:88)
+
+i=1
+
+= Eθ2
+
+M + Var(ˆa)
+
+(cid:34)
+e−2M h − 1 + 2
+
+2M −1
+(cid:88)
+
+(−1)ie−ih
+
+(cid:35)
+
+= Eθ2
+
+M + Var(ˆa)
+
+(cid:20)
+e−2M h − 1 +
+
+= Eθ2
+
+M + Var(ˆa)(1 − e−2M h)
+
+i=0
+
+(cid:21)
+
+2 − 2e−2M h
+1 + e−h
+
+(cid:21)
+
+(cid:20) 1 − e−h
+1 + e−h
+
+Proof. We proceed by induction. Clearly the result holds for n = 1. Now assume the result holds for
+all n ≤ k, we prove the result for n = k + 1 as follows
+
+B Proofs of Lemmas
+
+B.1 Proof of Lemma A.1
+
+r(k+1)(s) = r ◦ r(k)(s)
+
+(cid:18)
+
+= r
+
+se−kh
+1 − s(1 − e−kh)
+
+(cid:19)
+
+=
+
+=
+
+·
+
+se−kh
+1 − s(1 − e−kh)
+se−(k+1)h
+1 − s(1 − e−(k+1)h)
+
+.
+
+Thus the result holds for all n ∈ N by induction.
+
+B.2 Proof of Lemma A.2
+
+e−h(1 − s(1 − e−kh))
+1 − s(1 − e−kh) − se−kh(1 − e−h)
+
+Proof. Once again we proceed by induction. Clearly the result holds for n = 1. Now assume the
+result holds for all n ≤ k. Using Lemma A.1, we prove the result for n = k + 1 as follows
+
+1 − r(i)(s)(1 − e−h)
+
+(cid:105)
+
+k
+(cid:89)
+
+(cid:104)
+
+i=0
+
+(cid:20)
+
+1 −
+
+= (cid:2)1 − s(1 − e−kh)(cid:3)
+
+se−kh(1 − e−h)
+1 − s(1 − e−kh)
+(cid:20) 1 − s(1 − e−(k+1)h)
+1 − s(1 − e−kh)
+(cid:105)
+(cid:104)
+1 − s(1 − e−(k+1)h)
+
+= (cid:2)1 − s(1 − e−kh)(cid:3)
+
+=
+
+(cid:21)
+
+(cid:21)
+
+Thus the result holds for all n ∈ N by induction.
+
+15
+
+C CIR Parameter Choice
+
+As mentioned in Section 3, the standard CIR process has more parameters than those presented. The
+full form for the CIR process is as follows
+
+dθt = b(a − θt)dt + σ
+
+(C.1)
+where a, b and σ are parameters to be chosen. This leads to a Gamma(2ab/σ2, 2b/σ2) stationary
+distribution. For our purposes, the second parameter of the gamma stationary distribution can be set
+arbitrarily, thus it is natural to set 2b = σ2 which leads to a Gamma(a, 1) stationary distribution and
+a process of the following form
+
+θtdWt,
+
+(cid:112)
+
+dθt = b(a − θt)dt +
+
+2bθtdWt.
+
+(cid:112)
+
+Fix the stepsize h, and use the slight abuse of notation that θm = θmh. The process has the following
+transition density
+
+θm+1 | θm = ϑm ∼
+
+1 − e−bh
+2
+
+W,
+
+(cid:18)
+
+W ∼ χ2
+
+2a, 2ϑm
+
+e−bh
+1 − e−bh
+
+(cid:19)
+
+.
+
+Using the MGF of a non-central chi-square distribution we ﬁnd
+
+MθM (s) = (cid:2)1 − s(1 − e−M bh)(cid:3)−a
+
+exp
+
+(cid:20)
+
+sθ0e−M bh
+1 − s(1 − e−M bh)
+
+(cid:21)
+
+.
+
+Clearly b and h are unidentiﬁable. Thus we arbitrarily set b = 1.
+
+D Stochastic Slice Sampler for Dirichlet Processes
+
+D.1 Dirichlet Processes
+
+The Dirichlet process (DP) (Ferguson, 1973) is parameterised by a scale parameter α ∈ R>0 and a
+base distribution G0 and is denoted DP (G0, α). A formal deﬁnition is that G is distributed according
+to DP (G0, α) if for all k ∈ N and k-partitions {B1, . . . , Bk} of the space of interest Ω
+
+(G(B1), . . . , G(Bk)) ∼ Dir(αG0(B1), . . . , αG0(Bk)).
+More intuitively, suppose we simulate θ1, . . . θN from G. Then integrating out G (Blackwell and
+MacQueen, 1973) we can represent θN conditional on θ−N as
+
+θN | θ1, . . . , θN −1 ∼
+
+1
+N − 1 + α
+
+N −1
+(cid:88)
+
+i=1
+
+δθi +
+
+α
+N − 1 + α
+
+G0,
+
+where δθ is the distribution concentrated at θ.
+
+An explicit construction of a DP exists due to Sethuraman (1994), known as the stick-breaking
+construction. The slice sampler we develop in this section is based on this construction. For
+j = 1, 2, . . . , set Vj ∼ Beta(1, α) and θj ∼ G0. Then the stick breaking construction is given by
+
+(D.1)
+
+(D.2)
+
+and we have G ∼ DP (G0, α).
+
+D.2 Slice sampling Dirichlet process mixtures
+
+We focus on sampling from Dirichlet process mixture models deﬁned by
+
+ωj := Vj
+
+(1 − Vk)
+
+j−1
+(cid:89)
+
+k=1
+
+G ∼
+
+ωjδθj ,
+
+∞
+(cid:88)
+
+j=1
+
+Xi | θi ∼ F (θi)
+θi | G ∼ G
+
+G | G0, α ∼ DP (G0, α).
+
+16
+
+A popular MCMC algorithm for sampling from this model is the slice sampler, originally developed
+by Walker (2007) and further developed by Papaspiliopoulos (2008); Kalli et al. (2011). The slice
+sampler is based directly on the stick-breaking construction (D.2), rather than the sequential (Pólya
+urn) formulation of (D.1). This makes it a more natural approach to develop a stochastic sampler
+from; since the stochastic sampler relies on conditional independence assumptions. The slice sampler
+can be extended to other Bayesian nonparametric models quite naturally, from their corresponding
+stick breaking construction.
+
+We want to make inference on a Dirichlet process using the stick breaking construction directly.
+Suppose the mixture distribution F , and the base distribution G0 admit densities f and g0. Introducing
+the variable z, which determines which component x is currently allocated to, we can write the
+density as follows
+
+p(x|ω, θ, z) ∝ ωzf (x|θz).
+Theoretically we could now use a Gibbs sampler to sample conditionally from z, θ and ω. However
+this requires updating an inﬁnite number of weights, similarly z is drawn from a categorical distribu-
+tion with an inﬁnite number of categories. To get around this Walker (2007) introduces another latent
+variable u, such that the density is now
+
+so that the full likelihood is given by
+
+p(x|ω, θ, z, u) ∝ 1(u < ωz)f (x|θz),
+
+p(x|ω, θ, z, u) ∝
+
+1(ui < ωzi)f (xi|θzi).
+
+(D.3)
+
+N
+(cid:89)
+
+i=1
+
+Walker (2007) shows that in order for a standard Gibbs sampler to be valid given (D.3), the number
+of weights ωj that needs to be sampled given this new latent variable is now ﬁnite, and given by k∗,
+where k∗ is the smallest value such that (cid:80)k∗
+j=1 ωj > 1 − ui.
+
+The Gibbs algorithm can now be stated as follows, note we have included an improvement suggested
+by Papaspiliopoulos (2008), in how to sample vj.
+
+• Sample the slice variables u, given by ui | ω, z ∼ U (0, ωzi) for i = 1, . . . , N . Calculate
+
+• Delete or add components until the number of current components k∗ is the smallest value
+
+u∗ = min u.
+
+such that u∗ < 1 − (cid:80)k∗
+
+j=1 ωj.
+
+• Draw new component allocations zi for i = 1, . . . , N , using
+
+p(zi = j|xi, ui, ω, θ) ∝ 1(ωj > ui)f (xi|θ).
+
+• For j ≤ k∗, sample new component parameters θj from
+
+p(θj|x, z) ∝ g0(θj) (cid:81)
+
+i : zi=j f (xi|θj)
+
+• For j ≤ k∗ calculate simulate new stick breaks v from
+(cid:16)
+1 + mj, α + (cid:80)k∗
+
+vj | z, α ∼ Beta
+
+. Here mj := (cid:80)N
+
+(cid:17)
+
+i=1 1zi=j.
+
+l=j+1 ml
+(cid:81)
+
+• Update ω using the new v: ωj = vj
+
+l<j(1 − vj).
+
+D.3 Stochastic Sampler
+
+The conditional independence of each update of the slice sampler introduced in Section D.2 makes
+it possible to adapt it to a stochastic variant. Suppose we update θ and v given a minibatch of the
+z and u parameters. Then since the z and u parameters are just updated from the marginal of the
+posterior, only updating a minibatch of these parameters at a time would leave the posterior as the
+invariant distribution. Our exact MCMC procedure is similar to that in the R package PReMiuM
+(Liverani et al., 2015), though they do not use a stochastic sampler. First deﬁne the following:
+Z ∗ = max z; S ⊂ {1, . . . , N } is the current minibatch; u∗ = min uS; k∗ is the smallest value such
+that (cid:80)k∗
+
+j=1 ωj > 1 − u∗. Then our updates proceed as follows:
+
+• Recalculate Z ∗ and S (note this can be done in O(n) time since only n z values changed).
+
+17
+
+(a)
+
+(b)
+
+Figure 4: (a) plots the perplexity of SGRLD, SCIR and Gibbs when used to sample from the LDA
+model of Section 5.1 applied to Wikipedia documents; (b) plots the log predictive on a test set of the
+anonymous Microsoft user dataset, sampling the mixture model deﬁned in Section 5.2 using SCIR,
+SGRLD and Gibbs.
+
+• For j = 1, . . . , Z ∗ sample vj stochastically with SCIR from
+
+vj | z, α ∼ Beta(1 + ˆmj, α + (cid:80)k∗
+• Update ωj using the new v: ωj = vj
+• For j = 1, . . . , Z ∗ sample θj stochastically with SGMCMC from
+
+l=j+1 ˆml). Here ˆmj = N/n (cid:80)
+
+l<j(1 − vj).
+
+(cid:81)
+
+p(θj|x, z) ∝ g0(θj) (cid:81)
+
+Sj
+
+f (xi|θj). Here Sj = {i : zi = j and i ∈ S}.
+
+i∈S 1zi=j.
+
+• For i ∈ S sample the slice variables ui | ω, z ∼ U (0, ωzi).
+• Sample α if required. Using Escobar and West (1995), for our example we assume a
+
+Gamma(b1, b2) prior so that α | v1:Z∗ ∼ Gamma(b1 + Z ∗, b2 − (cid:80)K∗
+
+j=1 log(1 − vj)).
+
+• Recalculate u∗. Sample additional ωj from the prior, until k∗ is reached. For j = (Z ∗ +
+
+1), . . . , k∗ sample additional θj from the prior.
+
+• For i ∈ S, sample zi, where P(zi = j|ui, ω, θ, x) ∝ 1(ωj > ui)f (xi|θj).
+
+Note that for our particular example, we have the following conditional update for θ (ignoring
+minibatching for simplicity):
+
+θj | zj, x ∼ Dirichlet
+
+a +
+
+xi1, . . . , a +
+
+xid
+
+ .
+
+
+
+(cid:88)
+
+i∈Sj
+
+
+
+(cid:88)
+
+i∈Sj
+
+E Experiments
+
+E.1 Comparison with Gibbs
+
+We provide a comparison of the SGRLD and SCIR algorithms for both experiments to an exact, but
+non-scalable Gibbs sampler. Figure 4a compares SGRLD and SCIR run on the LDA model to an
+exact collapsed Gibbs sampler (Grifﬁths and Steyvers, 2004), run for 100 iterations. Although due
+to the large-scale dataset, it was not possible to run the Gibbs algorithm for very many iterations, it
+shows that the SCIR algorithm for LDA is competetive to exact, non-scalable methods.
+
+Figure 4b compares the SGRLD and SCIR algorithms to the Gibbs slice sampler of Walker (2007);
+Papaspiliopoulos and Roberts (2008); Kalli et al. (2011), run until convergence. While SCIR
+outperforms SGRLD, the methods are not that competetive with the Gibbs sampler. This is to be
+expected, since stochastic gradient methods converge only to an approximation of the posterior, while
+the Gibbs sampler converges to the true posterior. The reason the stochastic gradient methods do
+particularly badly in this case is due to the methods getting stuck in local stationary points. Fitting
+Bayesian nonparametric models at scale remains a challenging problem, and further work which
+improves the performance of these scalable samplers would be useful. The hyperparameters used for
+the Gibbs sampler is given in the tables in the sections below.
+
+18
+
+Method
+SCIR
+SGRLD 5e-1
+
+h
+1.0
+
+5e-1
+1e-1
+
+1e-1
+5e-2
+
+5e-2
+1e-2
+
+1e-2
+5e-3
+
+5e-3
+1e-3
+
+1e-3
+5e-4
+
+1e-4
+
+Table 1: Stepsizes for the synthetic experiment
+
+h
+Method
+CIR
+0.5
+SGRLD 0.01
+Gibbs
+
+τ
+10.
+1000.
+
+κ
+.33
+.6
+
+α
+0.1
+0.01
+0.1
+
+β
+0.5
+0.0001
+0.5
+
+K
+100
+100
+100
+
+n
+50
+50
+
+Gibbs Samples
+200
+200
+
+Table 2: Hyperparameters for the LDA experiment
+
+hθ
+0.1
+
+Method
+CIR
+SGRLD 0.001
+Gibbs
+
+hDP
+0.1
+0.005
+
+a
+0.5
+0.001
+0.5
+
+K n
+20
+30
+
+1000
+1000
+
+Table 3: Hyperparameters for the Bayesian nonparametric mixture experiment
+
+E.2 Synthetic
+
+We now fully explain the distance measure used in the synthetic experiments. Suppose we have
+random variables X taking values in R with cumulative density function (CDF) F . We also have
+an approximate sample from X, ˆX with empirical density function ˆF . The Kolmogorov-Smirnov
+(cid:13)
+(cid:13)
+distance dKS between X and ˆX is deﬁned by dKS(X, ˆX) = supx∈R
+ˆF (x) − F (x)
+(cid:13)
+(cid:13)
+(cid:13) . However the
+(cid:13)
+Dirichlet distribution is multi-dimensional, so we measure the average Kolmogorov-Smirnov distance
+across dimensions by using the Rosenblatt transform (Rosenblatt, 1952).
+Suppose now that X takes values in Rd. Deﬁne the conditional CDF of Xk = xk|Xk−1 =
+xk−1, . . . , X1 = x1 to be F (xk|x1:(k−1)). Suppose we have an approximate sample from X,
+which we denote x(m), for m = 1, . . . M . Deﬁne ˆFj to be the empirical CDF deﬁned by the sam-
+ples F (x(m)
+1:(j−1)). Then Rosenblatt (1952) showed that if ˆX is a true sample from X then ˆFj
+should be the uniform distribution and independent of ˆFk for k (cid:54)= j. This allows us to deﬁne a
+Kolmogorov-Smirnov distance measure across multiple dimensions as follows
+
+|x(m)
+
+j
+
+dKS(X, ˆX) =
+
+1
+K
+
+K
+(cid:88)
+
+j=1
+
+sup
+x∈R
+
+(cid:13)
+(cid:13)
+ˆFj(x) − Fj(x)
+(cid:13)
+(cid:13)
+(cid:13) .
+(cid:13)
+
+Where here applying Rosenblatt (1952), Fj(X) is just the uniform distribution.
+
+The full posterior distributions for the sparse and dense experiments are as follows:
+
+ωsparse | z ∼ Dir [800.1, 100.1, 100.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1] ,
+ωdense | z ∼ Dir [112.1, 119.1, 92.1, 98.1, 95.1, 96.1, 102.1, 92.1, 91.1, 103.1] .
+
+For each of the ﬁve random seeds, we pick the stepsize giving the best dKS for SGRLD and SCIR
+from the options given in Table 1.
+
+E.3 Latent Dirichlet Allocation
+
+As mentioned in the main body, we use a decreasing stepsize scheme of the form hm = h(1+m/τ )−κ.
+We do this to be fair to SGRLD, where the best performance is found by using this decreasing scheme
+(Patterson and Teh, 2013; Ma et al., 2015); and this will probably reduce some of the bias due to the
+stepsize h. We ﬁnd a decreasing stepsize scheme of this form also beneﬁts SCIR, so we use it as well.
+Notice that we ﬁnd similar optimal hyperparameters for SGRLD to Patterson and Teh (2013). Table
+2 fully details the hyperparameter settings we use for the LDA experiment.
+
+19
+
+E.4 Bayesian Nonparametric Mixture
+
+For details of the stochastic slice sampler we use, please refer to Section D. Table 3 details full hyper-
+parameter settings for the Bayesian nonparametric mixture experiment. Note that hθ corresponds
+to the stepsizes assigned for sampling the θ parameters; while hDP corresponds to the stepsizes
+assigned for sampling from the weights ω for the Dirichlet process.
+
+20
+
+8
+1
+0
+2
+ 
+t
+c
+O
+ 
+6
+2
+ 
+ 
+]
+
+O
+C
+
+.
+t
+a
+t
+s
+[
+ 
+ 
+2
+v
+7
+3
+1
+7
+0
+.
+6
+0
+8
+1
+:
+v
+i
+X
+r
+a
+
+Large-Scale Stochastic Sampling from the Probability
+Simplex
+
+Jack Baker
+STOR-i CDT, Mathematics and Statistics
+Lancaster University
+j.baker1@lancaster.ac.uk
+
+Paul Fearnhead
+Mathematics and Statistics
+Lancaster University
+p.fearnhead@lancaster.ac.uk
+
+Emily B. Fox
+Computer Science & Engineering and Statistics
+University of Washington
+ebfox@uw.edu
+
+Christopher Nemeth
+Mathematics and Statistics
+Lancaster University
+c.nemeth@lancaster.ac.uk
+
+Abstract
+
+Stochastic gradient Markov chain Monte Carlo (SGMCMC) has become a popular
+method for scalable Bayesian inference. These methods are based on sampling a
+discrete-time approximation to a continuous time process, such as the Langevin
+diffusion. When applied to distributions deﬁned on a constrained space the time-
+discretization error can dominate when we are near the boundary of the space.
+We demonstrate that because of this, current SGMCMC methods for the simplex
+struggle with sparse simplex spaces; when many of the components are close to
+zero. Unfortunately, many popular large-scale Bayesian models, such as network
+or topic models, require inference on sparse simplex spaces. To avoid the biases
+caused by this discretization error, we propose the stochastic Cox-Ingersoll-Ross
+process (SCIR), which removes all discretization error and we prove that samples
+from the SCIR process are asymptotically unbiased. We discuss how this idea can
+be extended to target other constrained spaces. Use of the SCIR process within a
+SGMCMC algorithm is shown to give substantially better performance for a topic
+model and a Dirichlet process mixture model than existing SGMCMC approaches.
+
+1
+
+Introduction
+
+Stochastic gradient Markov chain Monte Carlo (SGMCMC) has become a popular method for
+scalable Bayesian inference (Welling and Teh, 2011; Chen et al., 2014; Ding et al., 2014; Ma et al.,
+2015). The foundation of SGMCMC methods are a class of continuous processes that explore a target
+distribution—e.g., the posterior—using gradient information. These processes converge to a Markov
+chain which samples from the posterior distribution exactly. SGMCMC methods replace the costly
+full-data gradients with minibatch-based stochastic gradients, which provides one source of error.
+Another source of error arises from the fact that the continuous processes are almost never tractable to
+simulate; instead, discretizations are relied upon. In the non-SG scenario, the discretization errors are
+corrected for using Metropolis-Hastings. However, this is not (generically) feasible in the SG setting.
+The result of these two sources of error is that SGMCMC targets an approximate posterior (Welling
+and Teh, 2011; Teh et al., 2016; Vollmer et al., 2016).
+
+Another signiﬁcant limitation of SGMCMC methods is that they struggle to sample from constrained
+spaces. Naively applying SGMCMC can lead to invalid, or inaccurate values being proposed. The
+result is large errors near the boundary of the space (Patterson and Teh, 2013; Ma et al., 2015; Li
+et al., 2016). A particularly important constrained space is the simplex space, which is used to model
+
+Preprint. Work in progress.
+
+discrete probability distributions. A parameter ω of dimension d lies in the simplex if it satisﬁes
+the following conditions: ωj ≥ 0 for all j = 1, . . . , d and (cid:80)d
+j=1 ωj = 1. Many popular models
+contain simplex parameters. For example, latent Dirichlet allocation (LDA) is deﬁned by a set of
+topic-speciﬁc distributions on words and document-speciﬁc distributions on topics. Probabilistic
+network models often deﬁne a link probability between nodes. More generally, mixture and mixed
+membership models have simplex-constrained mixture weights; even the hidden Markov model
+can be cast in this framework with simplex-constrained transition distributions. As models become
+large-scale, these vectors ω often become sparse–i.e., many ωj are close to zero—pushing them to
+the boundaries of the simplex. All the models mentioned have this tendency. For example in network
+data, nodes often have relatively few links compared to the size of the network, e.g., the number of
+friends the average social network user has will be small compared with the size of the whole social
+network. In these cases the problem of sampling from the simplex space becomes even harder; since
+many values will be very close to the boundary of the space.
+
+Patterson and Teh (2013) develop an improved SGMCMC method for sampling from the probability
+simplex: stochastic gradient Riemannian Langevin dynamics (SGRLD). The improvements achieved
+are through an astute transformation of the simplex parameters, as well as developing a Riemannian
+(see Girolami and Calderhead, 2011) variant of SGMCMC. This method achieved state-of-the-art
+results on an LDA model. However, we show that despite the improvements over standard SGMCMC,
+the discretization error of SGRLD still causes problems on the simplex. In particular, it leads to
+asymptotic biases which dominate at the boundary of the space and causes signiﬁcant inaccuracy.
+
+To counteract this, we design an SGMCMC method based on the Cox-Ingersoll-Ross (CIR) process.
+The resulting process, which we refer to as the stochastic CIR process (SCIR), has no discretization
+error. This process can be used to simulate from gamma random variables directly, which can then be
+moved into the simplex space using a well known transformation. The CIR process has a lot of nice
+properties. One is that the transition equation is known exactly, which is what allows us to simulate
+from the process without discretization error. We are also able to characterize important theoretical
+properties of the SCIR algorithm, such as the non-asymptotic moment generating function, and thus
+its mean and variance. We discuss how these ideas can be used to simulate efﬁciently from other
+constrained spaces, such as (0, ∞).
+
+We demonstrate the impact of this SCIR method on a broad class of models. Included in these
+experiments is the development of a scalable sampler for Dirichlet processes, based on the slice
+sampler of Walker (2007); Papaspiliopoulos (2008); Kalli et al. (2011). To our knowledge the
+application of SGMCMC methods to Bayesian nonparametric models has not been explored. All
+proofs in this article are relegated to the Supplementary Material. All code for the experiments is
+available online1, and full details of hyperparameter and tuning constant choices has been detailed in
+the Supplementary Material.
+
+2 Stochastic Gradient MCMC on the Probability Simplex
+
+2.1 Stochastic Gradient MCMC
+
+Consider Bayesian inference for continuous parameters θ ∈ Rd based on data x = {xi}N
+i=1. Denote
+the density of xi as p(xi|θ) and assign a prior on θ with density p(θ). The posterior is then deﬁned,
+up to a constant of proportionality, as p(θ|x) ∝ p(θ) (cid:81)N
+i=1 p(xi|θ), and has distribution π. We deﬁne
+f (θ) := − log p(θ|x). Whilst MCMC can be used to sample from π, such algorithms require access
+to the full data set at each iteration. Stochastic gradient MCMC (SGMCMC) is an approximate
+MCMC algorithm that reduces this per-iteration computational and memory cost by using only a
+small subset of data points at each step.
+
+The most common SGMCMC algorithm is stochastic gradient Langevin dynamics (SGLD), ﬁrst
+introduced by Welling and Teh (2011). This sampler uses the Langevin diffusion, deﬁned as the
+solution to the stochastic differential equation
+
+(2.1)
+where Wt is a d-dimensional Wiener process. Similar to MCMC, the Langevin diffusion deﬁnes a
+Markov chain whose stationary distribution is π.
+
+dθt = −∇f (θt)dt +
+
+2dWt,
+
+√
+
+1Code available at https://github.com/jbaker92/scir.
+
+2
+
+Unfortunately, simulating from (2.1) is rarely possible, and the cost of calculating ∇f is O(N ) since
+it involves a sum over all data points. The idea of SGLD is to introduce two approximations to
+circumvent these issues. First, the continuous dynamics are approximated by discretizing them, in
+a similar way to Euler’s method for ODEs. This approximation is known as the Euler-Maruyama
+method. Next, in order to reduce the cost of calculating ∇f , it is replaced with a cheap, unbiased
+estimate. This leads to the following update equation, with user chosen stepsize h
+
+θm+1 = θm − h∇ ˆf (θ) +
+
+2hηm,
+
+ηm ∼ N (0, 1).
+
+(2.2)
+
+√
+
+Here, ∇ ˆf is an unbiased estimate of ∇f whose computational cost is O(n) where n (cid:28) N . Typically,
+we set ∇ ˆf (θ) := −∇ log p(θ) − N/n (cid:80)
+∇ log p(xi|θ), where Sm ⊂ {1, . . . , N } resampled at
+each iteration with |Sm| = n. Applying (2.2) repeatedly deﬁnes a Markov chain that approximately
+targets π (Welling and Teh, 2011). There are a number of alternative SGMCMC algorithms to SGLD,
+based on approximations to other diffusions that also target the posterior distribution (Chen et al.,
+2014; Ding et al., 2014; Ma et al., 2015).
+
+i∈Sm
+
+Recent work has investigated reducing the error introduced by approximating the gradient using
+minibatches (Dubey et al., 2016; Nagapetyan et al., 2017; Baker et al., 2017; Chatterji et al., 2018).
+While, by comparison, the discretization error is generally smaller, in this work we investigate an
+important situation where it degrades performance considerably.
+
+2.2 SGMCMC on the Probability Simplex
+
+We aim to make inference on the simplex parameter ω of dimension d, where ωj ≥ 0 for all
+j = 1, . . . , d and (cid:80)d
+j=1 ωj = 1. We assume we have categorical data zi of dimension d for
+i = 1, . . . , N , so zij will be 1 if data point i belongs to category j and zik will be zero for all
+k (cid:54)= j. We assume a Dirichlet prior Dir(α) on ω, with density p(ω) ∝ (cid:81)d
+d , and that the
+data is drawn from zi | ω ∼ Categorical(ω) leading to a Dir(α + (cid:80)N
+i=1 zi) posterior. An important
+transformation we will use repeatedly throughout this article is as follows: if we have d random
+gamma variables Xj ∼ Gamma(αj, 1). Then (X1, . . . , Xd)/ (cid:80)
+j Xj will have Dir(α) distribution,
+where α = (α1, . . . , αd).
+
+j=1 ωαj
+
+In this simple case the posterior of ω can be calculated exactly. However, in the applications we
+consider the zi are latent variables, and they are also simulated as part of a larger Gibbs sampler.
+Thus the zi will change at each iteration of the algorithm. We are interested in the situation where this
+is the case, and N is large, so that standard MCMC runs prohibitively slowly. The idea of SGMCMC
+in this situation is to use subsamples of z to propose appropriate moves to ω.
+
+Applying SGMCMC to models which contain simplex parameters is challenging due to their con-
+straints. Naively applying SGMCMC can lead to invalid values being proposed. The ﬁrst SGMCMC
+algorithm developed speciﬁcally for the probability simplex was the SGRLD algorithm of Pat-
+terson and Teh (2013). Patterson and Teh (2013) try a variety of transformations for ω which
+move the problem onto a space in Rd, where standard SGMCMC can be applied. They also
+build upon standard SGLD by developing a Riemannian variant. Riemannian MCMC (Girolami
+and Calderhead, 2011) takes the geometry of the space into account, which assists with errors at
+the boundary of the space. The parameterization Patterson and Teh (2013) ﬁnd numerically per-
+forms best is ωj = |θj|/ (cid:80)d
+j=1 |θj|. They use a mirrored gamma prior for θj, which has density
+p(θj) ∝ |θj|αj −1e−|θj |. This means the prior for ω remains the required Dirichlet distribution. They
+calculate the density of zi given θ using a change of variables and use a (Riemannian) SGLD update
+to update θ.
+
+2.3 SGRLD on Sparse Simplex Spaces
+
+Patterson and Teh (2013) suggested that the boundary of the space is where most problems occur using
+these kind of samplers; motivating their introduction of Riemannian ideas for SGLD. In many popular
+applications, such as LDA and modeling sparse networks, many of the components ωj will be close
+to 0. We refer to such ω as being sparse. In other words, there are many j for which (cid:80)N
+i=1 zij = 0.
+In order to demonstrate the problems with using SGRLD in this case, we provide a similar experiment
+to Patterson and Teh (2013). We use SGRLD to simulate from a sparse simplex parameter ω of
+
+3
+
+Figure 1: Boxplots of a 1000 iteration sample from SGRLD and SCIR ﬁt to a sparse Dirichlet
+posterior, compared to 1000 exact independent samples. On the log scale.
+
+i=1 zi1 = 800, (cid:80)N
+
+dimension d = 10 with N = 1000. We set (cid:80)N
+i=1 zi3 = 100, and
+(cid:80)N
+i=1 zij = 0, for 3 < j ≤ 10. The prior parameter α was set to 0.1 for all components. Leading to
+a highly sparse Dirichlet posterior. We will refer back to this experiment as the running experiment.
+In Figure 1 we provide boxplots from a sample of the ﬁfth component of ω using SGRLD after 1000
+iterations with 1000 iterations of burn-in, compared with boxplots from an exact sample. The method
+SCIR will be introduced later. We can see from Figure 1 that SGRLD rarely proposes small values of
+ω. This becomes a signiﬁcant issue for sparse Dirichlet distributions, since the lack of small values
+leads to a poor approximation to the posterior, as we can see from the boxplots.
+
+i=1 zi2 = (cid:80)N
+
+We hypothesize that the reason SGRLD struggles when ωj is near the boundary is due to the
+discretization by h, and we now try to diagnose this issue in detail. The problem relates to the bias of
+SGLD caused by the discretization of the algorithm. We use the results of Vollmer et al. (2016) to
+characterize this bias for a ﬁxed stepsize h. For similar results when the stepsize scheme is decreasing,
+we refer the reader to Teh et al. (2016). Proposition 2.1 is a simple application of Vollmer et al.
+(2016, Theorem 3.3), so we refer the reader to that article for full details of the assumptions. For
+simplicity of the statement, we assume that θ is 1-dimensional, but the results are easily adapted to
+the d-dimensional case.
+Proposition 2.1. (Vollmer et al., 2016) Under Vollmer et al. (2016, Assumptions 3.1 and 3.2), assume
+θ is 1-dimensional. Let θm be iteration m of an SGLD algorithm for m = 1, . . . , M , then the
+asymptotic bias deﬁned by limM→∞
+
+(cid:12)
+E[θm] − Eπ[θ]
+(cid:12)
+(cid:12) has leading term O(h).
+
+(cid:12)
+(cid:12)1/M (cid:80)M
+(cid:12)
+
+m=1
+
+While ordinarily this asymptotic bias is hard to disentangle from other sources of error, as Eπ[θ] gets
+close to zero h has to be set prohibitively small to give a good approximation to θ. The crux of the
+issue is that, while the absolute error remains the same, at the boundary of the space the relative
+error is large since θ is small, and biased upwards due to the positivity constraint. To counteract this,
+in the next section we introduce a method which has no discretization error. This allows us to prove
+that the asymptotic bias, as deﬁned in Proposition 2.1, will be zero for any choice of stepsize h.
+
+3 The Stochastic Cox-Ingersoll-Ross Algorithm
+
+We now wish to counteract the problems with SGRLD on sparse simplex spaces. First, we make the
+following observation: rather than applying a reparameterization of the prior for ω, we can model
+the posterior for each θj directly and independently as θj | z ∼ Gamma(αj + (cid:80)N
+i=1 zij, 1). Then
+using the gamma reparameterization ω = θ/ (cid:80)
+j θj still leads to the desired Dirichlet posterior. This
+leaves the θj in a much simpler form, and this simpler form enables us to remove all discretization
+error. We do this by using an alternative underlying process to the Langevin diffusion, known as the
+Cox-Ingersoll-Ross (CIR) process, commonly used in mathematical ﬁnance. A CIR process θt with
+parameter a and stationary distribution Gamma(a, 1) has the following form
+
+dθt = (a − θt)dt +
+
+2θtdWt.
+
+(cid:112)
+
+(3.1)
+
+The standard CIR process has more parameters, but we found changing these made no difference to the
+properties of our proposed scalable sampler, so we omit them (for exact details see the Supplementary
+Material).
+
+4
+
+The CIR process has many nice properties. One that is particularly useful for us is that the transition
+density is known exactly. Deﬁne χ2(ν, µ) to be the non-central chi-squared distribution with ν
+degrees of freedom and non-centrality parameter µ. If at time t we are at state ϑt, then the probability
+distribution of θt+h is given by
+
+θt+h | θt = ϑt ∼
+
+1 − e−h
+2
+
+W,
+
+(cid:18)
+
+W ∼ χ2
+
+2a, 2ϑt
+
+e−h
+1 − e−h
+
+(cid:19)
+
+.
+
+(3.2)
+
+This transition density allows us to simulate directly from the CIR process with no discretization error.
+Furthermore, it has been proven that the CIR process is negative with probability zero (Cox et al.,
+1985), meaning we will not need to take absolute values as is required for the SGRLD algorithm.
+
+3.1 Adapting for Large Datasets
+
+The next issue we need to address is how to sample from this process when the dataset is large.
+Suppose that zi is data for i = 1, . . . , N , for some large N , and that our target distribution is
+Gamma(a, 1), where a = α + (cid:80)N
+i=1 zi. We want to approximate the target by simulating from the
+CIR process using only a subset of z at each iteration. A natural thing to do would be at each iteration
+to replace a in the transition density equation (3.2) with an unbiased estimate ˆa = α + N/n (cid:80)
+i∈S zi,
+where S ⊂ {1, . . . , N }, similar to SGLD. We will refer to a CIR process using unbiased estimates
+in this way as the stochastic CIR process (SCIR). Fix some stepsize h, which now determines how
+often ˆa is resampled rather than the granularity of the discretization. Suppose ˆθm follows the SCIR
+process, then it will have the following update
+
+ˆθm+1 | ˆθm = ϑm ∼
+
+1 − e−h
+2
+
+W,
+
+(cid:18)
+
+W ∼ χ2
+
+2ˆam, 2ϑm
+
+e−h
+1 − e−h
+
+(cid:19)
+
+,
+
+(3.3)
+
+zi.
+
+i∈Sm
+
+where ˆam = α + N/n (cid:80)
+We can show that this algorithm will approximately target the true posterior distribution in the same
+sense as SGLD. To do this, we draw a connection between the SCIR process and an SGLD algorithm,
+which allows us to use the arguments of SGLD to show that the SCIR process will target the desired
+distribution. More formally, we have the following relationship:
+Theorem 3.1. Let θt be a CIR process with transition 3.2. Then Ut := g(θt) = 2
+Langevin diffusion for a generalized gamma distribution.
+
+θt follows the
+
+√
+
+Theorem 3.1, allows us to show that applying the transformation g(·) to the approximate SCIR
+process, leads to a discretization free SGLD algorithm for a generalized gamma distribution. Similarly,
+applying g−1(·) to the approximate target of this SGLD algorithm leads to the desired Gamma(a, 1)
+distribution. Full details are given after the proof of Theorem 3.1. The result means that similar to
+SGLD, we can replace the CIR parameter a with an unbiased estimate ˆa created from a minibatch
+of data. Provided we re-estimate a from one iteration to the next using different minibatches, the
+approximate target distribution will still be Gamma(a, 1). As in SGLD, there will be added error
+based on the noise in the estimate ˆa. However, from the desirable properties of the CIR process we
+are able to quantify this error more easily than for the SGLD algorithm, and we do this in Section 4.
+
+Algorithm 1 below summarizes how SCIR can be used to sample from the simplex parameter
+ω | z ∼ Dir(α + (cid:80)N
+i=1 zi). This can be done in a similar way to SGRLD, with the same per-iteration
+computational cost, so the improvements we demonstrate later are essentially for free.
+
+Algorithm 1: Stochastic Cox-Ingersoll-Ross (SCIR) for sampling from the probability simplex.
+Input: Starting points θ0, stepsize h, minibatch size n.
+Result: Approximate sample from ω | z.
+for m = 1 to M do
+
+Sample minibatch Sm from {1, . . . , N }
+for j = 1 to d do
+
+Set ˆaj ← α + N/n (cid:80)
+Sample ˆθmj | ˆθ(m−1)j using (3.3) with parameter ˆaj and stepsize h.
+
+zij.
+
+i∈Sm
+
+end
+Set ωm ← θm/ (cid:80)
+
+j θmj.
+
+end
+
+5
+
+(a)
+
+(b)
+
+Figure 2: Kolmogorov-Smirnov distance for SGRLD and SCIR at different minibatch sizes when
+used to sample from (a), a sparse Dirichlet posterior and (b) a dense Dirichlet posterior.
+
+3.2 SCIR on Sparse Data
+
+We test the SCIR process on two synthetic experiments. The ﬁrst experiment is the running experiment
+on the sparse Dirichlet posterior of Section 2.3. The second experiment allocates 1000 datapoints
+equally to each component, leading to a highly dense Dirichlet posterior. For both experiments, we
+run 1000 iterations of optimally tuned SGRLD and SCIR algorithms and compare to an exact sampler.
+For the sparse experiment, Figure 1 shows boxplots of samples from the ﬁfth component of ω, which
+is sparse. For both experiments, Figure 2 plots the Kolmogorov-Smirnov distance (dKS) between
+the approximate samples and the true posterior (full details of the distance measure are given in the
+Supplementary Material). For the boxplots, a minibatch of size 10 is used; for the dKS plots, the
+proportion of data in the minibatch is varied from 0.001 to 0.5. The dKS plots show the runs of ﬁve
+different seeds, which gives some idea of variability.
+
+The boxplots of Figure 1 demonstrate that the SCIR process is able to handle smaller values of ω
+much more readily than SGRLD. The impact of this is demonstrated in Figure 2a, the sparse dKS
+plot. Here the SCIR process is achieving much better results than SGRLD, and converging towards
+the exact sampler at larger minibatch sizes. The dense dKS plot of Figure 2b shows that as we move
+to the dense setting the samplers have similar properties. The conclusion is that the SCIR algorithm
+is a good choice of simplex sampler for either the dense or sparse case.
+
+3.3 Extensions
+
+For simplicity, in this article we have focused on a popular usecase of SCIR: sampling from a
+Dir(α + (cid:80)N
+i=1 zi) distribution, with z categorical. This method can be easily generalized though.
+For a start, the SCIR algorithm is not limited to z being categorical, and it can be used to sample
+from most constructions that use Dirichlet distributions, provided the z are not integrated out. The
+method can also be used to sample from constrained spaces on (0, ∞) that are gamma distributed by
+just sampling from the SCIR process itself (since the stationary distribution of the CIR process is
+gamma). There are other diffusion processes that have tractable transition densities. These can be
+exploited in a similar way to create other discretization free SGMCMC samplers. One such process
+is called geometric Brownian motion, which has lognormal stationary distribution. This process can
+be adapted to create a stochastic sampler from the lognormal distribution on (0, ∞).
+
+4 Theoretical Analysis
+
+In the following theoretical analysis we wish to target a Gamma(a, 1) distribution, where a =
+α + (cid:80)N
+i=1 zi for some data z. We run an SCIR algorithm with stepsize h for M iterations, yielding
+the sample ˆθm for m = 1, . . . , M . We compare this to an exact CIR process with stationary
+distribution Gamma(a, 1), deﬁned by the transition equation in (3.2). We do this by deriving the
+moment generating function (MGF) of ˆθm in terms of the MGF of the exact CIR process. For
+simplicity, we ﬁx a stepsize h and, abusing notation slightly, set θm to be a CIR process that has been
+run for time mh.
+Theorem 4.1. Let ˆθM be the SCIR process deﬁned in (3.3) starting from θ0 after M steps with
+stepsize h. Let θM be the corresponding exact CIR process, also starting from θ0, run for time M h,
+
+6
+
+and with coupled noise. Then the MGF of ˆθM is given by
+
+MˆθM
+
+(s) = MθM (s)
+
+M
+(cid:89)
+
+m=1
+
+(cid:20) 1 − s(1 − e−mh)
+1 − s(1 − e−(m−1)h)
+
+(cid:21)−(ˆam−a)
+
+,
+
+(4.1)
+
+where we have
+
+MθM (s) = (cid:2)1 − s(1 − e−M h)(cid:3)−a
+
+exp
+
+(cid:20)
+θ0
+
+se−M h
+1 − s(1 − e−M h)
+
+(cid:21)
+
+.
+
+The proof of this result follows by induction from the properties of the non-central chi-squared
+distribution. The result shows that the MGF of the SCIR can be written as the MGF of the exact
+underlying CIR process, as well as an error term in the form of a product. Deriving the MGF enables
+us to ﬁnd the non-asymptotic bias and variance of the SCIR process, which is more interpretable than
+the MGF itself. The results are stated formally in the following Corollary.
+Corollary 4.2. Given the setup of Theorem 4.1,
+
+E[ˆθM ] = E[θM ] = θ0e−M h + a(1 − e−M h).
+
+Since Eπ[θ] = a, then limM→∞ | 1
+M
+Similarly,
+
+(cid:80)M
+
+m=1
+
+E[ˆθm]−Eπ[θ]| = 0 and SCIR is asymptotically unbiased.
+
+Var[ˆθM ] = Var[θM ] + (1 − e−2M h)
+
+1 − e−h
+1 + e−h
+
+Var[ˆa],
+
+where Var[ˆa] = Var[ˆam] for m = 1, . . . , M and
+
+Var[θM ] = 2θ0(e−M h − e−2M h) + a(1 − e−M h)2.
+
+The results show that the approximate process is asymptotically unbiased. We believe this explains
+the improvements the method has over SGRLD in the experiments of Sections 3.2 and 5. We also
+obtain the non-asymptotic variance as a simple sum of the variance of the exact underlying CIR
+process, and a quantity involving the variance of the estimate ˆa. This is of a similar form to the strong
+error of SGLD (Sato and Nakagawa, 2014), though without the contribution from the discretization.
+The variance of the SCIR is somewhat inﬂated over the variance of the CIR process. Reducing this
+variance would improve the properties of the SCIR process and would be an interesting avenue for
+further work. Control variate ideas could be applied for this purpose (Nagapetyan et al., 2017; Baker
+et al., 2017; Chatterji et al., 2018) and they may prove especially effective since the mode of a gamma
+distribution is known exactly.
+
+5 Experiments
+
+In this section we empirically compare SCIR to SGRLD on two challenging models: latent Dirichlet
+allocation (LDA) and a Bayesian nonparametric mixture. Performance is evaluated by measuring the
+predictive performance of the trained model on a held out test set over ﬁve different seeds. Stepsizes
+and hyperparameters are tuned using a grid search over the predictive performance of the method.
+The minibatch size is kept ﬁxed for both the experiments. In the Supplementary Material, we provide
+a comparison of the methods to a Gibbs sampler. This sampler is non-scalable, but will converge to
+the true posterior rather than an approximation. The aim of the comparison to Gibbs is to give the
+reader an idea of how the stochastic gradient methods compare to exact methods for the different
+models considered.
+
+5.1 Latent Dirichlet Allocation
+
+Latent Dirichlet allocation (LDA, see Blei et al., 2003) is a popular model used to summarize a
+collection of documents by clustering them based on underlying topics. The data for the model is a
+matrix of word frequencies, with a row for each document. LDA is based on a generative procedure.
+For each document l, a discrete distribution over the K potential topics, θl, is drawn as θl ∼ Dir(α)
+for some suitably chosen hyperparameter α. Each topic k is associated with a discrete distribution
+φk over all the words in a corpus, meant to represent the common words associated with particular
+topics. This is drawn as φk ∼ Dir(β), for some suitable β. Finally, each word in document l is drawn
+
+7
+
+(a)
+
+(b)
+
+Figure 3: (a) plots the perplexity of SGRLD and SCIR when used to sample from the LDA model of
+Section 5.1 applied to Wikipedia documents; (b) plots the log predictive on a test set of the anonymous
+Microsoft user dataset, sampling the mixture model deﬁned in Section 5.2 using SCIR and SGRLD.
+
+a topic k from θl and then the word itself is drawn from φk. LDA is a good example for this method
+because φk is likely to be very sparse, there are many words which will not be associated with a given
+topic at all.
+
+We apply SCIR and SGRLD to LDA on a dataset of scraped Wikipedia documents, by adapting
+the code released by Patterson and Teh (2013). At each iteration a minibatch of 50 documents
+is sampled in an online manner. We use the same vocabulary set as in Patterson and Teh (2013),
+which consists of approximately 8000 words. The exponential of the average log-predictive on a
+held out set of 1000 documents is calculated every 5 iterations to evaluate the model. This quantity
+is known as the perplexity, and we use a document completion approach to calculate it (Wallach
+et al., 2009). The perplexity is plotted for ﬁve runs using different seeds, which gives an idea of
+variability. Similar to Patterson and Teh (2013), for both methods we use a decreasing stepsize
+scheme of the form hm = h[1 + m/τ ]−κ. The results are plotted in Figure 3a. While the initial
+convergence rate is similar, SCIR keeps descending past where SGRLD begins to converge. This
+experiment illustrates the impact of removing the discretization error. We would expect to see further
+improvements of SCIR over SGRLD if a larger vocabulary size were used; as this would lead to
+sparser topic vectors. In real-world applications of LDA, it is quite common to use vocabulary sizes
+above 8000. The comparison to a collapsed Gibbs sampler, provided in the Supplementary Material,
+shows the methods are quite competetive to exact, non-scalable methods.
+
+5.2 Bayesian Nonparametric Mixture Model
+
+We apply SCIR to sample from a Bayesian nonparametric mixture model of categorical data, proposed
+by Dunson and Xing (2009). To the best of our knowledge, the development of SGMCMC methods
+for Bayesian nonparametric models has not been considered before. In particular, we develop a
+truncation free, scalable sampler based on SGMCMC for Dirichlet processes (DP, see Ferguson,
+1973). For more thorough details of DPs and the stochastic sampler developed, the reader is referred
+to the Supplementary Material. The model can be expressed as follows
+
+xi | θ, zi ∼ Multi(ni, θzi),
+
+θ, zi ∼ DP(Dir(a), α).
+
+(5.1)
+
+Here Multi(m, φ) is a multinomial distribution with m trials and associated discrete probability
+distribution φ; DP(G0, α) is a DP with base distribution G0 and concentration parameter α. The DP
+component parameters and allocations are denoted by θ and zi respectively. We deﬁne the number of
+observations N by N := (cid:80)
+i ni, and let L be the number of instances of xi, i = 1, . . . , L. This type
+of mixture model is commonly used to model the dependence structure of categorical data, such as
+for genetic or natural language data (Dunson and Xing, 2009). The use of DPs means we can account
+for the fact that we do not know the true dependence structure. DPs allow us to learn the number of
+mixture components in a penalized way during the inference procedure itself.
+
+We apply this model to the anonymous Microsoft user dataset (Breese et al., 1998). This dataset
+consists of approximately N = 105 instances of L = 30000 anonymized users. Each instance details
+part of the website the user visits, which is one of d = 294 categories (here d denotes the dimension
+of xi). We use the model to try and characterize the typical usage patterns of the website. Since
+
+8
+
+there are a lot of categories and only an average of three observations for any one user, these data are
+expected to be sparse.
+
+To infer the model, we devise a novel minibatched version of the slice sampler (Walker, 2007;
+Papaspiliopoulos, 2008; Kalli et al., 2011). We assign an uninformative gamma prior on α, and this
+is inferred similarly to Escobar and West (1995). We minibatch the users at each iteration using
+n = 1000. For multimodal mixture models such as this, SGMCMC methods are known to get stuck
+in local modes (Baker et al., 2017), so we use a ﬁxed stepsize for both SGRLD and SCIR. Once
+again, we plot runs over 5 seeds to give an idea of variability. The results are plotted in Figure 3b.
+They show that SCIR consistently converges to a lower log predictive test score, and appears to have
+lower variance than SGRLD. SGRLD also appears to be producing worse scores as the number of
+iterations increases. We found that SGRLD had a tendency to propose many more clusters than were
+required. This is probably due to the asymptotic bias of Proposition 2.1, since this would lead to an
+inferred model that has a higher α parameter than is set, meaning more clusters would be proposed
+than are needed. In fact, setting a higher α parameter appeared to alleviate this problem, but led to a
+worse ﬁt, which is more evidence that this is the case.
+
+In the Supplementary Material we provide plots comparing the stochastic gradient methods to the
+exact, but non-scalable Gibbs slice sampler (Walker, 2007; Papaspiliopoulos, 2008; Kalli et al.,
+2011). The comparison shows, while SCIR outperforms SGRLD, the scalable stochastic gradient
+approximation itself does not perform well in this case compared to the exact Gibbs sampler. This is
+to be expected for such a complicated model; the reason appears to be that the stochastic gradient
+methods get stuck in local stationary points. Improving the performance of stochastic gradient based
+samplers for Bayesian nonparametric problems is an important direction for future work.
+
+6 Discussion
+
+We presented an SGMCMC method, the SCIR algorithm, for simplex spaces. We show that the
+method has no discretization error and is asymptotically unbiased. Our experiments demonstrate that
+these properties give the sampler improved performance over other SGMCMC methods for sampling
+from sparse simplex spaces. Many important large-scale models are sparse, so this is an important
+contribution. A number of useful theoretical properties for the sampler were derived, including the
+non-asymptotic variance and moment generating function. We discuss how this sampler can be
+extended to target other constrained spaces discretization free. Finally, we demonstrate the impact
+of the sampler on a variety of interesting problems. An interesting line of further work would be
+reducing the non-asymptotic variance, which could be done by means of control variates.
+
+7 Acknowledgments
+
+Jack Baker gratefully acknowledges the support of the EPSRC funded EP/L015692/1 STOR-i
+Centre for Doctoral Training. Paul Fearnhead was supported by EPSRC grants EP/K014463/1 and
+EP/R018561/1. Christopher Nemeth acknowledges the support of EPSRC grants EP/S00159X/1 and
+EP/R01860X/1. Emily Fox acknowledges the support of ONR Grant N00014-15-1-2380 and NSF
+CAREER Award IIS-1350133.
+
+References
+
+Baker, J., Fearnhead, P., Fox, E. B., and Nemeth, C. (2017). Control variates for stochastic gradient
+
+MCMC. Available from https://arxiv.org/abs/1706.05439.
+
+Blackwell, D. and MacQueen, J. B. (1973). Ferguson distributions via Polya urn schemes. The
+
+Annals of Statistics, 1(2):353–355.
+
+Blei, D. M., Ng, A. Y., and Jordan, M. I. (2003). Latent Dirichlet allocation. Journal of Machine
+
+Learning Research, 3:993–1022.
+
+Breese, J. S., Heckerman, D., and Kadie, C. (1998). Empirical analysis of predictive algorithms for
+collaborative ﬁltering. In Proceedings of the Fourteenth Conference on Uncertainty in Artiﬁcial
+Intelligence, pages 43–52.
+
+9
+
+Chatterji, N. S., Flammarion, N., Ma, Y.-A., Bartlett, P. L., and Jordan, M. I. (2018). On the theory of
+variance reduction for stochastic gradient Monte Carlo. Available at https://arxiv.org/abs/
+1802.05431v1.
+
+Chen, T., Fox, E., and Guestrin, C. (2014). Stochastic gradient Hamiltonian Monte Carlo.
+
+In
+Proceedings of the 31st International Conference on Machine Learning, pages 1683–1691. PMLR.
+
+Cox, J. C., Ingersoll, J. E., and Ross, S. A. (1985). A theory of the term structure of interest rates.
+
+Econometrica, 53(2):385–407.
+
+Ding, N., Fang, Y., Babbush, R., Chen, C., Skeel, R. D., and Neven, H. (2014). Bayesian sampling
+using stochastic gradient thermostats. In Advances in Neural Information Processing Systems 27,
+pages 3203–3211.
+
+Dubey, K. A., Reddi, S. J., Williamson, S. A., Poczos, B., Smola, A. J., and Xing, E. P. (2016).
+Variance reduction in stochastic gradient Langevin dynamics. In Advances in Neural Information
+Processing Systems 29, pages 1154–1162.
+
+Dunson, D. B. and Xing, C. (2009). Nonparametric Bayes modeling of multivariate categorical data.
+
+Journal of the American Statistical Association, 104(487):1042–1051.
+
+Escobar, M. D. and West, M. (1995). Bayesian density estimation and inference using mixtures.
+
+Journal of the American Statistical Association, 90(430):577–588.
+
+Ferguson, T. S. (1973). A Bayesian analysis of some nonparametric problems. The Annals of
+
+Statistics, 1(2):209–230.
+
+Girolami, M. and Calderhead, B. (2011). Riemann manifold Langevin and Hamiltonian Monte
+Carlo methods. Journal of the Royal Statistical Society: Series B (Statistical Methodology),
+73(2):123–214.
+
+Grifﬁths, T. L. and Steyvers, M. (2004). Finding scientiﬁc topics. Proceedings of the National
+
+Academy of Sciences of the United States of America, 101:5228–5235.
+
+Kalli, M., Grifﬁn, J. E., and Walker, S. G. (2011). Slice sampling mixture models. Statistics and
+
+Computing, 21(1):93–105.
+
+Li, W., Ahn, S., and Welling, M. (2016). Scalable MCMC for mixed membership stochastic
+blockmodels. In Proceedings of the 19th International Conference on Artiﬁcial Intelligence and
+Statistics, pages 723–731.
+
+Liverani, S., Hastie, D., Azizi, L., Papathomas, M., and Richardson, S. (2015). PReMiuM: An R
+package for proﬁle regression mixture models using Dirichlet processes. Journal of Statistical
+Software, 64(7):1–30.
+
+Ma, Y.-A., Chen, T., and Fox, E. (2015). A complete recipe for stochastic gradient MCMC. In
+
+Advances in Neural Information Processing Systems, pages 2917–2925.
+
+Nagapetyan, T., Duncan, A., Hasenclever, L., Vollmer, S. J., Szpruch, L., and Zygalakis, K. (2017).
+The true cost of stochastic gradient Langevin dynamics. Available at https://arxiv.org/abs/
+1706.02692.
+
+Papaspiliopoulos, O. (2008). A note on posterior sampling from Dirichlet mixture models. Techni-
+cal Report. Available at http://wrap.warwick.ac.uk/35493/1/WRAP_papaspliiopoulos_
+08-20wv2.pdf.
+
+Papaspiliopoulos, O. and Roberts, G. O. (2008). Retrospective Markov chain Monte Carlo methods
+
+for Dirichlet process hierarchical models. Biometrika, 95(1):169–186.
+
+Patterson, S. and Teh, Y. W. (2013). Stochastic gradient Riemannian Langevin dynamics on the
+probability simplex. In Advances in Neural Information Processing Systems 26, pages 3102–3110.
+
+Rosenblatt, M. (1952). Remarks on a multivariate transformation. The Annals of Mathematical
+
+Statistics, 23(3):470–472.
+
+10
+
+Sato, I. and Nakagawa, H. (2014). Approximation analysis of stochastic gradient Langevin dynamics
+In Proceedings of the 31st International
+
+by using Fokker-Planck equation and Ito process.
+Conference on Machine Learning, pages 982–990. PMLR.
+
+Sethuraman, J. (1994). A constructive deﬁnition of Dirichlet priors. Statistica Sinica, 4(2):639–650.
+
+Teh, Y. W., Thiéry, A. H., and Vollmer, S. J. (2016). Consistency and ﬂuctuations for stochastic
+
+gradient Langevin dynamics. Journal of Machine Learning Research, 17(7):1–33.
+
+Vollmer, S. J., Zygalakis, K. C., and Teh, Y. W. (2016). Exploration of the (non-)asymptotic bias
+and variance of stochastic gradient Langevin dynamics. Journal of Machine Learning Research,
+17(159):1–48.
+
+Walker, S. G. (2007). Sampling the Dirichlet mixture model with slices. Communications in Statistics,
+
+36(1):45–54.
+
+Wallach, H. M., Murray, I., Salakhutdinov, R., and Mimno, D. (2009). Evaluation methods for topic
+models. In Proceedings of the 26th Annual International Conference on Machine Learning, pages
+1105–1112. PMLR.
+
+Welling, M. and Teh, Y. W. (2011). Bayesian learning via stochastic gradient Langevin dynamics. In
+Proceedings of the 28th International Conference on Machine Learning, pages 681–688. PMLR.
+
+Zygalakis, K. C. (2011). On the existence and the applications of modiﬁed equations for stochastic
+
+differential equations. SIAM Journal on Scientiﬁc Computing, 33(1):102–130.
+
+11
+
+A Proofs
+
+A.1 Proof of Proposition 2.1
+
+Proof. Deﬁne the local weak error of SGLD, starting from θ0 and with stepsize h, with test function
+φ by
+(cid:12)φ(θ1) − φ(¯θh)(cid:12)
+(cid:12) ,
+where ¯θh is the true underlying Langevin diffusion (2.1), run for time h with starting point θ0. Then
+it is shown by Vollmer et al. (2016) that if φ : Rd → R is a smooth test function, and that SGLD
+applied with test function φ has local weak error O(h), then
+
+E (cid:12)
+
+E
+
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+
+lim
+M→∞
+
+1/M
+
+M
+(cid:88)
+
+m=1
+
+(cid:12)
+(cid:12)
+φ(θm) − Eπ[φ(θ)]
+(cid:12)
+(cid:12)
+(cid:12)
+
+is also O(h). What remains to be checked is that using such a simple function for φ (the identity),
+does not cause things to disappear such that the local weak error of SGLD is no longer O(h). The
+identity function is inﬁnitely differentiable, thus is sufﬁciently smooth. For SGLD, we ﬁnd that
+
+E[θ1|θ0] = θ0 + hf (cid:48)(θ0).
+For the Langevin diffusion, we deﬁne the one step expectation using the weak Taylor expansion
+of Zygalakis (2011), which is valid since we have made Assumptions 3.1 and 3.2 of Vollmer et al.
+(2016). Deﬁne the inﬁnitesimal operator L of the Langevin diffusion (2.1) by
+
+Lφ = f (cid:48)(θ) · ∂θφ(θ) + ∂2
+
+θ φ(θ).
+
+Then Zygalakis (2011) shows that the weak Taylor expansion of Langevin diffusion (2.1) has the
+form
+
+E[¯θh|θ0] = θ0 + hLφ(θ0) +
+
+L2φ(θ0) + O(h3).
+
+This means when φ is the identity then
+
+E[¯θh|θ0] = θ0 + hf (cid:48)(θ0) +
+
+[f (θ)f (cid:48)(θ) + f (cid:48)(cid:48)(θ)] + O(h3).
+
+Since the terms agree up to O(h) then it follows that even when φ is the identity, SGLD still has local
+weak error of O(h). This completes the proof.
+
+h2
+2
+
+h2
+2
+
+A.2 Proof of Theorem 3.1
+
+Proof. Suppose we have a random variable U∞ following a generalized gamma posterior with data z
+and the following density
+
+f (u) ∝ u2(α+(cid:80)N
+
+i=1 zi)−1e−u2/4.
+i=1 zi), Then ∂ log f (u) = (2a − 1)/u − u/2, so that the Langevin diffusion for
+
+Set a := 2(α + (cid:80)N
+U∞ will have the following integral form
+(cid:90) t+h
+
+Ut+h | Ut = Ut +
+
+(cid:20) 2a − 1
+Us
+
+−
+
+(cid:21)
+
+Us
+2
+
+t
+
+√
+
+(cid:90) t+h
+
+ds +
+
+2
+
+dWt.
+
+t
+
+Applying Ito’s lemma to Ut to transform to θt = g−1(Ut) = U 2
+proof), we ﬁnd that
+
+t /4 (here g(·) has been stated in the
+
+θt+h | θt = θt +
+
+[a − θs] ds +
+
+2θtdWt.
+
+(cid:90) t+h
+
+t
+
+(cid:90) t+h
+
+(cid:112)
+
+t
+
+This is exactly the integral form for the CIR process. This completes the proof.
+
+Now we give more details of the connection between SGLD and SCIR. Let us deﬁne an SGLD
+algorithm that approximately targets U∞, but without the Euler discretization by
+(cid:90) (m+1)h
+
+(cid:90) (m+1)h
+
+(cid:21)
+
+(cid:20) 2ˆam − 1
+Us
+
+−
+
+Us
+2
+
+√
+
+ds +
+
+2
+
+mh
+
+mh
+
+dWt,
+
+(A.1)
+
+U(m+1)h | Umh = Umh +
+
+12
+
+where ˆam is an unbiased estimate of a; for example, the standard SGLD estimate ˆam = α +
+N/n (cid:80)
+zi; also h is a tuning constant which determines how much time is simulated before
+resampling ˆam.
+Again applying Ito’s lemma to Umh to transform to θmh = g(Umh) = U 2
+
+mh/4, we ﬁnd that
+
+i∈Sm
+
+θ(m+1)h = θmh +
+
+[ˆam − θs] ds +
+
+(cid:90) (m+1)h
+
+mh
+
+(cid:90) (m+1)h
+
+mh
+
+(cid:112)
+
+2θtdWt.
+
+This is exactly the integral form for the update equation of an SCIR process.
+
+Finally, to show SCIR has the desired approximate target, we use some properties of the gamma
+distribution. Firstly if θ∞ ∼ Gamma(a, 1) then 4θ∞ ∼ Gamma(a, 1
+θ∞ will
+have a generalized gamma distribution with density proportional to h(u) ∝ u2a−1e−u2/4. This is
+exactly the approximate target of the discretization free SGLD algorithm (A.1) we derived earlier.
+
+4 ), so that U∞ = 2
+
+√
+
+A.3 Proof of Theorem 4.1
+
+First let us deﬁne the following quantities
+
+r(s) =
+
+se−h
+1 − s(1 − e−h)
+
+,
+
+r(n)(s) = r ◦ · · · ◦ r
+(cid:125)
+(cid:124)
+
+(s).
+
+(cid:123)(cid:122)
+n
+
+Then we will make use of the following Lemmas:
+Lemma A.1. For all n ∈ N and s ∈ R
+
+r(n)(s) =
+
+se−nh
+1 − s(1 − e−nh)
+
+.
+
+Lemma A.2. For all n ∈ N, s ∈ R, set r(0)(s) := s, then
+
+(cid:105)
+(cid:104)
+1 − r(i)(s)(1 − e−h)
+
+= (cid:2)1 − s(1 − e−nh)(cid:3) .
+
+n−1
+(cid:89)
+
+i=0
+
+Both can be proved by induction, which is shown in Section B.
+
+Suppose that θ1|θ0 is a CIR process, starting at θ0 and run for time h. Then we can immediately write
+down the MGF of θ1, Mθ1(s), using the MGF of a non-central chi-squared distribution
+
+Mθ1(s) = E (cid:2)esθ1|θ0
+
+(cid:3) = (cid:2)1 − s(1 − e−h)(cid:3)−a
+
+exp
+
+(cid:20)
+
+sθ0e−h
+1 − s(1 − e−h)
+
+(cid:21)
+
+.
+
+(cid:3), and then take expectations of this with respect to
+We can use this to ﬁnd E (cid:2)esθM | θM −1
+θM −2, i.e. E (cid:2)E (cid:2)esθM | θM −1
+(cid:3) has the form
+C(s) exp[θM −1r(s)], where C(s) is a function only involving s, and r(s) is as deﬁned earlier.
+Thus repeatedly applying this and using Lemmas A.1 and A.2 we ﬁnd
+
+(cid:3). This is possible because E (cid:2)esθM |θM −1
+
+(cid:3) | θM −2
+
+MθM (s) = (cid:2)1 − s(1 − e−M h)(cid:3)−a
+
+exp
+
+(cid:20)
+
+sθ0e−M h
+1 − s(1 − e−M h)
+
+(cid:21)
+
+.
+
+(A.2)
+
+Although this was already known, we can use the same idea to ﬁnd the MGF of the SCIR process.
+
+The MGF of SCIR immediately follows using the same logic as before, as well as using the form of
+MθM (s) and Lemmas A.1 and A.2. Leading to
+
+MˆθM
+
+(s) =
+
+M
+(cid:89)
+
+(cid:104)
+
+m=1
+
+1 − r(m−1)(s)(1 − e−h)
+
+(cid:105)−ˆam
+
+(cid:104)
+
+(cid:105)
+θ0r(M )(s)
+
+exp
+
+= MθM (s)
+
+M
+(cid:89)
+
+m=1
+
+(cid:20) 1 − s(1 − e−mh)
+1 − s(1 − e−(m−1)h)
+
+(cid:21)−(ˆam−a)
+
+13
+
+A.4 Proof of Theorem 4.2
+
+Proof. From Theorem 4.1, we have
+
+MˆθM
+
+(s) = MθM (s)
+
+(cid:2)1 − s(1 − e−mh)(cid:3)−(ˆam−a)
+
+(cid:104)
+1 − s(1 − e−(m−1)h)
+
+(cid:105)−(a−ˆam)
+
+M
+(cid:89)
+
+m=1
+(cid:124)
+
+(cid:125)
+
+(cid:123)(cid:122)
+e0(s)
+
+(cid:123)(cid:122)
+e1(s)
+
+.
+
+(cid:125)
+
+We clearly have MθM (0) = e0(0) = e1(0) = 1. Differentiating we ﬁnd
+
+e(cid:48)
+0(s) =
+
+(ˆai − a)(1 − e−ih) (cid:2)1 − s(1 − e−ih)(cid:3)−1
+
+e0(s),
+
+similarly
+
+e(cid:48)
+1(s) =
+
+(a − ˆai)(1 − e−(i−1)h)
+
+1 − s(1 − e−(i−1)h)
+
+e1(s).
+
+(cid:104)
+
+(cid:105)−1
+
+M
+(cid:89)
+
+m=1
+(cid:124)
+
+M
+(cid:88)
+
+i=1
+
+M
+(cid:88)
+
+i=1
+
+It follows that, labeling the minibatch noise up to iteration M by BM , and using the fact that Eˆai = a
+for all i = 1, . . . , M we have
+
+EˆˆθM = E
+
+(cid:104)
+E
+
+(cid:17)(cid:105)
+
+(cid:16)ˆθM |BM
+(cid:105)
+(0)
+
+ˆθM
+
+(cid:104)
+= E
+M (cid:48)
+= E (cid:2)M (cid:48)
+θM
+= EθM .
+
+Now taking second derivatives we ﬁnd
+
+(0)e0(0)e1(0) + MθM (0)e(cid:48)
+
+0(0)e1(0) + MθM (0)e0(0)e(cid:48)
+
+1(0)(cid:3)
+
+e(cid:48)(cid:48)
+0 (s) =
+
+(ˆai − a)(ˆai − a − 1)(1 − e−ih)2 (cid:2)1 − s(1 − e−ih)(cid:3)−2
+
+e0(s)
+
+(ˆai − a)(ˆaj − a)(1 − e−ih)(1 − e−jh) (cid:2)1 − s(1 − e−ih)(cid:3)−1 (cid:2)1 − s(1 − e−jh)(cid:3)−1
+
+e0(s).
+
+M
+(cid:88)
+
+i=1
+
+(cid:88)
+
++
+
+i(cid:54)=j
+
+Now taking expectations with respect to the minibatch noise, noting independence of ˆai and ˆaj for
+i (cid:54)= j,
+
+By symmetry
+
+We also have
+
+E [e(cid:48)(cid:48)
+
+0 (0)] =
+
+(1 − e−ih)2Var(ˆai).
+
+E [e(cid:48)(cid:48)
+
+1 (0)] =
+
+(1 − e−(i−1)h)2Var(ˆai).
+
+M
+(cid:88)
+
+i=1
+
+M
+(cid:88)
+
+i=1
+
+M
+(cid:88)
+
+i=1
+
+14
+
+E [e(cid:48)
+
+0(0)e(cid:48)
+
+1(0)] = −
+
+(1 − e−ih)(1 − e−(i−1)h)Var(ˆai).
+
+Now we can calculate the second moment using the MGF as follows, note that E(e(cid:48)
+E(e(cid:48)
+
+1(0)) = 0,
+
+0(0)) =
+
+Eˆθ2
+
+M = E
+
+(cid:104)
+
+M (cid:48)(cid:48)
+ˆθM
+= E (cid:2)M (cid:48)(cid:48)
+θM
+
+(cid:105)
+(0)
+
+(0)e0(0)e1(0) + MθM (0)e(cid:48)(cid:48)
+0 (0)e1(0) + MθM (0)e0(0)e(cid:48)(cid:48)
+M
+M
+(cid:88)
+(cid:88)
+
+1 (0) + 2MθM (0)e(cid:48)
+
+0(0)e(cid:48)
+
+1(0)(cid:3)
+
+= Eθ2
+
+M +
+
+(1 − e−ih)2Var(ˆai) +
+
+(1 − e−(i−1)h)2Var(ˆai) − 2
+
+(1 − e−ih)(1 − e−(i−1)h)Var(ˆai)
+
+M
+(cid:88)
+
+i=1
+
+i=1
+
+= Eθ2
+
+M + Var(ˆa)
+
+(cid:34)
+e−2M h − 1 + 2
+
+(cid:16)
+
+e−2(i−1)h − e−(2i−1)h(cid:17)
+
+(cid:35)
+
+i=1
+
+M
+(cid:88)
+
+i=1
+
+= Eθ2
+
+M + Var(ˆa)
+
+(cid:34)
+e−2M h − 1 + 2
+
+2M −1
+(cid:88)
+
+(−1)ie−ih
+
+(cid:35)
+
+= Eθ2
+
+M + Var(ˆa)
+
+(cid:20)
+e−2M h − 1 +
+
+= Eθ2
+
+M + Var(ˆa)(1 − e−2M h)
+
+i=0
+
+(cid:21)
+
+2 − 2e−2M h
+1 + e−h
+
+(cid:21)
+
+(cid:20) 1 − e−h
+1 + e−h
+
+Proof. We proceed by induction. Clearly the result holds for n = 1. Now assume the result holds for
+all n ≤ k, we prove the result for n = k + 1 as follows
+
+B Proofs of Lemmas
+
+B.1 Proof of Lemma A.1
+
+r(k+1)(s) = r ◦ r(k)(s)
+
+(cid:18)
+
+= r
+
+se−kh
+1 − s(1 − e−kh)
+
+(cid:19)
+
+=
+
+=
+
+·
+
+se−kh
+1 − s(1 − e−kh)
+se−(k+1)h
+1 − s(1 − e−(k+1)h)
+
+.
+
+Thus the result holds for all n ∈ N by induction.
+
+B.2 Proof of Lemma A.2
+
+e−h(1 − s(1 − e−kh))
+1 − s(1 − e−kh) − se−kh(1 − e−h)
+
+Proof. Once again we proceed by induction. Clearly the result holds for n = 1. Now assume the
+result holds for all n ≤ k. Using Lemma A.1, we prove the result for n = k + 1 as follows
+
+1 − r(i)(s)(1 − e−h)
+
+(cid:105)
+
+k
+(cid:89)
+
+(cid:104)
+
+i=0
+
+(cid:20)
+
+1 −
+
+= (cid:2)1 − s(1 − e−kh)(cid:3)
+
+se−kh(1 − e−h)
+1 − s(1 − e−kh)
+(cid:20) 1 − s(1 − e−(k+1)h)
+1 − s(1 − e−kh)
+(cid:105)
+(cid:104)
+1 − s(1 − e−(k+1)h)
+
+= (cid:2)1 − s(1 − e−kh)(cid:3)
+
+=
+
+(cid:21)
+
+(cid:21)
+
+Thus the result holds for all n ∈ N by induction.
+
+15
+
+C CIR Parameter Choice
+
+As mentioned in Section 3, the standard CIR process has more parameters than those presented. The
+full form for the CIR process is as follows
+
+dθt = b(a − θt)dt + σ
+
+(C.1)
+where a, b and σ are parameters to be chosen. This leads to a Gamma(2ab/σ2, 2b/σ2) stationary
+distribution. For our purposes, the second parameter of the gamma stationary distribution can be set
+arbitrarily, thus it is natural to set 2b = σ2 which leads to a Gamma(a, 1) stationary distribution and
+a process of the following form
+
+θtdWt,
+
+(cid:112)
+
+dθt = b(a − θt)dt +
+
+2bθtdWt.
+
+(cid:112)
+
+Fix the stepsize h, and use the slight abuse of notation that θm = θmh. The process has the following
+transition density
+
+θm+1 | θm = ϑm ∼
+
+1 − e−bh
+2
+
+W,
+
+(cid:18)
+
+W ∼ χ2
+
+2a, 2ϑm
+
+e−bh
+1 − e−bh
+
+(cid:19)
+
+.
+
+Using the MGF of a non-central chi-square distribution we ﬁnd
+
+MθM (s) = (cid:2)1 − s(1 − e−M bh)(cid:3)−a
+
+exp
+
+(cid:20)
+
+sθ0e−M bh
+1 − s(1 − e−M bh)
+
+(cid:21)
+
+.
+
+Clearly b and h are unidentiﬁable. Thus we arbitrarily set b = 1.
+
+D Stochastic Slice Sampler for Dirichlet Processes
+
+D.1 Dirichlet Processes
+
+The Dirichlet process (DP) (Ferguson, 1973) is parameterised by a scale parameter α ∈ R>0 and a
+base distribution G0 and is denoted DP (G0, α). A formal deﬁnition is that G is distributed according
+to DP (G0, α) if for all k ∈ N and k-partitions {B1, . . . , Bk} of the space of interest Ω
+
+(G(B1), . . . , G(Bk)) ∼ Dir(αG0(B1), . . . , αG0(Bk)).
+More intuitively, suppose we simulate θ1, . . . θN from G. Then integrating out G (Blackwell and
+MacQueen, 1973) we can represent θN conditional on θ−N as
+
+θN | θ1, . . . , θN −1 ∼
+
+1
+N − 1 + α
+
+N −1
+(cid:88)
+
+i=1
+
+δθi +
+
+α
+N − 1 + α
+
+G0,
+
+where δθ is the distribution concentrated at θ.
+
+An explicit construction of a DP exists due to Sethuraman (1994), known as the stick-breaking
+construction. The slice sampler we develop in this section is based on this construction. For
+j = 1, 2, . . . , set Vj ∼ Beta(1, α) and θj ∼ G0. Then the stick breaking construction is given by
+
+(D.1)
+
+(D.2)
+
+and we have G ∼ DP (G0, α).
+
+D.2 Slice sampling Dirichlet process mixtures
+
+We focus on sampling from Dirichlet process mixture models deﬁned by
+
+ωj := Vj
+
+(1 − Vk)
+
+j−1
+(cid:89)
+
+k=1
+
+G ∼
+
+ωjδθj ,
+
+∞
+(cid:88)
+
+j=1
+
+Xi | θi ∼ F (θi)
+θi | G ∼ G
+
+G | G0, α ∼ DP (G0, α).
+
+16
+
+A popular MCMC algorithm for sampling from this model is the slice sampler, originally developed
+by Walker (2007) and further developed by Papaspiliopoulos (2008); Kalli et al. (2011). The slice
+sampler is based directly on the stick-breaking construction (D.2), rather than the sequential (Pólya
+urn) formulation of (D.1). This makes it a more natural approach to develop a stochastic sampler
+from; since the stochastic sampler relies on conditional independence assumptions. The slice sampler
+can be extended to other Bayesian nonparametric models quite naturally, from their corresponding
+stick breaking construction.
+
+We want to make inference on a Dirichlet process using the stick breaking construction directly.
+Suppose the mixture distribution F , and the base distribution G0 admit densities f and g0. Introducing
+the variable z, which determines which component x is currently allocated to, we can write the
+density as follows
+
+p(x|ω, θ, z) ∝ ωzf (x|θz).
+Theoretically we could now use a Gibbs sampler to sample conditionally from z, θ and ω. However
+this requires updating an inﬁnite number of weights, similarly z is drawn from a categorical distribu-
+tion with an inﬁnite number of categories. To get around this Walker (2007) introduces another latent
+variable u, such that the density is now
+
+so that the full likelihood is given by
+
+p(x|ω, θ, z, u) ∝ 1(u < ωz)f (x|θz),
+
+p(x|ω, θ, z, u) ∝
+
+1(ui < ωzi)f (xi|θzi).
+
+(D.3)
+
+N
+(cid:89)
+
+i=1
+
+Walker (2007) shows that in order for a standard Gibbs sampler to be valid given (D.3), the number
+of weights ωj that needs to be sampled given this new latent variable is now ﬁnite, and given by k∗,
+where k∗ is the smallest value such that (cid:80)k∗
+j=1 ωj > 1 − ui.
+
+The Gibbs algorithm can now be stated as follows, note we have included an improvement suggested
+by Papaspiliopoulos (2008), in how to sample vj.
+
+• Sample the slice variables u, given by ui | ω, z ∼ U (0, ωzi) for i = 1, . . . , N . Calculate
+
+• Delete or add components until the number of current components k∗ is the smallest value
+
+u∗ = min u.
+
+such that u∗ < 1 − (cid:80)k∗
+
+j=1 ωj.
+
+• Draw new component allocations zi for i = 1, . . . , N , using
+
+p(zi = j|xi, ui, ω, θ) ∝ 1(ωj > ui)f (xi|θ).
+
+• For j ≤ k∗, sample new component parameters θj from
+
+p(θj|x, z) ∝ g0(θj) (cid:81)
+
+i : zi=j f (xi|θj)
+
+• For j ≤ k∗ calculate simulate new stick breaks v from
+(cid:16)
+1 + mj, α + (cid:80)k∗
+
+vj | z, α ∼ Beta
+
+. Here mj := (cid:80)N
+
+(cid:17)
+
+i=1 1zi=j.
+
+l=j+1 ml
+(cid:81)
+
+• Update ω using the new v: ωj = vj
+
+l<j(1 − vj).
+
+D.3 Stochastic Sampler
+
+The conditional independence of each update of the slice sampler introduced in Section D.2 makes
+it possible to adapt it to a stochastic variant. Suppose we update θ and v given a minibatch of the
+z and u parameters. Then since the z and u parameters are just updated from the marginal of the
+posterior, only updating a minibatch of these parameters at a time would leave the posterior as the
+invariant distribution. Our exact MCMC procedure is similar to that in the R package PReMiuM
+(Liverani et al., 2015), though they do not use a stochastic sampler. First deﬁne the following:
+Z ∗ = max z; S ⊂ {1, . . . , N } is the current minibatch; u∗ = min uS; k∗ is the smallest value such
+that (cid:80)k∗
+
+j=1 ωj > 1 − u∗. Then our updates proceed as follows:
+
+• Recalculate Z ∗ and S (note this can be done in O(n) time since only n z values changed).
+
+17
+
+(a)
+
+(b)
+
+Figure 4: (a) plots the perplexity of SGRLD, SCIR and Gibbs when used to sample from the LDA
+model of Section 5.1 applied to Wikipedia documents; (b) plots the log predictive on a test set of the
+anonymous Microsoft user dataset, sampling the mixture model deﬁned in Section 5.2 using SCIR,
+SGRLD and Gibbs.
+
+• For j = 1, . . . , Z ∗ sample vj stochastically with SCIR from
+
+vj | z, α ∼ Beta(1 + ˆmj, α + (cid:80)k∗
+• Update ωj using the new v: ωj = vj
+• For j = 1, . . . , Z ∗ sample θj stochastically with SGMCMC from
+
+l=j+1 ˆml). Here ˆmj = N/n (cid:80)
+
+l<j(1 − vj).
+
+(cid:81)
+
+p(θj|x, z) ∝ g0(θj) (cid:81)
+
+Sj
+
+f (xi|θj). Here Sj = {i : zi = j and i ∈ S}.
+
+i∈S 1zi=j.
+
+• For i ∈ S sample the slice variables ui | ω, z ∼ U (0, ωzi).
+• Sample α if required. Using Escobar and West (1995), for our example we assume a
+
+Gamma(b1, b2) prior so that α | v1:Z∗ ∼ Gamma(b1 + Z ∗, b2 − (cid:80)K∗
+
+j=1 log(1 − vj)).
+
+• Recalculate u∗. Sample additional ωj from the prior, until k∗ is reached. For j = (Z ∗ +
+
+1), . . . , k∗ sample additional θj from the prior.
+
+• For i ∈ S, sample zi, where P(zi = j|ui, ω, θ, x) ∝ 1(ωj > ui)f (xi|θj).
+
+Note that for our particular example, we have the following conditional update for θ (ignoring
+minibatching for simplicity):
+
+θj | zj, x ∼ Dirichlet
+
+a +
+
+xi1, . . . , a +
+
+xid
+
+ .
+
+
+
+(cid:88)
+
+i∈Sj
+
+
+
+(cid:88)
+
+i∈Sj
+
+E Experiments
+
+E.1 Comparison with Gibbs
+
+We provide a comparison of the SGRLD and SCIR algorithms for both experiments to an exact, but
+non-scalable Gibbs sampler. Figure 4a compares SGRLD and SCIR run on the LDA model to an
+exact collapsed Gibbs sampler (Grifﬁths and Steyvers, 2004), run for 100 iterations. Although due
+to the large-scale dataset, it was not possible to run the Gibbs algorithm for very many iterations, it
+shows that the SCIR algorithm for LDA is competetive to exact, non-scalable methods.
+
+Figure 4b compares the SGRLD and SCIR algorithms to the Gibbs slice sampler of Walker (2007);
+Papaspiliopoulos and Roberts (2008); Kalli et al. (2011), run until convergence. While SCIR
+outperforms SGRLD, the methods are not that competetive with the Gibbs sampler. This is to be
+expected, since stochastic gradient methods converge only to an approximation of the posterior, while
+the Gibbs sampler converges to the true posterior. The reason the stochastic gradient methods do
+particularly badly in this case is due to the methods getting stuck in local stationary points. Fitting
+Bayesian nonparametric models at scale remains a challenging problem, and further work which
+improves the performance of these scalable samplers would be useful. The hyperparameters used for
+the Gibbs sampler is given in the tables in the sections below.
+
+18
+
+Method
+SCIR
+SGRLD 5e-1
+
+h
+1.0
+
+5e-1
+1e-1
+
+1e-1
+5e-2
+
+5e-2
+1e-2
+
+1e-2
+5e-3
+
+5e-3
+1e-3
+
+1e-3
+5e-4
+
+1e-4
+
+Table 1: Stepsizes for the synthetic experiment
+
+h
+Method
+CIR
+0.5
+SGRLD 0.01
+Gibbs
+
+τ
+10.
+1000.
+
+κ
+.33
+.6
+
+α
+0.1
+0.01
+0.1
+
+β
+0.5
+0.0001
+0.5
+
+K
+100
+100
+100
+
+n
+50
+50
+
+Gibbs Samples
+200
+200
+
+Table 2: Hyperparameters for the LDA experiment
+
+hθ
+0.1
+
+Method
+CIR
+SGRLD 0.001
+Gibbs
+
+hDP
+0.1
+0.005
+
+a
+0.5
+0.001
+0.5
+
+K n
+20
+30
+
+1000
+1000
+
+Table 3: Hyperparameters for the Bayesian nonparametric mixture experiment
+
+E.2 Synthetic
+
+We now fully explain the distance measure used in the synthetic experiments. Suppose we have
+random variables X taking values in R with cumulative density function (CDF) F . We also have
+an approximate sample from X, ˆX with empirical density function ˆF . The Kolmogorov-Smirnov
+(cid:13)
+(cid:13)
+distance dKS between X and ˆX is deﬁned by dKS(X, ˆX) = supx∈R
+ˆF (x) − F (x)
+(cid:13)
+(cid:13)
+(cid:13) . However the
+(cid:13)
+Dirichlet distribution is multi-dimensional, so we measure the average Kolmogorov-Smirnov distance
+across dimensions by using the Rosenblatt transform (Rosenblatt, 1952).
+Suppose now that X takes values in Rd. Deﬁne the conditional CDF of Xk = xk|Xk−1 =
+xk−1, . . . , X1 = x1 to be F (xk|x1:(k−1)). Suppose we have an approximate sample from X,
+which we denote x(m), for m = 1, . . . M . Deﬁne ˆFj to be the empirical CDF deﬁned by the sam-
+ples F (x(m)
+1:(j−1)). Then Rosenblatt (1952) showed that if ˆX is a true sample from X then ˆFj
+should be the uniform distribution and independent of ˆFk for k (cid:54)= j. This allows us to deﬁne a
+Kolmogorov-Smirnov distance measure across multiple dimensions as follows
+
+|x(m)
+
+j
+
+dKS(X, ˆX) =
+
+1
+K
+
+K
+(cid:88)
+
+j=1
+
+sup
+x∈R
+
+(cid:13)
+(cid:13)
+ˆFj(x) − Fj(x)
+(cid:13)
+(cid:13)
+(cid:13) .
+(cid:13)
+
+Where here applying Rosenblatt (1952), Fj(X) is just the uniform distribution.
+
+The full posterior distributions for the sparse and dense experiments are as follows:
+
+ωsparse | z ∼ Dir [800.1, 100.1, 100.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1] ,
+ωdense | z ∼ Dir [112.1, 119.1, 92.1, 98.1, 95.1, 96.1, 102.1, 92.1, 91.1, 103.1] .
+
+For each of the ﬁve random seeds, we pick the stepsize giving the best dKS for SGRLD and SCIR
+from the options given in Table 1.
+
+E.3 Latent Dirichlet Allocation
+
+As mentioned in the main body, we use a decreasing stepsize scheme of the form hm = h(1+m/τ )−κ.
+We do this to be fair to SGRLD, where the best performance is found by using this decreasing scheme
+(Patterson and Teh, 2013; Ma et al., 2015); and this will probably reduce some of the bias due to the
+stepsize h. We ﬁnd a decreasing stepsize scheme of this form also beneﬁts SCIR, so we use it as well.
+Notice that we ﬁnd similar optimal hyperparameters for SGRLD to Patterson and Teh (2013). Table
+2 fully details the hyperparameter settings we use for the LDA experiment.
+
+19
+
+E.4 Bayesian Nonparametric Mixture
+
+For details of the stochastic slice sampler we use, please refer to Section D. Table 3 details full hyper-
+parameter settings for the Bayesian nonparametric mixture experiment. Note that hθ corresponds
+to the stepsizes assigned for sampling the θ parameters; while hDP corresponds to the stepsizes
+assigned for sampling from the weights ω for the Dirichlet process.
+
+20
+

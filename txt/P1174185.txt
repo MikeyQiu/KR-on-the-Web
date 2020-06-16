@@ -430,3 +430,867 @@ learning. In LearningSys, 2015.
 
 6
 
+7
+1
+0
+2
+ 
+t
+c
+O
+ 
+1
+3
+ 
+ 
+]
+
+C
+D
+.
+s
+c
+[
+ 
+ 
+1
+v
+1
+5
+3
+1
+1
+.
+0
+1
+7
+1
+:
+v
+i
+X
+r
+a
+
+ChainerMN: Scalable Distributed Deep Learning
+Framework ∗
+
+Takuya Akiba
+Preferred Networks, Inc.
+akiba@preferred.jp
+
+Keisuke Fukuda
+Preferred Networks, Inc.
+kfukuda@preferred.jp
+
+Shuji Suzuki
+Preferred Networks, Inc.
+ssuzuki@preferred.jp
+
+Abstract
+
+One of the keys for deep learning to have made a breakthrough in various ﬁelds
+was to utilize high computing powers centering around GPUs. Enabling the use of
+further computing abilities by distributed processing is essential not only to make
+the deep learning bigger and faster but also to tackle unsolved challenges. We
+present the design, implementation, and evaluation of ChainerMN, the distributed
+deep learning framework we have developed. We demonstrate that ChainerMN can
+scale the learning process of the ResNet-50 model to the ImageNet dataset up to
+128 GPUs with the parallel efﬁciency of 90%.
+
+1
+
+Introduction
+
+It has turned out that deep learning achieves far better predicting performance than existing methods
+in image recognition, natural language processing, speech recognition and many other ﬁelds where
+machine learning is being applied. The basic technology of neural networks used in deep learning
+has a long history dating back to the 1950’s. As we entered the 2010’s, the neural network technology
+with its long history has made the breakthrough as “deep learning” as described above because it
+is thought to have successfully combined all the advances of algorithms, large-scale data, and high
+computing powers. Even today, it would be difﬁcult to achieve an outstanding predicting performance
+by deep learning if one of the three lacks. In this article, we focus on one of the three pillars supporting
+deep learning: computing performance.
+
+It has become a standard approach to use highly efﬁcient GPUs for training in many deep learning
+tasks. Nevertheless, the training process is still time-consuming even with the latest GPUs because
+models have also grown massive and complex. For example, training Resnet-50 [6] for the ImageNet
+dataset [4] typically takes as long as one week with a single GPU. Taking a long time on training
+means you have a limited number of times to do trial and error for models and parameters needed to
+achieve high accuracy, making it difﬁcult to produce a good predicting performance. It also means
+there is a limit to the usable data size. Thus, using multiple GPUs in parallel is crucial in accelerating
+calculation.
+
+We introduce ChainerMN, an add-on package to Chainer [9], a programming framework for deep
+learning applications written in Python, to provide a distributed learning capability. In the course of
+developing ChainerMN, we took the following features into consideration:
+
+• Flexibility: Chainer is a ﬂexible framework based on its Deﬁne-by-Run approach and
+ChainerMN is designed not to ruin the ﬂexibility aspect. This allows for easy distributed
+learning even in complex use cases such as dynamic neural networks, generative adversarial
+networks, and reinforced deep learning.
+
+∗This paper is based on our invited article in TSUBAME e-Science Journal (ESJ)[3]. ESJ is a non-academic
+
+and non-peer-reviewed newsletter from Global Scientiﬁc Information Center, Tokyo Institute of Technology.
+
+• High performance: We selected technologies assuming practical workloads in deep learn-
+ing from the very beginning of designing ChainerMN as well as exercised ingenuity with
+respect to implementation so that hardware performance is fully utilized.
+
+The rest of the paper is organized as follows. First, we explain the basic elements of distributed deep
+learning, followed by the design and implementation of ChainerMN. Finally, we will present the
+results of our evaluation experiment and related work.
+
+2 Preliminaries
+
+2.1 Basics of Deep Learning
+
+We can express the prediction by neural networks against input data x as f (x; θ) where θ is a
+parameter for neural networks. Learning in neural networks using backpropagation and stochastic
+gradient descent or its variations is an iterative algorithm. Each iteration is composed of the following
+three steps: forward computation, backward computation, and optimization.
+
+In the forward-computation step, ﬁrst, the prediction f (x; θ) is calculated against an input data point
+x. Then, the loss is calculated to represent the difference from the correct output for. Here, the cross
+entropy and other indicators may be used.
+In the backward-computation step, g = δE
+δθ , the gradient of the parameter θ in the direction of
+decreasing the loss E, is calculated. Gradients for all parameters are calculated using the chain rule
+while going backward from the output layer to the input layer.
+
+In the optimize step, the parameter θ is updated using the gradient g . The simplest rule is to update θ
+to θ − µg where µ is a parameter called a learning rate.
+
+In practice, instead of using a single training example in an iteration, the forward and backward
+calculations are performed simultaneously against multiple training examples and optimization is
+executed using the average of gradients against all the examples. The input examples used in an
+iteration is called a minibatch while its size is called a batch size. A typical batch size ranges from
+several tens to several hundred.
+
+Please note that the above description is based on a standard supervised learning. Nonetheless, in
+case that neural networks are applied to other algorithms such as unsupervised learning and semi-
+supervised learning, the parallelizing method we will explain below is applicable and ChainerMN is
+also usable.
+
+2.2 Data Parallel and Model Parallel approaches
+
+There are two major approaches to parallelize training by distributed processing: data parallel and
+model parallel. In the data-parallel approach, each worker has a model replica and calculate gradients
+of different minibatches. Workers use these gradients to update the model collaboratively. In the
+model parallel approach, each worker has a portion of the model and work in cooperation with others
+to do the calculation for one minibatch. Figure 1 shows the difference between the two approaches.
+
+(a) Data parallelism.
+
+(b) Model parallelism.
+
+Figure 1: Data parallel and model parallel ap-
+proaches.
+
+Figure 2: The four steps that constitute an iteration
+of synchronous data-parallel approach.
+
+2
+
+The model-parallel approach was actively used in the days when GPU memory was small. At present,
+the model parallel is rarely used in its basic form as the data parallel approach is being used. In the
+meantime, some issues with the data paralleled approach have surfaced while research on a new form
+of the model parallel is underway. The model parallel and the data parallel can be used at the same
+time as well.
+
+2.3 Synchronous vs. Asynchronous
+
+In this subsection, we will focus on the data-parallel approach which is commonly used now. The
+data-parallel approach is roughly divided into synchronous and asynchronous types, and we explain
+about the former ﬁrst. Each iteration in synchronous, data-parallel deep learning is composed of the
+following four steps: forward computation, backward computation, Allreduce communication, and
+optimization. Figure 2 illustrates the four steps.
+
+This has an additional step Allreduce to the regular iteration described earlier. In this step, workers
+communicate with each other to ﬁnd the average of gradients calculated by individual workers and
+distribute the average. All workers update the model using the gradient they have obtained through
+the communication. If we deﬁne the batch size processed by each worker as b and the number of
+workers as n, the gradient obtained through communication is equivalent to the gradient in the batch
+size bn. This means gradients are calculated using more training data in one iteration, improving the
+gradient quality and accelerating the learning process.
+
+Asynchronous type, on the other hand, uses special workers called a parameter server. The parameter
+server controls model parameters. Normal workers send gradients to the parameter server once the
+gradients are obtained by forward and backward calculations. The parameter server receives and uses
+the gradients to update the model. Workers receive new model parameters and calculate gradients
+again.
+
+3 Design and Implementation
+
+3.1 Parallelization Approaches
+
+We discuss the design decision of ChainerMN in this section. As we discussed in section 2, there are
+two major parallelization approaches and two synchronization approaches. We adopt a synchronous
+and data parallel approach for ChainerMN.
+
+We use the data parallel approach because existing deep learning applications would easily be
+extensible and faster training process through data parallel was highly expected. Data parallelization
+is tantamount to increasing a minibatch size in a typical deep learning application and has its
+advantage of being applicable without having to make signiﬁcant changes in algorithms and codes of
+existing programs.
+
+Whether the synchronous or asynchronous type is desirable is also a nontrivial question since different
+kinds of strategies have been taken in each implementation and results would vary depending on
+tasks or settings. The paper [8] shows experimental results that the asynchronous type is less stable
+regarding convergence whereas it is faster to converge in the synchronization. Also, we can beneﬁt
+from the optimized and proven group communication mechanism of MPI, the de-facto standard
+communication library interface, while in the asynchronous model the implementation scheme uses a
+parameter server in general.
+
+3.2 Chainer
+
+Chainer is a framework with its Deﬁne-by-Run feature. Deﬁne-by-Run is a model that takes advantage
+of the ﬂexibility of script languages where learning models and computational ﬂows are deﬁned at
+runtime. A Deﬁne-and-Run approach, on the other hand, is a model that pre-deﬁnes a structure of
+networks, after which data is input and calculation are done. While potentially easier to optimize
+performance, this approach is said to lack ﬂexibility.
+
+Chainer provides programming models that enable to deﬁne complex neural networks ﬂexibly or
+make modiﬁcations during runtime thanks to its Deﬁne-by-Run approach. This lets researchers and
+engineers work on new models or complex models through trial and error with ease and therefore
+
+3
+
+Listing 1: Example of ChainerMN
+
+model = L.Classiﬁer(MLP(args.unit, 10))
+
+# Create a communicator
+comm = chainermn.create_communicator()
+
+# Distribute a dataset
+train = chainermn.scatter_dataset(train, comm, shufﬂe=True)
+
+# Create and use multi_node_optimizer
+optimizer = chainermn.create_multi_node_optimizer(
+
+chainer.optimizers.Adam(), comm)
+optimizer.setup(model)
+
+# Use Chainer’s Trainer class to simplify
+# a forward−backward−optimization loop
+train_iter = chainer.iterators.SerialIterator(train, args.batchsize)
+updater = training.StandardUpdater(train_iter, optimizer, device=device)
+trainer = training.Trainer(updater, (args.epoch, ’epoch’), out=args.out)
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+
+is suitable for research and development of machine learning. Upon development, we carefully
+designed the ChainerMN API with the objective of making it easily portable from existing Chainer
+programs without putting limitations on the ﬂexibility of Chainer.
+
+3.3 API Design
+
+We describe the design of library interface of ChainerMN by describing minimal steps to extend an
+existing deep learning program written in Chainer to support distributed execution using ChainerMN.
+
+Listing 1 shows a simpliﬁed ChainerMN program of a model to solve MNIST classiﬁcation prob-
+lem [7]. For a complete program code, refer to ChainerMN’s code repository [1]. There are three
+major steps: (1) add a communicator component, (2) create and use mutli_node_optimizer, and
+(3) add code to distribute a dataset.
+
+A process of modifying an application starts from adding a communication component called
+Communicator to existing Chainer programs. A communicator is a central component of ChainerMN,
+and it is designed after MPI’s communicator concept and controls all inter-process communication in
+ChainerMN program.
+
+mutli_node_optimizer is the most important component in ChainerMN. It wraps Chainer’s normal
+optimizer and exchanges the gradient across processes using Allreduce operation before optimizing
+the model. multi_node_optimizer behaves identically as the original optimizer except for the
+communication, so the extension is seamlessly integrated into Chainer’s existing Trainer ecosystem.
+
+On top of this, basic porting can be done just by adding the scattering step which distributes data
+for data parallel computations. One needs to split the dataset into equal chunks and distribute them
+over the processes. This operation is also known as Scatter in MPI. Other parts, i.e.Iterator,
+Updater, and Evaluator do not need to be changed in basic use cases. Because of this API design,
+it allows various Chainer programs to be ported with minimal modiﬁcations while making the most
+of the advantage given by Deﬁne-by-Run.
+
+3.4
+
+Implementation and Performance Optimization
+
+The communication pattern of synchronous and data parallel deep learning applications is relatively
+simple from the point of view of HPC applications. Roughly speaking, the only major communication
+is Allreduce, a process to exchange gradients which are training and evaluation results. Auxiliary
+parts include Scatter, which arranges necessary data over distributed processes before starting
+training.
+
+As mentioned above, one of the design goals of ChainerMN is to achieve high performance by
+leveraging existing and proven HPC technologies. Allreduce is a component that especially
+requires speed because it is called in every training iteration and needs to process a large amount
+of data. We attempt to minimize the communication time by using NCCL [2] library developed by
+
+4
+
+NVIDIA. NCCL is a highly-optimized communication library which provides a faster Allreduce
+operation between NVIDIA GPUs within and across nodes.
+
+4 Evaluation
+
+4.1 Experimental Environment and Settings
+
+We conducted our experiments on our in-house cluster. It consists of 32 computing nodes. Each node
+is equipped with two Intel Xeon CPUs (E5-2623 v3, 3.00 GHz, four cores for each), 128 GB of main
+memory, and four GeForce GTX TITAN X GPUs. Thus, we used 128 GPUs in total. The nodes
+are interconnected by Mellanox Inﬁniband FDR 4X. We used CUDA version 8, Python version 3.5,
+Mvapich2 2.2 and Chainer version 1.2 running on Ubuntu 14.04 LTS.
+
+To demonstrate the performance and scalability of ChainerMN, we use ResNet-50 [6] model and
+ImageNet [4] dataset. Since the dataset is large and the majority part of access is read, we copied all
+the dataset to all computing nodes’ local SSD in advance.
+
+We used 32 as the batch size per GPU, which means 4096 for 128 GPUs. One of the factors making
+distributed deep learning difﬁcult is that improving throughput does not necessarily mean better
+learning efﬁciency. We note that the batch size 4096 is a healthy setting where the learning efﬁciency
+and the resulting model accuracy are maintained, as shown by Goyal et al. [5]
+
+4.2 Scalability Result
+
+Figure 3 shows the scalability of ChainerMN up to 128 GPUs. In this ﬁgure, ChainerMN scales
+well up to 128 GPUs. Table 1 shows the relative runtimes over one-GPU execution. In this table,
+ChainerMN on 128 GPUs achieves 79 % and 90 % parallelization efﬁciency of the one-GPU and one-
+node (four GPUs) executions, respectively. It means that the parallelization efﬁciency of ChainerMN
+on 128 GPUs is as high as the state-of-the-art [5].
+
+Table 1: Relative speed-up and parallelization efﬁciency
+
+#GPUs
+
+Speed-up
+
+Par. Eff.
+
+1
+2
+4
+8
+16
+32
+64
+128
+
+1.00
+1.85
+3.53
+7.09
+13.42
+26.63
+50.52
+101.32
+
+100.00%
+92.66%
+88.34%
+88.67%
+83.88%
+83.22%
+78.94%
+79.16%
+
+Figure 3: Scalability of ChainerMN
+
+5 Conclusions
+
+We have described the design and implementation of ChainerMN and demonstrated its scalability.
+Chainer and ChainerMN are designed to have both high ﬂexibility and scalability with its primary
+object of accelerating research and development in deep learning. We will continue making improve-
+ments by tackling challenges such as model parallel, overlapping communication and computation,
+asynchronous computation among workers, optimized communication by compressed gradients, and
+fault tolerance.
+
+Acknowledgements
+
+The authors thank K. Ueno, T. Mitsuishi, and N. Yoshifuji for help on the development of ChainerMN. We
+also thank T. Sudo, Y. Doi, G. Watanabe, R. Okuta, and M. Sakata for help for experiments. We are grateful to
+T. Miyato and S. Tokui for fruitful discussions as well.
+
+5
+
+References
+
+[1] ChainerMN. https://github.com/chainer/chainermn, 2017.
+
+[2] NVIDIA Collective Communications Library (NCCL). https://developer.nvidia.com/nccl, 2017.
+
+[3] TSUBAME e-Science Journal. http://www.gsic.titech.ac.jp/TSUBAME_ESJ, 11 2017.
+
+[4] J. Deng, W. Dong, R. Socher, L.-J. Li, K. Li, and L. Fei-Fei. ImageNet: A Large-Scale Hierarchical Image
+
+Database. In CVPR09, 2009.
+
+[5] P. Goyal, P. Dollár, R. B. Girshick, P. Noordhuis, L. Wesolowski, A. Kyrola, A. Tulloch, Y. Jia, and K. He.
+
+Accurate, large minibatch SGD: training imagenet in 1 hour. CoRR, abs/1706.02677, 2017.
+
+[6] K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learning for image recognition. In CVPR, pages
+
+770–778, 2016.
+
+[7] Y. Lecun and C. Cortes. The MNIST database of handwritten digits.
+
+[8] X. Pan, J. Chen, R. Monga, S. Bengio, and R. Jozefowicz. Revisiting distributed synchronous sgd. ICLR
+
+Workshop Track, 2016, 02 2017.
+
+learning. In LearningSys, 2015.
+
+[9] S. Tokui, K. Oono, S. Hido, and J. Clayton. Chainer: a next-generation open source framework for deep
+
+6
+
+7
+1
+0
+2
+ 
+t
+c
+O
+ 
+1
+3
+ 
+ 
+]
+
+C
+D
+.
+s
+c
+[
+ 
+ 
+1
+v
+1
+5
+3
+1
+1
+.
+0
+1
+7
+1
+:
+v
+i
+X
+r
+a
+
+ChainerMN: Scalable Distributed Deep Learning
+Framework ∗
+
+Takuya Akiba
+Preferred Networks, Inc.
+akiba@preferred.jp
+
+Keisuke Fukuda
+Preferred Networks, Inc.
+kfukuda@preferred.jp
+
+Shuji Suzuki
+Preferred Networks, Inc.
+ssuzuki@preferred.jp
+
+Abstract
+
+One of the keys for deep learning to have made a breakthrough in various ﬁelds
+was to utilize high computing powers centering around GPUs. Enabling the use of
+further computing abilities by distributed processing is essential not only to make
+the deep learning bigger and faster but also to tackle unsolved challenges. We
+present the design, implementation, and evaluation of ChainerMN, the distributed
+deep learning framework we have developed. We demonstrate that ChainerMN can
+scale the learning process of the ResNet-50 model to the ImageNet dataset up to
+128 GPUs with the parallel efﬁciency of 90%.
+
+1
+
+Introduction
+
+It has turned out that deep learning achieves far better predicting performance than existing methods
+in image recognition, natural language processing, speech recognition and many other ﬁelds where
+machine learning is being applied. The basic technology of neural networks used in deep learning
+has a long history dating back to the 1950’s. As we entered the 2010’s, the neural network technology
+with its long history has made the breakthrough as “deep learning” as described above because it
+is thought to have successfully combined all the advances of algorithms, large-scale data, and high
+computing powers. Even today, it would be difﬁcult to achieve an outstanding predicting performance
+by deep learning if one of the three lacks. In this article, we focus on one of the three pillars supporting
+deep learning: computing performance.
+
+It has become a standard approach to use highly efﬁcient GPUs for training in many deep learning
+tasks. Nevertheless, the training process is still time-consuming even with the latest GPUs because
+models have also grown massive and complex. For example, training Resnet-50 [6] for the ImageNet
+dataset [4] typically takes as long as one week with a single GPU. Taking a long time on training
+means you have a limited number of times to do trial and error for models and parameters needed to
+achieve high accuracy, making it difﬁcult to produce a good predicting performance. It also means
+there is a limit to the usable data size. Thus, using multiple GPUs in parallel is crucial in accelerating
+calculation.
+
+We introduce ChainerMN, an add-on package to Chainer [9], a programming framework for deep
+learning applications written in Python, to provide a distributed learning capability. In the course of
+developing ChainerMN, we took the following features into consideration:
+
+• Flexibility: Chainer is a ﬂexible framework based on its Deﬁne-by-Run approach and
+ChainerMN is designed not to ruin the ﬂexibility aspect. This allows for easy distributed
+learning even in complex use cases such as dynamic neural networks, generative adversarial
+networks, and reinforced deep learning.
+
+∗This paper is based on our invited article in TSUBAME e-Science Journal (ESJ)[3]. ESJ is a non-academic
+
+and non-peer-reviewed newsletter from Global Scientiﬁc Information Center, Tokyo Institute of Technology.
+
+• High performance: We selected technologies assuming practical workloads in deep learn-
+ing from the very beginning of designing ChainerMN as well as exercised ingenuity with
+respect to implementation so that hardware performance is fully utilized.
+
+The rest of the paper is organized as follows. First, we explain the basic elements of distributed deep
+learning, followed by the design and implementation of ChainerMN. Finally, we will present the
+results of our evaluation experiment and related work.
+
+2 Preliminaries
+
+2.1 Basics of Deep Learning
+
+We can express the prediction by neural networks against input data x as f (x; θ) where θ is a
+parameter for neural networks. Learning in neural networks using backpropagation and stochastic
+gradient descent or its variations is an iterative algorithm. Each iteration is composed of the following
+three steps: forward computation, backward computation, and optimization.
+
+In the forward-computation step, ﬁrst, the prediction f (x; θ) is calculated against an input data point
+x. Then, the loss is calculated to represent the difference from the correct output for. Here, the cross
+entropy and other indicators may be used.
+In the backward-computation step, g = δE
+δθ , the gradient of the parameter θ in the direction of
+decreasing the loss E, is calculated. Gradients for all parameters are calculated using the chain rule
+while going backward from the output layer to the input layer.
+
+In the optimize step, the parameter θ is updated using the gradient g . The simplest rule is to update θ
+to θ − µg where µ is a parameter called a learning rate.
+
+In practice, instead of using a single training example in an iteration, the forward and backward
+calculations are performed simultaneously against multiple training examples and optimization is
+executed using the average of gradients against all the examples. The input examples used in an
+iteration is called a minibatch while its size is called a batch size. A typical batch size ranges from
+several tens to several hundred.
+
+Please note that the above description is based on a standard supervised learning. Nonetheless, in
+case that neural networks are applied to other algorithms such as unsupervised learning and semi-
+supervised learning, the parallelizing method we will explain below is applicable and ChainerMN is
+also usable.
+
+2.2 Data Parallel and Model Parallel approaches
+
+There are two major approaches to parallelize training by distributed processing: data parallel and
+model parallel. In the data-parallel approach, each worker has a model replica and calculate gradients
+of different minibatches. Workers use these gradients to update the model collaboratively. In the
+model parallel approach, each worker has a portion of the model and work in cooperation with others
+to do the calculation for one minibatch. Figure 1 shows the difference between the two approaches.
+
+(a) Data parallelism.
+
+(b) Model parallelism.
+
+Figure 1: Data parallel and model parallel ap-
+proaches.
+
+Figure 2: The four steps that constitute an iteration
+of synchronous data-parallel approach.
+
+2
+
+The model-parallel approach was actively used in the days when GPU memory was small. At present,
+the model parallel is rarely used in its basic form as the data parallel approach is being used. In the
+meantime, some issues with the data paralleled approach have surfaced while research on a new form
+of the model parallel is underway. The model parallel and the data parallel can be used at the same
+time as well.
+
+2.3 Synchronous vs. Asynchronous
+
+In this subsection, we will focus on the data-parallel approach which is commonly used now. The
+data-parallel approach is roughly divided into synchronous and asynchronous types, and we explain
+about the former ﬁrst. Each iteration in synchronous, data-parallel deep learning is composed of the
+following four steps: forward computation, backward computation, Allreduce communication, and
+optimization. Figure 2 illustrates the four steps.
+
+This has an additional step Allreduce to the regular iteration described earlier. In this step, workers
+communicate with each other to ﬁnd the average of gradients calculated by individual workers and
+distribute the average. All workers update the model using the gradient they have obtained through
+the communication. If we deﬁne the batch size processed by each worker as b and the number of
+workers as n, the gradient obtained through communication is equivalent to the gradient in the batch
+size bn. This means gradients are calculated using more training data in one iteration, improving the
+gradient quality and accelerating the learning process.
+
+Asynchronous type, on the other hand, uses special workers called a parameter server. The parameter
+server controls model parameters. Normal workers send gradients to the parameter server once the
+gradients are obtained by forward and backward calculations. The parameter server receives and uses
+the gradients to update the model. Workers receive new model parameters and calculate gradients
+again.
+
+3 Design and Implementation
+
+3.1 Parallelization Approaches
+
+We discuss the design decision of ChainerMN in this section. As we discussed in section 2, there are
+two major parallelization approaches and two synchronization approaches. We adopt a synchronous
+and data parallel approach for ChainerMN.
+
+We use the data parallel approach because existing deep learning applications would easily be
+extensible and faster training process through data parallel was highly expected. Data parallelization
+is tantamount to increasing a minibatch size in a typical deep learning application and has its
+advantage of being applicable without having to make signiﬁcant changes in algorithms and codes of
+existing programs.
+
+Whether the synchronous or asynchronous type is desirable is also a nontrivial question since different
+kinds of strategies have been taken in each implementation and results would vary depending on
+tasks or settings. The paper [8] shows experimental results that the asynchronous type is less stable
+regarding convergence whereas it is faster to converge in the synchronization. Also, we can beneﬁt
+from the optimized and proven group communication mechanism of MPI, the de-facto standard
+communication library interface, while in the asynchronous model the implementation scheme uses a
+parameter server in general.
+
+3.2 Chainer
+
+Chainer is a framework with its Deﬁne-by-Run feature. Deﬁne-by-Run is a model that takes advantage
+of the ﬂexibility of script languages where learning models and computational ﬂows are deﬁned at
+runtime. A Deﬁne-and-Run approach, on the other hand, is a model that pre-deﬁnes a structure of
+networks, after which data is input and calculation are done. While potentially easier to optimize
+performance, this approach is said to lack ﬂexibility.
+
+Chainer provides programming models that enable to deﬁne complex neural networks ﬂexibly or
+make modiﬁcations during runtime thanks to its Deﬁne-by-Run approach. This lets researchers and
+engineers work on new models or complex models through trial and error with ease and therefore
+
+3
+
+Listing 1: Example of ChainerMN
+
+model = L.Classiﬁer(MLP(args.unit, 10))
+
+# Create a communicator
+comm = chainermn.create_communicator()
+
+# Distribute a dataset
+train = chainermn.scatter_dataset(train, comm, shufﬂe=True)
+
+# Create and use multi_node_optimizer
+optimizer = chainermn.create_multi_node_optimizer(
+
+chainer.optimizers.Adam(), comm)
+optimizer.setup(model)
+
+# Use Chainer’s Trainer class to simplify
+# a forward−backward−optimization loop
+train_iter = chainer.iterators.SerialIterator(train, args.batchsize)
+updater = training.StandardUpdater(train_iter, optimizer, device=device)
+trainer = training.Trainer(updater, (args.epoch, ’epoch’), out=args.out)
+
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+
+is suitable for research and development of machine learning. Upon development, we carefully
+designed the ChainerMN API with the objective of making it easily portable from existing Chainer
+programs without putting limitations on the ﬂexibility of Chainer.
+
+3.3 API Design
+
+We describe the design of library interface of ChainerMN by describing minimal steps to extend an
+existing deep learning program written in Chainer to support distributed execution using ChainerMN.
+
+Listing 1 shows a simpliﬁed ChainerMN program of a model to solve MNIST classiﬁcation prob-
+lem [7]. For a complete program code, refer to ChainerMN’s code repository [1]. There are three
+major steps: (1) add a communicator component, (2) create and use mutli_node_optimizer, and
+(3) add code to distribute a dataset.
+
+A process of modifying an application starts from adding a communication component called
+Communicator to existing Chainer programs. A communicator is a central component of ChainerMN,
+and it is designed after MPI’s communicator concept and controls all inter-process communication in
+ChainerMN program.
+
+mutli_node_optimizer is the most important component in ChainerMN. It wraps Chainer’s normal
+optimizer and exchanges the gradient across processes using Allreduce operation before optimizing
+the model. multi_node_optimizer behaves identically as the original optimizer except for the
+communication, so the extension is seamlessly integrated into Chainer’s existing Trainer ecosystem.
+
+On top of this, basic porting can be done just by adding the scattering step which distributes data
+for data parallel computations. One needs to split the dataset into equal chunks and distribute them
+over the processes. This operation is also known as Scatter in MPI. Other parts, i.e.Iterator,
+Updater, and Evaluator do not need to be changed in basic use cases. Because of this API design,
+it allows various Chainer programs to be ported with minimal modiﬁcations while making the most
+of the advantage given by Deﬁne-by-Run.
+
+3.4
+
+Implementation and Performance Optimization
+
+The communication pattern of synchronous and data parallel deep learning applications is relatively
+simple from the point of view of HPC applications. Roughly speaking, the only major communication
+is Allreduce, a process to exchange gradients which are training and evaluation results. Auxiliary
+parts include Scatter, which arranges necessary data over distributed processes before starting
+training.
+
+As mentioned above, one of the design goals of ChainerMN is to achieve high performance by
+leveraging existing and proven HPC technologies. Allreduce is a component that especially
+requires speed because it is called in every training iteration and needs to process a large amount
+of data. We attempt to minimize the communication time by using NCCL [2] library developed by
+
+4
+
+NVIDIA. NCCL is a highly-optimized communication library which provides a faster Allreduce
+operation between NVIDIA GPUs within and across nodes.
+
+4 Evaluation
+
+4.1 Experimental Environment and Settings
+
+We conducted our experiments on our in-house cluster. It consists of 32 computing nodes. Each node
+is equipped with two Intel Xeon CPUs (E5-2623 v3, 3.00 GHz, four cores for each), 128 GB of main
+memory, and four GeForce GTX TITAN X GPUs. Thus, we used 128 GPUs in total. The nodes
+are interconnected by Mellanox Inﬁniband FDR 4X. We used CUDA version 8, Python version 3.5,
+Mvapich2 2.2 and Chainer version 1.2 running on Ubuntu 14.04 LTS.
+
+To demonstrate the performance and scalability of ChainerMN, we use ResNet-50 [6] model and
+ImageNet [4] dataset. Since the dataset is large and the majority part of access is read, we copied all
+the dataset to all computing nodes’ local SSD in advance.
+
+We used 32 as the batch size per GPU, which means 4096 for 128 GPUs. One of the factors making
+distributed deep learning difﬁcult is that improving throughput does not necessarily mean better
+learning efﬁciency. We note that the batch size 4096 is a healthy setting where the learning efﬁciency
+and the resulting model accuracy are maintained, as shown by Goyal et al. [5]
+
+4.2 Scalability Result
+
+Figure 3 shows the scalability of ChainerMN up to 128 GPUs. In this ﬁgure, ChainerMN scales
+well up to 128 GPUs. Table 1 shows the relative runtimes over one-GPU execution. In this table,
+ChainerMN on 128 GPUs achieves 79 % and 90 % parallelization efﬁciency of the one-GPU and one-
+node (four GPUs) executions, respectively. It means that the parallelization efﬁciency of ChainerMN
+on 128 GPUs is as high as the state-of-the-art [5].
+
+Table 1: Relative speed-up and parallelization efﬁciency
+
+#GPUs
+
+Speed-up
+
+Par. Eff.
+
+1
+2
+4
+8
+16
+32
+64
+128
+
+1.00
+1.85
+3.53
+7.09
+13.42
+26.63
+50.52
+101.32
+
+100.00%
+92.66%
+88.34%
+88.67%
+83.88%
+83.22%
+78.94%
+79.16%
+
+Figure 3: Scalability of ChainerMN
+
+5 Conclusions
+
+We have described the design and implementation of ChainerMN and demonstrated its scalability.
+Chainer and ChainerMN are designed to have both high ﬂexibility and scalability with its primary
+object of accelerating research and development in deep learning. We will continue making improve-
+ments by tackling challenges such as model parallel, overlapping communication and computation,
+asynchronous computation among workers, optimized communication by compressed gradients, and
+fault tolerance.
+
+Acknowledgements
+
+The authors thank K. Ueno, T. Mitsuishi, and N. Yoshifuji for help on the development of ChainerMN. We
+also thank T. Sudo, Y. Doi, G. Watanabe, R. Okuta, and M. Sakata for help for experiments. We are grateful to
+T. Miyato and S. Tokui for fruitful discussions as well.
+
+5
+
+References
+
+[1] ChainerMN. https://github.com/chainer/chainermn, 2017.
+
+[2] NVIDIA Collective Communications Library (NCCL). https://developer.nvidia.com/nccl, 2017.
+
+[3] TSUBAME e-Science Journal. http://www.gsic.titech.ac.jp/TSUBAME_ESJ, 11 2017.
+
+[4] J. Deng, W. Dong, R. Socher, L.-J. Li, K. Li, and L. Fei-Fei. ImageNet: A Large-Scale Hierarchical Image
+
+Database. In CVPR09, 2009.
+
+[5] P. Goyal, P. Dollár, R. B. Girshick, P. Noordhuis, L. Wesolowski, A. Kyrola, A. Tulloch, Y. Jia, and K. He.
+
+Accurate, large minibatch SGD: training imagenet in 1 hour. CoRR, abs/1706.02677, 2017.
+
+[6] K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learning for image recognition. In CVPR, pages
+
+770–778, 2016.
+
+[7] Y. Lecun and C. Cortes. The MNIST database of handwritten digits.
+
+[8] X. Pan, J. Chen, R. Monga, S. Bengio, and R. Jozefowicz. Revisiting distributed synchronous sgd. ICLR
+
+Workshop Track, 2016, 02 2017.
+
+learning. In LearningSys, 2015.
+
+[9] S. Tokui, K. Oono, S. Hido, and J. Clayton. Chainer: a next-generation open source framework for deep
+
+6
+

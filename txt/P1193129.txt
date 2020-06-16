@@ -1,0 +1,2542 @@
+6
+1
+0
+2
+ 
+p
+e
+S
+ 
+2
+2
+ 
+ 
+]
+
+V
+C
+.
+s
+c
+[
+ 
+ 
+3
+v
+6
+5
+8
+6
+0
+.
+1
+1
+5
+1
+:
+v
+i
+X
+r
+a
+
+Published as a conference paper at ICLR 2016
+
+DATA-DEPENDENT INITIALIZATIONS OF
+CONVOLUTIONAL NEURAL NETWORKS
+
+Philipp Kr¨ahenb ¨uhl1, Carl Doersch1,2, Jeff Donahue1, Trevor Darrell1
+1Department of Electrical Engineering and Computer Science, UC Berkeley
+2Machine Learning Department, Carnegie Mellon
+{philkr,jdonahue,trevor}@eecs.berkeley.edu; cdoersch@cs.cmu.edu
+
+ABSTRACT
+
+Convolutional Neural Networks spread through computer vision like a wildﬁre,
+impacting almost all visual tasks imaginable. Despite this, few researchers dare
+to train their models from scratch. Most work builds on one of a handful of Im-
+ageNet pre-trained models, and ﬁne-tunes or adapts these for speciﬁc tasks. This
+is in large part due to the difﬁculty of properly initializing these networks from
+scratch. A small miscalibration of the initial weights leads to vanishing or explod-
+ing gradients, as well as poor convergence properties. In this work we present
+a fast and simple data-dependent initialization procedure, that sets the weights
+of a network such that all units in the network train at roughly the same rate,
+avoiding vanishing or exploding gradients. Our initialization matches the current
+state-of-the-art unsupervised or self-supervised pre-training methods on standard
+computer vision tasks, such as image classiﬁcation and object detection, while
+reducing the pre-training time by three orders of magnitude. When combined
+with pre-training methods, our initialization signiﬁcantly outperforms prior work,
+narrowing the gap between supervised and unsupervised pre-training.
+
+1
+
+INTRODUCTION
+
+In recent years, Convolutional Neural Networks (CNNs) have improved performance across a wide
+variety of computer vision tasks (Szegedy et al., 2015; Simonyan & Zisserman, 2015; Girshick,
+2015). Much of this improvement stems from the ability of CNNs to use large datasets better than
+previous methods. In fact, good performance seems to require large datasets: the best-performing
+methods usually begin by “pre-training” CNNs to solve the million-image ImageNet classiﬁcation
+challenge (Russakovsky et al., 2015). This “pre-trained” representation is then “ﬁne-tuned” on a
+smaller dataset where the target labels may be more expensive to obtain. These ﬁne-tuning datasets
+generally do not fully constrain the CNN learning: different initializations can be trained until they
+achieve equally high training-set performance, but they will often perform very differently at test
+time. For example, initialization via ImageNet pre-training is known to produce a better-performing
+network at test time across many problems. However, little else is known about which other factors
+affect a CNN’s generalization performance when trained on small datasets. There is a pressing need
+to understand these factors, ﬁrst because we can potentially exploit them to improve performance
+on tasks where few labels are available. Second they may already be confounding our attempts to
+evaluate pre-training methods. A pre-trained network which extracts useful semantic information but
+cannot be ﬁne-tuned for spurious reasons can be easily overlooked. Hence, this work aims to explore
+how to better ﬁne-tune CNNs. We show that simple statistical properties of the network, which can
+be easily measured using training data, can have a signiﬁcant impact on test time performance.
+Surprisingly, we show that controlling for these statistical properties leads to a fast and general way
+to improve performance when training on relatively little data.
+
+Empirical evaluations have found that when transferring deep features across tasks, freezing weights
+of some layers during ﬁne-tuning generally harms performance (Yosinski et al., 2014). These results
+suggest that, given a small dataset, it is better to adjust all of the layers a little rather than to adjust
+just a few layers a large amount, and so perhaps the ideal setting will adjust all of the layers the
+
+Code available: https://github.com/philkr/magic_init
+
+1
+
+Published as a conference paper at ICLR 2016
+
+same amount. While these studies did indeed set the learning rate to be the same for all layers,
+somewhat counterintuitively this does not actually enforce that all layers learn at the same rate.
+To see this, say we have a network where there are two convolution layers separated by a ReLU.
+Multiplying the weights and bias term of the ﬁrst layer by a scalar α > 0, and then dividing the
+weights (but not bias) of the next (higher) layer by the same constant α will result in a network
+which computes exactly the same function. However, note that the gradients of the two layers are
+not the same: they will be divided by α for the ﬁrst layer, and multiplied by α for the second. Worse,
+an update of a given magnitude will have a smaller effect on the lower layer than the higher layer,
+simply because the lower layer’s norm is now larger. Using this kind of reparameterization, it is easy
+to make the gradients for certain layers vanish during ﬁne-tuning, or even to make them explode,
+resulting in a network that is impossible to ﬁne-tune despite representing exactly the same function.
+Conversely, this sort of re-parameterization gives us a tool we can use to calibrate layer-by-layer
+learning to improve ﬁne-tuning performance, provided we have an appropriate principle for making
+such adjustments.
+
+Where can we look to ﬁnd such a principle? A number of works have already suggested that statisti-
+cal properties of network activations can impact network performance. Many focus on initializations
+which control the variance of network activations. Krizhevsky et al. (2012) carefully designed their
+architecture to ensure gradients neither vanish nor explode. However, this is no longer possible for
+deeper architectures such as VGG (Simonyan & Zisserman, 2015) or GoogLeNet (Szegedy et al.,
+2015). Glorot & Bengio (2010); Saxe et al. (2013); Sussillo & Abbot (2015); He et al. (2015);
+Bradley (2010) show that properly scaled random initialization can deal with the vanishing gradi-
+ent problem, if the architectures are limited to linear transformations, followed by a very speciﬁc
+non-linearities. Saxe et al. (2013) focus on linear networks, Glorot & Bengio (2010) derive an initial-
+ization for networks with tanh non-linearities, while He et al. (2015) focus on the more commonly
+used ReLUs. However, none of the above papers consider more general network including pooling,
+dropout, LRN layers (Krizhevsky et al., 2012), or DAG-structured networks (Szegedy et al., 2015).
+We argue that initializing the network with real training data improves these approximations and
+achieves a better performance. Early approaches to data-driven initializations showed that whiten-
+ing the activations at all layers can mitigate the vanishing gradient problem (LeCun et al., 1998),
+but it does not ensure all layers train at an equal rate. More recently, batch normalization (Ioffe
+& Szegedy, 2015) enforces that the output of each convolution and fully-connected layer are zero
+mean with unit variance for every batch. In practice, however, this means that the network’s behavior
+on a single example depends on the other members of the batch, and removing this dependency at
+test-time relies on approximating batch statistics. The fact that these methods show improved con-
+vergence speed at training time suggests we are justiﬁed in investigating the statistics of activations.
+However, the main goal of our work differs in two important respects. First, these previous works
+pay relatively little attention to the behavior on smaller training sets, instead focusing on training
+speed. Second, while all above initializations require a random initialization, our approach aims to
+handle structured initialization, and even improve pre-trained networks.
+
+2 PRELIMINARIES
+
+We are interested in parameterizing (and re-parameterizing) CNNs, where the output is a highly
+non-convex function of both the inputs and the parameters. Hence, we begin with some notation
+which will let us describe how a CNN’s behavior will change as we alter the parameters. We focus
+on feed-forward networks of the form
+
+zk = fk(zk−1; θk),
+
+where zk is a vector of hidden activations of the network, and fk is a transformation with parameters
+θk. fk may be a linear transformation fk(z(cid:48)
+k; θk) = Wkzk−1 + bk, or it may be a non-linearity
+fk+1(zk; θk) = σk+1(z(cid:48)
+k) such as a rectiﬁed linear unit (ReLU) σ(x) = max(x, 0). Other common
+non-linearities include local response normalization or pooling (Krizhevsky et al., 2012; Szegedy
+et al., 2015; Simonyan & Zisserman, 2015). However, as is common in neural networks, we assume
+these nonlinearities are not parametrized and kept ﬁxed during training. Hence, θk contains only
+(Wk, bk) for each afﬁne layer k.
+To deal with spatially-structured inputs like images, most hidden activations zk ∈ RCk×Ak×Bk are
+arranged in a two dimensional grid of size Ak × Bk (for image width Ak and height Bk) with Ck
+
+2
+
+Published as a conference paper at ICLR 2016
+
+channels per grid cell. We let z0 denote the input image. The ﬁnal output, however, is generally
+not spatial, and so later layers are reduced to the form zN = RCN ×1×1, where CN is the number
+of output units. The last of these outputs is converted into a loss with respect to some label; for
+classiﬁcation, the approach is to convert the ﬁnal output into a probability distribution over labels via
+a Softmax function. Learning aims to minimize the expected loss over the training dataset. Despite
+the non-convexity of this learning problem, backpropagation and Stochastic Gradient Descent often
+ﬁnds good local minima if initialized properly (LeCun et al., 1998).
+
+Given an arbitrary neural network, we next aim for a good parameterization. A good parameteriza-
+tion should be able to learn all weights of a network equally well. We measure how well a certain
+weight in the network learns by how much the gradient of a loss function would change it. A large
+change means it learns more quickly, while a small change implies it learns more slowly. We initial-
+ize our network such that all weights in all layers learn equally fast.
+
+3 DATA-DEPENDENT INITIALIZATION
+
+Given an N -layer neural network with loss function (cid:96)(zN ), we ﬁrst deﬁne C 2
+norm of the gradient with respect to weights Wk(i, j) in layer k:
+
+i,j,k to be the expected
+
+C 2
+
+k,i,j = Ez0∼D
+
+(cid:34)(cid:18)
+
+∂
+∂Wk(i, j)
+
+(cid:19)2(cid:35)
+
+(cid:20)(cid:18)
+
+(cid:96)(zN )
+
+= Ez0∼D
+
+zk−1(j)
+
+(cid:19)2(cid:21)
+,
+
+(cid:96)(zN )
+
+(1)
+
+∂
+∂zk(i)
+(cid:124)
+(cid:123)(cid:122)
+yk(i)
+
+(cid:125)
+
+where D is a set of input images and yk is the backpropagated error. Similar reasoning can be applied
+to the biases bk, but where the activations are replaced by the constant 1. To not rely on any labels
+during initialization, we use a random linear loss function (cid:96)(zN ) = η(cid:62)zN , where η ∼ N (0, I) is
+sampled from a unit Gaussian distribution. In other words, we initialize the top gradient to a random
+Gaussian noise vector η during backpropagation. We sample a different random loss η for each
+image.
+
+In order for all parameters to learn at the same “rate,” we require the change in eq. 1 to be propor-
+tional to the magnitude of the weights (cid:107)Wk(cid:107)2
+
+2 of the current layer; i.e.,
+
+˜C 2
+
+k,i,j =
+
+C 2
+k,i,j
+(cid:107)Wk(cid:107)2
+2
+
+(2)
+
+is constant for all weights. However this is hard to enforce, because for non-linear networks the
+backpropagated error yk is a function of the activations zk−1. A change in weights that affects the
+activations zk−1 will indirectly change yk. This effect is often non-linear and hard to control or
+predict.
+
+We thus simplify Equation (2): rather than enforce that the individual weights all learn at the same
+rate, we enforce that the columns of weight matrix Wk do so, i.e.:
+
+˜C 2
+
+k,j =
+
+˜C 2
+
+k,i,j =
+
+1
+N
+
+(cid:88)
+
+i
+
+1
+N (cid:107)Wk(cid:107)2
+2
+
+Ez0∼D
+
+(cid:2)zk−1(j)2(cid:107)yk(cid:107)2
+
+(cid:3) ,
+
+2
+
+(3)
+
+should be approximately constant, where N is the number of rows of the weight matrix. As we will
+show in Section 4.1, all weights tend to train at roughly the same rate even though the objective
+does not enforce this. Looking at Equation (3), the relative change of a column of the weight matrix
+is a function of 1) the magnitude of a single activation of the bottom layer, and 2) the norm of the
+backpropagated gradient. The value of a single input to a layer will generally have a relatively small
+impact on the norm of the gradient to the entire layer. Hence, we assume zk−1(j) and (cid:107)yk(cid:107) are
+independent, leading to the following simpliﬁcation of the objective:
+(cid:2)(cid:107)yk(cid:107)2
+
+Ez0∼D
+
+(cid:3)
+
+˜C 2
+
+k,j ≈ Ez0∼D
+
+(cid:2)zk−1(j)2(cid:3)
+
+2
+
+.
+
+N (cid:107)Wk(cid:107)2
+2
+
+(4)
+
+This approximation conveniently decouples the change rate per column, which depends on zk−1(j)2,
+from the global change rate per layer, which depends on the gradient magnitude (cid:107)yk(cid:107)2
+2, allowing us
+to correct them in two separate steps.
+
+3
+
+Published as a conference paper at ICLR 2016
+
+Algorithm 1 Within-layer initialization.
+
+for each afﬁne layer k do
+
+Initialize weights from a zero-mean Gaussian Wk ∼ N (0, I) and biases bk = 0
+Draw samples z0 ∈ ˜D ⊂ D and pass them through the ﬁrst k layers of the network
+Compute the per-channel sample mean ˆµk(i) and variance ˆσk(i)2 of zk(i)
+Rescale the weights by Wk(i, :) ← Wk(i, :)/ˆσk(i)
+Set the bias bk(i) ← β − ˆµk(i)/ˆσk(i) to center activations around β
+
+end for
+
+(cid:2)zk−1(i)2(cid:3) = ck for a layer-wise constant ck. In Sec-
+In Section 3.1, we show how to satisfy Ez0∼D
+tion 3.2, we then adjust this layer-wise constant ck to ensure that all gradients are properly calibrated
+between layers, in a way that can be applied to pre-initialized networks. Finally, in Section 3.3 we
+present multiple data-driven weight initializations.
+
+3.1 WITHIN-LAYER WEIGHT NORMALIZATION
+
+We aim to ensure that each channel that a layer k + 1 receives a similarly distributed input. It is
+straightforward to initialize weights in afﬁne layers such that the units have outputs following similar
+distributions. E.g., we could enforce that layer k activations zk(i, a, b) have Ez0∼D,a,b [zk(i, a, b)] =
+(cid:2)(zk(i, a, b) − β)2(cid:3) = 1 simply via properly-scaled random projections, where a
+β and Ez0∼D,a,b
+and b index over the 2D spatial extent of the feature map. However, we next have to contend with the
+nonlinearity σ(.). Thankfully, most nonlinearities (such as sigmoid or ReLU) operate independently
+on different channels. Hence, the different channels will undergo the same transformation, and the
+output channels will follow the same distribution if the input channels do (though the outputs will
+generally not be the same distribution as the inputs). In fact, most common CNN layers that apply
+a homogeneous operation to uniformly-sized windows of the input with regular stride, such as local
+response normalization, and pooling, empirically preserve this identical distribution requirement as
+well, making it broadly applicable.
+
+We normalize the network activations using empirical estimates of activation statistics obtained
+from actual data samples z0 ∼ D.
+In particular, for each afﬁne layer k ∈ {1, 2, . . . , N } in a
+topological ordering of the network graph, we compute the empirical mean and standard deviations
+for all outgoing activations and normalize the weights Wk such that all activations have unit variance
+and mean β. This procedure is summarized in Algorithm 1.
+The variance of our estimate of the sample statistics falls with the size of the sample | ˜D|. In practice,
+for CNN initialization, we ﬁnd that on the order of just dozens of samples is typically sufﬁcient.
+
+Note that this simple empirical initialization strategy guarantees afﬁne layer activations with a par-
+ticular center and scale while making no assumptions (beyond non-zero variance) about the inputs
+to the layer, making it robust to any exotic choice of non-linearity or other intermediate operation.
+This is in contrast with existing approaches designed for particular non-linearities and with archi-
+tectural constraints. Extending these methods to handle operations for which they weren’t designed
+while maintaining the desired scaling properties may be possible, but it would at least require careful
+thought, while our simple empirical initialization strategy generalizes to any operations and DAG
+architecture with no additional implementation effort.
+
+On the other hand, note that for architectures which are not purely feed-forward, the assumption
+of identically distributed afﬁne layer inputs may not hold. GoogLeNet (Szegedy et al., 2015), for
+example, concatenates layers which are computed via different operations on the same input, and
+hence may not be identically distributed, before feeding the result into a convolution. Our method
+cannot guarantee identically distributed inputs for arbitrary DAG-structured networks, so it should
+be applied to non-feed-forward networks with care.
+
+3.2 BETWEEN-LAYER SCALE ADJUSTMENT
+
+Because the initialization given in Section 3.1 results in activations zk(i) with unit variance, the
+expected change rate C 2
+k,i of a column i of the weight matrix Wk is constant across all columns i,
+
+4
+
+Published as a conference paper at ICLR 2016
+
+Algorithm 2 Between-layer normalization.
+
+Draw samples z0 ∈ ˜D ⊂ D
+repeat
+
+(cid:104) ˜Ck,j
+Compute the ratio ˜Ck = Ej
+Compute the average ratio ˜C = ((cid:81)
+
+(cid:105)
+
+k Ck)1/N
+(cid:17)α/2
+(cid:16) ˜Ck/ ˜C
+
+Compute a scale correction rk =
+Correct the weights and biases of layer k: bk ← rkbk, Wk ← rkWk
+Undo the scaling rk in the layer above
+until Convergence (roughly 10 iterations)
+
+with a damping factor α < 1
+
+under the approximation given in Equation (4). However, this does not provide any guarantee of the
+scaling of the change rates between layers.
+We use an iterative procedure to obtain roughly constant parameter change rates C 2
+k,i across all layers
+k (as well as all columns i within a layer), given previously-initialized weights. At each iteration we
+estimate the average change ratio ( ˜Ck,i,j) per layer. We also estimate a global change ratio, as the
+geometric mean of all layer-wise change ratios. The geometric mean ensures that the output remains
+unchanged in completely homogeneous networks. We then scale the parameters for each layer to be
+closer to this global change ratio. We simultaneously undo this scaling in the layer above, such that
+the function that the entire network computes is unchanged. This scaling can be undone by inserting
+an auxiliary scaling layer after each afﬁne layer. However for homogeneous non-linearities, such as
+ReLU, Pooling or LRN, this scaling can be undone at in the next afﬁne layer without the need of a
+special scaling layer. The between-layer scale adjustment procedure is summarized in Algorithm 2.
+Adjusting the scale of all layers simultaneously can lead to an oscillatory behavior. To prevent this
+we add a small damping factor α (usually α = 0.25).
+
+With a relatively small number of steps (we use 10), this procedure results in roughly constant initial
+change rates of the parameters in all layers of the network, regardless of its depth.
+
+3.3 WEIGHT INITIALIZATIONS
+
+Until now, we used a random Gaussian initialization of the weights, but our procedure does not
+require this. Hence, we explored two data-driven initializations: a PCA-based initialization and a
+k-means based initialization. For the PCA-based initialization, we set the weights such that the
+layer outputs are white and decorrelated. For each layer k we record the features activations zk−1 of
+each channel c across all spatial locations for all images in D. Then then use the ﬁrst M principal
+components of those activations as our weight matrix Wk. For the k-means based initialization, we
+follow Coates & Ng (2012) and apply spherical k-means on whitened feature activations. We use the
+cluster centers of k-means as initial weights for our layers, such that each output unit corresponds
+to one centroid of k-means. k-means usually does a better job than PCA, as it captures the modes of
+the input data, instead of merely decorrelating it. We use both k-means and PCA on just the convo-
+lutional layers of the architecture, as we don’t have enough data to estimate the required number of
+weights for fully connected layers.
+
+In summary, we initialize weights or all ﬁlters (§ 3.3), then normalize those weights such that all
+activations are equally distributed (§ 3.1), and ﬁnally rescale each layer such that the gradient ratio
+is constant across layers (§ 3.2). This initialization encures that all weights learn at approximately
+the same rate, leading to a better convergence and more accurate models, as we will show next.
+
+4 EVALUATION
+
+We implement our initialization and all experiments in the open-source deep learning framework
+Caffe (Jia et al., 2014). To assess how easily a network can be ﬁne-tuned with limited data, we use
+the classiﬁcation and detection challenges in PASCAL VOC 2007 (Everingham et al., 2014), which
+contains 5011 images for training and 4952 for testing.
+
+5
+
+Published as a conference paper at ICLR 2016
+
+Gaussian
+Gaussian (ours)
+K-Means
+
+Gaussian (caffe)
+ImageNet
+K-Means (ours)
+
+103
+
+102
+
+101
+
+e
+t
+a
+r
+
+e
+g
+n
+a
+h
+c
+
+e
+g
+a
+r
+e
+v
+a
+
+30
+
+20
+
+10
+
+n
+o
+i
+t
+a
+i
+r
+a
+v
+
+f
+o
+
+t
+n
+e
+i
+c
+ﬁ
+f
+e
+o
+c
+
+0
+1
+v
+n
+o
+c
+
+1
+v
+n
+o
+c
+
+2
+v
+n
+o
+c
+
+3
+v
+n
+o
+c
+
+4
+v
+n
+o
+c
+
+5
+v
+n
+o
+c
+
+6
+c
+f
+
+7
+c
+f
+
+8
+c
+f
+
+2
+v
+n
+o
+c
+
+3
+v
+n
+o
+c
+
+4
+v
+n
+o
+c
+
+5
+v
+n
+o
+c
+
+6
+c
+f
+
+7
+c
+f
+
+8
+c
+f
+
+(a) average change rate
+
+(b) coefﬁcient of variation
+
+Figure 1: Visualization of the relative change rate ˜Ck,i,j in CaffeNet for various initializations esti-
+mated on 100 images. (a) shows the average change rate per layer, a ﬂat curve is better, as all layers
+learn at the same rate. (b) shows the coefﬁcient of variation for the change rate within each layer,
+lower is better as weights within a layer train more uniformly.
+
+Architectures Most of our experiments are performed on the 8 layer CaffeNet architecture a small
+modiﬁcation of AlexNet (Krizhevsky et al., 2012). We use the default architecture for all com-
+parisons, except for Doersch et al. (2015) which removed groups in the convolutional layers. We
+also show results on the much deeper GoogLeNet (Szegedy et al., 2015) and VGG (Simonyan &
+Zisserman, 2015) architectures.
+
+Image classiﬁcation The VOC image classiﬁcation task is to predict the presence or absence of
+each of 20 object classes in an image. For this task we ﬁne-tune all networks using a sigmoid cross-
+entropy loss on random crops of each image. We optimize each network via Stochastic Gradient
+Descent (SGD) for 80,000 iterations with an initial learning rate of 0.001 (dropped by 0.5 every
+10,000 iterations), batch size of 10, and momentum of 0.9. The total training takes one hour on a
+Titan X GPU for CaffeNet. We tried different settings for various methods, but found these setting to
+work best for all initializations. At test time we average 10 random crops of the image to determine
+the presence or absence of an object. The CNN estimates the likelihood that each object is present,
+which we use as a score to compute a precision-recall curve per class. We evaluate all algorithms
+using mean average precision (mAP) (Everingham et al., 2014).
+
+Object detection In addition to predicting the presence of absence of an object in a scene, object
+detection requires the precise localization of each object using a bounding box. We again eval-
+uate mean average precision (Everingham et al., 2014). We ﬁne-tune all our models using Fast
+R-CNN (Girshick, 2015). For a fair comparison we varied the parameters of the ﬁne-tuning for
+each of the different initializations. We tried three different learning rates (0.01, 0.002 and 0.001)
+dropped by 0.1 every 50,000 iterations, with a total of 150,000 training iterations. We used multi-
+scale training and ﬁne-tuned all layers. We evaluate all models on single scale. All other settings
+were kept at their default values. Training and evaluation took roughly 8 hours in a Titan X GPU for
+CaffeNet. All models are trained from scratch unless otherwise stated.
+
+For both experiments we use 160 images of the VOC2007 training set for our initialization. 160
+images are sufﬁcient to robustly estimate activation statistics, as each unit usually sees tens of thou-
+sands of activations throughout all spacial locations in an images. At the same time, this relatively
+small set of images keeps the computational cost low.
+
+4.1 SCALING AND LEARNING ALGORITHMS
+
+We begin our evaluation by measuring and comparing the relative change rate ˜Ck,i,j of all weights
+in the network (see Equation (2)) for different initializations. We estimate ˜Ck,i,j using 100 images
+of the VOC 2007 validation set. We compare our models to an ImageNet pretrained model, ini-
+tialized with random Gaussian weights (with standard deviation σ = 0.01), an unscaled k-means
+initialization, as well as the Gaussian initialization in Caffe (Jia et al., 2014), for which biases and
+standard deviations were handpicked per layer. Figure 1a visualizes the average change rate per
+layer. Our initialization, as well as the ImageNet pretrained model, have similar change rates for
+all layers (i.e., all layers learn at the same rate), while random initializations and k-means have a
+
+6
+
+Published as a conference paper at ICLR 2016
+
+drastically different change rates. Figure 1b measures the coefﬁcient of variation of the change rate
+for each layer, deﬁned as the standard deviation of the change rate, divided by their mean value. Our
+coefﬁcient of variation is low throughout all layers, despite scaling the rate of change of columns
+of the weight matrix, instead of individual elements. Note that the low values are mirrored in the
+hand-tuned Caffe initialization.
+
+Next we explore how those different initializations perform on the VOC 2007 classiﬁcation task, as
+shown in Table 1. We train both a random Gaussian and k-means initialization using different initial
+scalings. Without scaling the random Gaussian initialization fares quite well, however the k-means
+initialization does poorly, due to the worse initial change rate as shown in Figure 1. Correcting for
+the within-layer scaling alone does not improve the performance much, as it worsens the between-
+layer scaling for both initializations. However in combination with the between-layer adjustment
+both initializations perform very well.
+
+Both the between-layer and within-layer scaling could potentially be addressed by a stronger second
+order optimization method, such as ADAM (Kingma & Ba, 2015) or batch normalization (Ioffe &
+Szegedy, 2015). In general, ADAM is able to slightly improve on SGD for an unscaled initializa-
+tion, especially when combined with batch normalization. Neither batch-norm nor ADAM alone or
+combined does perform as well as simple SGD with our k-means initialization. More interestingly,
+our initialization complements those stronger optimization methods and we see an improvement by
+combining them with our initialization.
+
+4.2 WEIGHT INITIALIZATION
+
+Next we compare our Gaussian, PCA and k-means based weights, with initializations proposed by
+Glorot & Bengio (2010) (commonly known as “xavier”), He et al. (2015), and a carefully chosen
+Gaussian initialization of Jia et al. (2014). We followed the suggestions of He et al. and used their
+initialization only for the convolutional layers, while choosing a random Gaussian initialization for
+the fully connected layers. We compare all methods on both classiﬁcation and detection performance
+in Table 2.
+
+The ﬁrst thing to notice is that both Glorot & Bengio and He et al. perform worse than a carefully
+chosen random Gaussian initialization. One possibility for the drop in performance comes from
+the additional layers, such as Pooling or LRN used in CaffeNet. Neither Glorot & Bengio nor
+He et al. consider those layers but rather focus on linear layers followed by tanh or ReLU non-
+linearities.
+
+Our initialization on the other hand has no trouble with those additional layers and substantially
+improves on the random Gaussian initialization.
+
+4.3 COMPARISON TO UNSUPERVISED PRE-TRAINING
+
+We now compare our simple, properly scaled initializations to the state-of-the-art unsupervised pre-
+training methods on VOC 2007 classiﬁcation and detection. Table 3 shows a summary of the results,
+including the amount of pre-training time, as well as the type of supervision used. Agrawal et al.
+(2015) uses egomotion, as measured by a moving car in a city to pre-train a model. While this
+information is not always readily available, it can be read from sensors and is thus “free.” We
+believe egomotion information does not often correlate with the kind of semantic information that is
+required for classiﬁcation or detection, and hence the egomotion pretrained model performs worse
+than our random baseline. Wang & Gupta (2015) supervise their pre-training using relative motion
+
+Scaling
+
+no scaling
+
+SGD
+
+SGD + BN
+
+ADAM
+
+ADAM + BN
+
+Gaus.
+
+k-mns. Gaus.
+
+k-mns. Gaus.
+
+k-mns. Gaus.
+
+k-mns.
+
+50.8% 41.2% 51.6% 49.4% 50.9% 52.0% 55.7% 53.8%
+
+Within-layer (Ours)
+Between-layer (Ours)
+Both (Ours)
+
+47.6% 41.2%
+53.2% 53.1%
+54.5% 57.2%
+52.7% 55.7%
+53.3% 56.6% 56.6% 60.0% 53.1% 56.9% 56.9% 59.8%
+
+-
+-
+
+-
+-
+
+-
+-
+
+-
+-
+
+Table 1: Classiﬁcation performance of various initializations, training algorithms and with and with-
+out batch normalization (BN) on PASCAL VOC2007 for both random Gaussian (Gaus.) and k-
+means (k-mns.) initialized weights.
+
+7
+
+Published as a conference paper at ICLR 2016
+
+Method
+
+Classiﬁcation Detection
+
+Xavier Glorot & Bengio (2010)
+MSRA He et al. (2015)
+Random Gaussian (hand tuned)
+
+Ours (Random Gaussian)
+Ours (PCA)
+Ours (k-means)
+
+51.1%
+43.3%
+53.4%
+
+53.3%
+52.8%
+56.6%
+
+40.4%
+37.2%
+41.3%
+
+43.4%
+43.1%
+45.6%
+
+Table 2: Comparison of different initialization methods on PASCAL VOC2007 classiﬁcation and
+detection.
+
+of objects in pre-selected youtube videos, as obtained by a tracker. Their model is generally quite
+well scaled and trains well for both classiﬁcation and detection. Doersch et al. (2015) predict the
+relative arrangement of image patches to pre-train a model. Their model is trained the longest with
+4 weeks of training. It does well on detection, but lags behind other methods in classiﬁcation.
+
+Interestingly our k-means initialization is able to keep up with most unsupervised pre-training meth-
+ods, despite containing very little semantic information. To analyze what information is actually
+captured, we sampled 100 random ImageNet images and found nearest neighbors for them from
+a pool of 50,000 other random ImageNet images, using the high-level feature spaces from differ-
+ent methods. Figure 2 shows the results. Overall, different unsupervised methods seem to focus
+on different attributes for matching. For example, ours appears to have some texture and material
+information, whereas the method of Doersch et al. (2015) seems to preserve more speciﬁc shape
+information.
+
+As a ﬁnal experiment we reinitialize all unsupervised pre-training methods to be properly scaled and
+compare with our initializations which use no auxiliary training beyond the proposed initializations.
+In particular, we take their pretrained network weights and apply the between-layer adjustment de-
+scribed in Section 3.2. (We do not perform local scaling as we ﬁnd that the activations in these mod-
+els are already scaled reasonably well locally.) The bottom three rows of Table 3 give our results for
+our rescaled versions of these models on the VOC classiﬁcation and detection tasks. We ﬁnd that for
+two of the three models (Agrawal et al., 2015; Doersch et al., 2015) this rescaling improves results
+signiﬁcantly; our rescaling of Wang & Gupta (2015) on the other hand does not improve its perfor-
+mance, indicating it was likely relatively well-scaled globally to begin with. The best-performing
+method with auxiliary self-supervision using our rescaled features is that of Doersch et al. (2015)
+– in this case our rescaling improves its results on the classiﬁcation task by a relative margin of
+18%. This suggests that our method nicely complements existing unsupervised and self-supervised
+methods and could facilitate easier future exploration of this rich space of methods.
+
+4.4 DIFFERENT ARCHITECTURES
+
+Finally we compare our initialization across different architectures, again using PASCAL 2007 clas-
+siﬁcation and detection. We train both the deep architecture of Szegedy et al. (2015) and Simonyan
+& Zisserman (2015) using our k-means and Gaussian initializations. Unlike prior work we are able
+
+Method
+
+Supervision
+
+Pretraining time Classiﬁcation Detection
+
+Agrawal et al. (2015)
+Wang & Gupta (2015)2
+Doersch et al. (2015)
+
+egomotion
+motion
+unsupervised
+
+Krizhevsky et al. (2012)
+
+1000 class labels
+
+Ours (k-means)
+
+initialization
+
+54 seconds
+
+Ours + Agrawal et al. (2015)
+Ours + Wang & Gupta (2015)
+Ours + Doersch et al. (2015)
+
+egomotion
+motion
+unsupervised
+
+10 hours
+1 week
+4 weeks
+
+3 days
+
+10 hours
+1 week
+4 weeks
+
+52.9%
+62.8%
+55.3%
+
+78.2%
+
+56.6%
+
+54.2%
+63.1%
+65.3%
+
+41.8%
+47.4%
+46.6%
+
+56.8%
+
+45.6%
+
+43.9%
+47.2%
+51.1%
+
+Table 3: Comparison of classiﬁcation and detection results on the PASCAL VOC2007 test set.
+2an earlier version of this paper reported 58.4% and 44.0% for the color model of Wand & Gupta, this
+
+version uses the grayscale model which performs better.
+
+8
+
+Published as a conference paper at ICLR 2016
+
+to train those models without any intermediate losses or stage-wise supervised pre-training. We
+simply add a sigmoid cross-entropy loss to the top of both networks. Unfortunately neither network
+outperformed CaffeNet in the classiﬁcation tasks. GoogLeNet achieves a 50.0% and 55.0% mAP for
+the two initializations respectively, while 16-layer VGG performs as 53.8% and 56.5%. This might
+have to do with the limited amount of supervised training data available to the model at during train-
+ing. The training time was 4 and 12 times slower than CaffeNet, which made them prohibitively
+slow for detection.
+
+4.5
+
+IMAGENET TRAINING
+
+Finally, we test our data-dependent initializations on two well-known CNN architectures which have
+been successfully applied to the ImageNet LSVRC 1000-way classiﬁcation task: CaffeNet (Jia et al.,
+2014) and GoogLeNet (Szegedy et al., 2015). We initialize the 1000-way classiﬁcation layers to 0
+in these experiments (except in our reproductions of the reference models), as we ﬁnd this improves
+the initial learning velocity.
+
+CaffeNet We train instances of CaffeNet using our initializations, with the architecture and all
+other hyperparameters set to those used to train the reference model: learning rate 0.01 (dropped by
+a factor of 0.1 every 105 iterations), momentum 0.9, and batch size 256. We also train a variant of
+the architecture with no local response normalization (LRN) layers.
+
+Our CaffeNet training results are presented in Figure 3. Over the ﬁrst 100,000 iterations (Figure 3,
+middle row), and particularly over the ﬁrst 10,000 (Figure 3, top row), our initializations reduce the
+network’s classiﬁcation error on both the training and validation sets at a much faster rate than the
+reference initialization.
+
+With the full 320,000 training iterations, all initializations achieve similar accuracy on the training
+and validation sets; however, in these experiments the carefully chosen reference initialization pulled
+non-trivially ahead of our initializations’ error after the second learning rate drop to a rate of 10−4.
+We do not yet know why this occurs, or whether the difference is signiﬁcant.
+
+Over the ﬁrst 100,000 iterations, among models initialized using our method, the k-means initializa-
+tion reduces the loss slightly faster than the random initialization. Interestingly, the model variant
+without LRN layers seems to learn just as quickly as the directly comparable network with LRNs,
+suggesting such normalizations may not be necessary given a well-chosen initialization.
+
+GoogLeNet We apply our best-performing initialization from the CaffeNet experiments—k-
+means—to a deeper network, GoogLeNet (Szegedy et al., 2015). We use the SGD hyperparam-
+eters from the Caffe (Jia et al., 2014) GoogleNet implementation (speciﬁcally, the “quick” version
+which is trained for 2.4 million iterations), and also retrain our own instance of the model with the
+initialization used in the reference model (based on Glorot & Bengio (2010)).
+
+Due to the depth of the architecture (22 layers, compared to CaffeNet’s 8) and the difﬁculty of prop-
+agating gradient signal to the early layers of the network, GoogLeNet includes additional “auxiliary
+classiﬁers” branching off from intermediate layers of the network to amplify the gradient signal
+to learn these early layers. To verify that networks initialized using our proposed method should
+have no problem backpropagating appropriately scaled gradients through all layers of arbitrarily
+deep networks, we also train a variant of GoogLeNet which omits the two intermediate loss towers,
+otherwise keeping the rest of the architecture ﬁxed.
+
+Our GoogLeNet training results are presented in Figure 4. We plot only the loss of the ﬁnal clas-
+siﬁer for comparability with the single-classiﬁer model. The models initialized with our method
+learn much faster than the model using the reference initialization stategy. Furthermore, the model
+trained using only a single classiﬁer learns at roughly the same rate as the original three loss tower
+architecture, and each iteration of training in the single classiﬁer model is slightly faster due to the
+removal of layers to compute the additional losses. This result suggests that our initialization could
+signiﬁcantly ease exploration of new, deeper CNN architectures, bypassing the need for architectural
+tweaks like the intermediate losses used to train GoogLeNet.
+
+9
+
+Published as a conference paper at ICLR 2016
+
+5 DISCUSSION
+
+Our method is a conceptually simple data-dependent initialization strategy for CNNs which en-
+forces empirically identically distributed activations locally (within a layer), and roughly uniform
+global scaling of weight gradients across all layers of arbitrarily deep networks. Our experiments
+(Section 4) demonstrate that this rescaling of weights results in substantially improved CNN repre-
+sentations for tasks with limited labeled data (as in the PASCAL VOC classiﬁcation and detection
+training sets), improves representations learned by existing self-supervised and unsupervised meth-
+ods, and substantially accelerates the early stages of CNN training on large-scale datasets (e.g.,
+ImageNet). We hope that our initializations will facilitate further advancement in unsupervised and
+self-supervised learning as well as more efﬁcient exploration of deeper and larger CNN architec-
+tures.
+
+The thank Alyosha Efros for his input and encouragement, without his “Gelato bet” most of this
+work would not have been explored. We thank NVIDIA for their generous GPU donations.
+
+ACKNOWLEDGEMENTS
+
+REFERENCES
+
+Agrawal, Pulkit, Carreira, Joao, and Malik, Jitendra. Learning to see by moving. ICCV, 2015. 7, 8
+
+Bradley, David M. Learning in modular systems. Technical report, DTIC Document, 2010. 2
+
+Coates, Adam and Ng, Andrew Y. Learning feature representations with k-means. In Neural Net-
+
+works: Tricks of the Trade, pp. 561–580. Springer, 2012. 5
+
+Doersch, Carl, Gupta, Abhinav, and Efros, Alexei A. Unsupervised visual representation learning
+
+by context prediction. ICCV, 2015. 6, 8, 11
+
+Everingham, Mark, Eslami, SM Ali, Van Gool, Luc, Williams, Christopher KI, Winn, John, and
+Zisserman, Andrew. The Pascal Visual Object Classes challenge: A retrospective. IJCV, 111(1):
+98–136, 2014. 5, 6
+
+Girshick, Ross. Fast R-CNN. ICCV, 2015. 1, 6
+
+Glorot, Xavier and Bengio, Yoshua. Understanding the difﬁculty of training deep feedforward neural
+
+networks. In AISTATS, pp. 249–256, 2010. 2, 7, 8, 9
+
+He, Kaiming, Zhang, Xiangyu, Ren, Shaoqing, and Sun, Jian. Delving deep into rectiﬁers: Surpass-
+
+ing human-level performance on ImageNet classiﬁcation. In ICCV, 2015. 2, 7, 8, 12
+
+Ioffe, Sergey and Szegedy, Christian. Batch normalization: Accelerating deep network training by
+
+reducing internal covariate shift. In ICML, 2015. 2, 7
+
+Jia, Yangqing, Shelhamer, Evan, Donahue, Jeff, Karayev, Sergey, Long, Jonathan, Girshick, Ross B.,
+Guadarrama, Sergio, and Darrell, Trevor. Caffe: Convolutional architecture for fast feature em-
+bedding. In ACM Multimedia, MM, 2014. 5, 6, 7, 9, 12
+
+Kingma, Diederik and Ba, Jimmy. Adam: A method for stochastic optimization. ICLR, 2015. 7
+
+Krizhevsky, Alex, Sutskever, Ilya, and Hinton, Geoffrey E. ImageNet classiﬁcation with deep con-
+
+volutional neural networks. In NIPS, 2012. 2, 6, 8
+
+LeCun, Y., Bottou, L., Orr, G., and Muller, K. Efﬁcient backprop. In Neural Networks: Tricks of
+
+the trade. Springer, 1998. 2, 3
+
+Russakovsky, Olga, Deng, Jia, Su, Hao, Krause, Jonathan, Satheesh, Sanjeev, Ma, Sean, Huang,
+Zhiheng, Karpathy, Andrej, Khosla, Aditya, Bernstein, Michael, Berg, Alexander C., and Fei-Fei,
+Li. ImageNet large scale visual recognition challenge. IJCV, 2015. 1
+
+10
+
+Published as a conference paper at ICLR 2016
+
+Figure 2: Comparison of nearest neighbors for the given input image (top row) in the feature spaces
+of CaffeNet-based CNNs initialized using our method, the fully supervised CaffeNet, an untrained
+CaffeNet using Gaussian initialization, and three unsupervised or self-supervised methods from prior
+work. (For Doersch et al. (2015) we display neighbors in fc6 feature space; the rest use the fc7
+features.) While our initialization is clearly missing the semantics of CaffeNet, it does preserve
+some non-speciﬁc texture and shape information, which is often enough for meaningful matches.
+
+Saxe, Andrew M, McClelland, James L, and Ganguli, Surya. Exact solutions to the nonlinear dy-
+
+namics of learning in deep linear neural networks. arXiv preprint, 2013. 2
+
+Simonyan, Karen and Zisserman, Andrew. Very deep convolutional networks for large-scale image
+
+recognition. ICLR, 2015. 1, 2, 6, 8
+
+Sussillo, David and Abbot, Larry. Random walk initialization for training very deep feedforward
+
+networks. ICLR, 2015. 2
+
+Szegedy, Christian, Liu, Wei, Jia, Yangqing, Sermanet, Pierre, Reed, Scott, Anguelov, Dragomir,
+Erhan, Dumitru, Vanhoucke, Vincent, and Rabinovich, Andrew. Going deeper with convolutions.
+CVPR, 2015. 1, 2, 4, 6, 8, 9
+
+Wang, Xiaolong and Gupta, Abhinav. Unsupervised learning of visual representations using videos.
+
+ICCV, 2015. 7, 8
+
+Yosinski, Jason, Clune, Jeff, Bengio, Yoshua, and Lipson, Hod. How transferable are features in
+
+deep neural networks? In NIPS, 2014. 1
+
+11
+
+Published as a conference paper at ICLR 2016
+
+7
+
+6
+
+5
+
+4
+
+6
+
+5
+
+4
+
+3
+
+3
+0K
+7
+
+2
+0K
+7
+
+6
+
+5
+
+4
+
+3
+
+2
+
+1
+0K
+
+6
+
+4
+
+2
+
+2K
+
+4K
+
+6K
+
+8K
+
+10K
+
+2K
+
+4K
+
+6K
+
+8K
+
+10K
+
+20K
+
+40K
+
+60K
+
+80K
+
+100K
+
+20K
+
+40K
+
+60K
+
+80K
+
+100K
+
+50K 100K 150K 200K 250K 300K 350K
+
+0K
+
+50K 100K 150K 200K 250K 300K 350K
+
+(a) Training loss
+
+(b) Validation loss
+
+Figure 3: Training and validation loss curves for the CaffeNet architecture trained for the ILSVRC-
+2012 classiﬁcation task. The training error is unsmoothed in the topmost plot (10K); smoothed over
+one epoch in the others. The validation error is computed over the full validation set every 2000
+iterations and is unsmoothed. Our initializations (k-means, Random) handily outperform both the
+carefully chosen reference initialization (Jia et al., 2014) and the MSRA initialization (He et al.,
+2015) over the ﬁrst 100,000 iterations, but the other initializations catch up after the second learning
+rate drop at iteration 200,000.
+
+Reference
+MSRA
+Random (ours)
+k-means (ours)
+k-means, no LRN (ours)
+
+Reference
+k-means (ours)
+k-means, single loss (ours)
+
+0M
+
+0.5M
+
+1M
+
+1.5M
+
+2M
+
+0M
+
+0.5M
+
+1M
+
+1.5M
+
+2M
+
+(a) Training loss
+
+(b) Validation loss
+
+Figure 4: Training and validation loss curves for the GoogLeNet architecture trained for the
+ILSVRC-2012 classiﬁcation task. The training error plot is again smoothed over roughly the length
+of an epoch; the validation error (computed every 4000 iterations) is unsmoothed. Note that our k-
+means initializations outperform the reference initialization, and the single loss model (lacking the
+auxiliary classiﬁers) learns at roughly the same rate as the model with auxiliary classiﬁers. The ﬁnal
+top-5 validation error are 11.57% for the reference model, 10.85% for our single loss, and 10.69%
+for our auxiliary loss model.
+
+7
+
+6
+
+5
+
+4
+
+6
+
+5
+
+4
+
+3
+
+6
+
+5
+
+4
+
+3
+
+2
+
+0K
+7
+
+2
+0K
+7
+
+6
+
+4
+
+2
+
+12
+
+6
+1
+0
+2
+ 
+p
+e
+S
+ 
+2
+2
+ 
+ 
+]
+
+V
+C
+.
+s
+c
+[
+ 
+ 
+3
+v
+6
+5
+8
+6
+0
+.
+1
+1
+5
+1
+:
+v
+i
+X
+r
+a
+
+Published as a conference paper at ICLR 2016
+
+DATA-DEPENDENT INITIALIZATIONS OF
+CONVOLUTIONAL NEURAL NETWORKS
+
+Philipp Kr¨ahenb ¨uhl1, Carl Doersch1,2, Jeff Donahue1, Trevor Darrell1
+1Department of Electrical Engineering and Computer Science, UC Berkeley
+2Machine Learning Department, Carnegie Mellon
+{philkr,jdonahue,trevor}@eecs.berkeley.edu; cdoersch@cs.cmu.edu
+
+ABSTRACT
+
+Convolutional Neural Networks spread through computer vision like a wildﬁre,
+impacting almost all visual tasks imaginable. Despite this, few researchers dare
+to train their models from scratch. Most work builds on one of a handful of Im-
+ageNet pre-trained models, and ﬁne-tunes or adapts these for speciﬁc tasks. This
+is in large part due to the difﬁculty of properly initializing these networks from
+scratch. A small miscalibration of the initial weights leads to vanishing or explod-
+ing gradients, as well as poor convergence properties. In this work we present
+a fast and simple data-dependent initialization procedure, that sets the weights
+of a network such that all units in the network train at roughly the same rate,
+avoiding vanishing or exploding gradients. Our initialization matches the current
+state-of-the-art unsupervised or self-supervised pre-training methods on standard
+computer vision tasks, such as image classiﬁcation and object detection, while
+reducing the pre-training time by three orders of magnitude. When combined
+with pre-training methods, our initialization signiﬁcantly outperforms prior work,
+narrowing the gap between supervised and unsupervised pre-training.
+
+1
+
+INTRODUCTION
+
+In recent years, Convolutional Neural Networks (CNNs) have improved performance across a wide
+variety of computer vision tasks (Szegedy et al., 2015; Simonyan & Zisserman, 2015; Girshick,
+2015). Much of this improvement stems from the ability of CNNs to use large datasets better than
+previous methods. In fact, good performance seems to require large datasets: the best-performing
+methods usually begin by “pre-training” CNNs to solve the million-image ImageNet classiﬁcation
+challenge (Russakovsky et al., 2015). This “pre-trained” representation is then “ﬁne-tuned” on a
+smaller dataset where the target labels may be more expensive to obtain. These ﬁne-tuning datasets
+generally do not fully constrain the CNN learning: different initializations can be trained until they
+achieve equally high training-set performance, but they will often perform very differently at test
+time. For example, initialization via ImageNet pre-training is known to produce a better-performing
+network at test time across many problems. However, little else is known about which other factors
+affect a CNN’s generalization performance when trained on small datasets. There is a pressing need
+to understand these factors, ﬁrst because we can potentially exploit them to improve performance
+on tasks where few labels are available. Second they may already be confounding our attempts to
+evaluate pre-training methods. A pre-trained network which extracts useful semantic information but
+cannot be ﬁne-tuned for spurious reasons can be easily overlooked. Hence, this work aims to explore
+how to better ﬁne-tune CNNs. We show that simple statistical properties of the network, which can
+be easily measured using training data, can have a signiﬁcant impact on test time performance.
+Surprisingly, we show that controlling for these statistical properties leads to a fast and general way
+to improve performance when training on relatively little data.
+
+Empirical evaluations have found that when transferring deep features across tasks, freezing weights
+of some layers during ﬁne-tuning generally harms performance (Yosinski et al., 2014). These results
+suggest that, given a small dataset, it is better to adjust all of the layers a little rather than to adjust
+just a few layers a large amount, and so perhaps the ideal setting will adjust all of the layers the
+
+Code available: https://github.com/philkr/magic_init
+
+1
+
+Published as a conference paper at ICLR 2016
+
+same amount. While these studies did indeed set the learning rate to be the same for all layers,
+somewhat counterintuitively this does not actually enforce that all layers learn at the same rate.
+To see this, say we have a network where there are two convolution layers separated by a ReLU.
+Multiplying the weights and bias term of the ﬁrst layer by a scalar α > 0, and then dividing the
+weights (but not bias) of the next (higher) layer by the same constant α will result in a network
+which computes exactly the same function. However, note that the gradients of the two layers are
+not the same: they will be divided by α for the ﬁrst layer, and multiplied by α for the second. Worse,
+an update of a given magnitude will have a smaller effect on the lower layer than the higher layer,
+simply because the lower layer’s norm is now larger. Using this kind of reparameterization, it is easy
+to make the gradients for certain layers vanish during ﬁne-tuning, or even to make them explode,
+resulting in a network that is impossible to ﬁne-tune despite representing exactly the same function.
+Conversely, this sort of re-parameterization gives us a tool we can use to calibrate layer-by-layer
+learning to improve ﬁne-tuning performance, provided we have an appropriate principle for making
+such adjustments.
+
+Where can we look to ﬁnd such a principle? A number of works have already suggested that statisti-
+cal properties of network activations can impact network performance. Many focus on initializations
+which control the variance of network activations. Krizhevsky et al. (2012) carefully designed their
+architecture to ensure gradients neither vanish nor explode. However, this is no longer possible for
+deeper architectures such as VGG (Simonyan & Zisserman, 2015) or GoogLeNet (Szegedy et al.,
+2015). Glorot & Bengio (2010); Saxe et al. (2013); Sussillo & Abbot (2015); He et al. (2015);
+Bradley (2010) show that properly scaled random initialization can deal with the vanishing gradi-
+ent problem, if the architectures are limited to linear transformations, followed by a very speciﬁc
+non-linearities. Saxe et al. (2013) focus on linear networks, Glorot & Bengio (2010) derive an initial-
+ization for networks with tanh non-linearities, while He et al. (2015) focus on the more commonly
+used ReLUs. However, none of the above papers consider more general network including pooling,
+dropout, LRN layers (Krizhevsky et al., 2012), or DAG-structured networks (Szegedy et al., 2015).
+We argue that initializing the network with real training data improves these approximations and
+achieves a better performance. Early approaches to data-driven initializations showed that whiten-
+ing the activations at all layers can mitigate the vanishing gradient problem (LeCun et al., 1998),
+but it does not ensure all layers train at an equal rate. More recently, batch normalization (Ioffe
+& Szegedy, 2015) enforces that the output of each convolution and fully-connected layer are zero
+mean with unit variance for every batch. In practice, however, this means that the network’s behavior
+on a single example depends on the other members of the batch, and removing this dependency at
+test-time relies on approximating batch statistics. The fact that these methods show improved con-
+vergence speed at training time suggests we are justiﬁed in investigating the statistics of activations.
+However, the main goal of our work differs in two important respects. First, these previous works
+pay relatively little attention to the behavior on smaller training sets, instead focusing on training
+speed. Second, while all above initializations require a random initialization, our approach aims to
+handle structured initialization, and even improve pre-trained networks.
+
+2 PRELIMINARIES
+
+We are interested in parameterizing (and re-parameterizing) CNNs, where the output is a highly
+non-convex function of both the inputs and the parameters. Hence, we begin with some notation
+which will let us describe how a CNN’s behavior will change as we alter the parameters. We focus
+on feed-forward networks of the form
+
+zk = fk(zk−1; θk),
+
+where zk is a vector of hidden activations of the network, and fk is a transformation with parameters
+θk. fk may be a linear transformation fk(z(cid:48)
+k; θk) = Wkzk−1 + bk, or it may be a non-linearity
+fk+1(zk; θk) = σk+1(z(cid:48)
+k) such as a rectiﬁed linear unit (ReLU) σ(x) = max(x, 0). Other common
+non-linearities include local response normalization or pooling (Krizhevsky et al., 2012; Szegedy
+et al., 2015; Simonyan & Zisserman, 2015). However, as is common in neural networks, we assume
+these nonlinearities are not parametrized and kept ﬁxed during training. Hence, θk contains only
+(Wk, bk) for each afﬁne layer k.
+To deal with spatially-structured inputs like images, most hidden activations zk ∈ RCk×Ak×Bk are
+arranged in a two dimensional grid of size Ak × Bk (for image width Ak and height Bk) with Ck
+
+2
+
+Published as a conference paper at ICLR 2016
+
+channels per grid cell. We let z0 denote the input image. The ﬁnal output, however, is generally
+not spatial, and so later layers are reduced to the form zN = RCN ×1×1, where CN is the number
+of output units. The last of these outputs is converted into a loss with respect to some label; for
+classiﬁcation, the approach is to convert the ﬁnal output into a probability distribution over labels via
+a Softmax function. Learning aims to minimize the expected loss over the training dataset. Despite
+the non-convexity of this learning problem, backpropagation and Stochastic Gradient Descent often
+ﬁnds good local minima if initialized properly (LeCun et al., 1998).
+
+Given an arbitrary neural network, we next aim for a good parameterization. A good parameteriza-
+tion should be able to learn all weights of a network equally well. We measure how well a certain
+weight in the network learns by how much the gradient of a loss function would change it. A large
+change means it learns more quickly, while a small change implies it learns more slowly. We initial-
+ize our network such that all weights in all layers learn equally fast.
+
+3 DATA-DEPENDENT INITIALIZATION
+
+Given an N -layer neural network with loss function (cid:96)(zN ), we ﬁrst deﬁne C 2
+norm of the gradient with respect to weights Wk(i, j) in layer k:
+
+i,j,k to be the expected
+
+C 2
+
+k,i,j = Ez0∼D
+
+(cid:34)(cid:18)
+
+∂
+∂Wk(i, j)
+
+(cid:19)2(cid:35)
+
+(cid:20)(cid:18)
+
+(cid:96)(zN )
+
+= Ez0∼D
+
+zk−1(j)
+
+(cid:19)2(cid:21)
+,
+
+(cid:96)(zN )
+
+(1)
+
+∂
+∂zk(i)
+(cid:124)
+(cid:123)(cid:122)
+yk(i)
+
+(cid:125)
+
+where D is a set of input images and yk is the backpropagated error. Similar reasoning can be applied
+to the biases bk, but where the activations are replaced by the constant 1. To not rely on any labels
+during initialization, we use a random linear loss function (cid:96)(zN ) = η(cid:62)zN , where η ∼ N (0, I) is
+sampled from a unit Gaussian distribution. In other words, we initialize the top gradient to a random
+Gaussian noise vector η during backpropagation. We sample a different random loss η for each
+image.
+
+In order for all parameters to learn at the same “rate,” we require the change in eq. 1 to be propor-
+tional to the magnitude of the weights (cid:107)Wk(cid:107)2
+
+2 of the current layer; i.e.,
+
+˜C 2
+
+k,i,j =
+
+C 2
+k,i,j
+(cid:107)Wk(cid:107)2
+2
+
+(2)
+
+is constant for all weights. However this is hard to enforce, because for non-linear networks the
+backpropagated error yk is a function of the activations zk−1. A change in weights that affects the
+activations zk−1 will indirectly change yk. This effect is often non-linear and hard to control or
+predict.
+
+We thus simplify Equation (2): rather than enforce that the individual weights all learn at the same
+rate, we enforce that the columns of weight matrix Wk do so, i.e.:
+
+˜C 2
+
+k,j =
+
+˜C 2
+
+k,i,j =
+
+1
+N
+
+(cid:88)
+
+i
+
+1
+N (cid:107)Wk(cid:107)2
+2
+
+Ez0∼D
+
+(cid:2)zk−1(j)2(cid:107)yk(cid:107)2
+
+(cid:3) ,
+
+2
+
+(3)
+
+should be approximately constant, where N is the number of rows of the weight matrix. As we will
+show in Section 4.1, all weights tend to train at roughly the same rate even though the objective
+does not enforce this. Looking at Equation (3), the relative change of a column of the weight matrix
+is a function of 1) the magnitude of a single activation of the bottom layer, and 2) the norm of the
+backpropagated gradient. The value of a single input to a layer will generally have a relatively small
+impact on the norm of the gradient to the entire layer. Hence, we assume zk−1(j) and (cid:107)yk(cid:107) are
+independent, leading to the following simpliﬁcation of the objective:
+(cid:2)(cid:107)yk(cid:107)2
+
+Ez0∼D
+
+(cid:3)
+
+˜C 2
+
+k,j ≈ Ez0∼D
+
+(cid:2)zk−1(j)2(cid:3)
+
+2
+
+.
+
+N (cid:107)Wk(cid:107)2
+2
+
+(4)
+
+This approximation conveniently decouples the change rate per column, which depends on zk−1(j)2,
+from the global change rate per layer, which depends on the gradient magnitude (cid:107)yk(cid:107)2
+2, allowing us
+to correct them in two separate steps.
+
+3
+
+Published as a conference paper at ICLR 2016
+
+Algorithm 1 Within-layer initialization.
+
+for each afﬁne layer k do
+
+Initialize weights from a zero-mean Gaussian Wk ∼ N (0, I) and biases bk = 0
+Draw samples z0 ∈ ˜D ⊂ D and pass them through the ﬁrst k layers of the network
+Compute the per-channel sample mean ˆµk(i) and variance ˆσk(i)2 of zk(i)
+Rescale the weights by Wk(i, :) ← Wk(i, :)/ˆσk(i)
+Set the bias bk(i) ← β − ˆµk(i)/ˆσk(i) to center activations around β
+
+end for
+
+(cid:2)zk−1(i)2(cid:3) = ck for a layer-wise constant ck. In Sec-
+In Section 3.1, we show how to satisfy Ez0∼D
+tion 3.2, we then adjust this layer-wise constant ck to ensure that all gradients are properly calibrated
+between layers, in a way that can be applied to pre-initialized networks. Finally, in Section 3.3 we
+present multiple data-driven weight initializations.
+
+3.1 WITHIN-LAYER WEIGHT NORMALIZATION
+
+We aim to ensure that each channel that a layer k + 1 receives a similarly distributed input. It is
+straightforward to initialize weights in afﬁne layers such that the units have outputs following similar
+distributions. E.g., we could enforce that layer k activations zk(i, a, b) have Ez0∼D,a,b [zk(i, a, b)] =
+(cid:2)(zk(i, a, b) − β)2(cid:3) = 1 simply via properly-scaled random projections, where a
+β and Ez0∼D,a,b
+and b index over the 2D spatial extent of the feature map. However, we next have to contend with the
+nonlinearity σ(.). Thankfully, most nonlinearities (such as sigmoid or ReLU) operate independently
+on different channels. Hence, the different channels will undergo the same transformation, and the
+output channels will follow the same distribution if the input channels do (though the outputs will
+generally not be the same distribution as the inputs). In fact, most common CNN layers that apply
+a homogeneous operation to uniformly-sized windows of the input with regular stride, such as local
+response normalization, and pooling, empirically preserve this identical distribution requirement as
+well, making it broadly applicable.
+
+We normalize the network activations using empirical estimates of activation statistics obtained
+from actual data samples z0 ∼ D.
+In particular, for each afﬁne layer k ∈ {1, 2, . . . , N } in a
+topological ordering of the network graph, we compute the empirical mean and standard deviations
+for all outgoing activations and normalize the weights Wk such that all activations have unit variance
+and mean β. This procedure is summarized in Algorithm 1.
+The variance of our estimate of the sample statistics falls with the size of the sample | ˜D|. In practice,
+for CNN initialization, we ﬁnd that on the order of just dozens of samples is typically sufﬁcient.
+
+Note that this simple empirical initialization strategy guarantees afﬁne layer activations with a par-
+ticular center and scale while making no assumptions (beyond non-zero variance) about the inputs
+to the layer, making it robust to any exotic choice of non-linearity or other intermediate operation.
+This is in contrast with existing approaches designed for particular non-linearities and with archi-
+tectural constraints. Extending these methods to handle operations for which they weren’t designed
+while maintaining the desired scaling properties may be possible, but it would at least require careful
+thought, while our simple empirical initialization strategy generalizes to any operations and DAG
+architecture with no additional implementation effort.
+
+On the other hand, note that for architectures which are not purely feed-forward, the assumption
+of identically distributed afﬁne layer inputs may not hold. GoogLeNet (Szegedy et al., 2015), for
+example, concatenates layers which are computed via different operations on the same input, and
+hence may not be identically distributed, before feeding the result into a convolution. Our method
+cannot guarantee identically distributed inputs for arbitrary DAG-structured networks, so it should
+be applied to non-feed-forward networks with care.
+
+3.2 BETWEEN-LAYER SCALE ADJUSTMENT
+
+Because the initialization given in Section 3.1 results in activations zk(i) with unit variance, the
+expected change rate C 2
+k,i of a column i of the weight matrix Wk is constant across all columns i,
+
+4
+
+Published as a conference paper at ICLR 2016
+
+Algorithm 2 Between-layer normalization.
+
+Draw samples z0 ∈ ˜D ⊂ D
+repeat
+
+(cid:104) ˜Ck,j
+Compute the ratio ˜Ck = Ej
+Compute the average ratio ˜C = ((cid:81)
+
+(cid:105)
+
+k Ck)1/N
+(cid:17)α/2
+(cid:16) ˜Ck/ ˜C
+
+Compute a scale correction rk =
+Correct the weights and biases of layer k: bk ← rkbk, Wk ← rkWk
+Undo the scaling rk in the layer above
+until Convergence (roughly 10 iterations)
+
+with a damping factor α < 1
+
+under the approximation given in Equation (4). However, this does not provide any guarantee of the
+scaling of the change rates between layers.
+We use an iterative procedure to obtain roughly constant parameter change rates C 2
+k,i across all layers
+k (as well as all columns i within a layer), given previously-initialized weights. At each iteration we
+estimate the average change ratio ( ˜Ck,i,j) per layer. We also estimate a global change ratio, as the
+geometric mean of all layer-wise change ratios. The geometric mean ensures that the output remains
+unchanged in completely homogeneous networks. We then scale the parameters for each layer to be
+closer to this global change ratio. We simultaneously undo this scaling in the layer above, such that
+the function that the entire network computes is unchanged. This scaling can be undone by inserting
+an auxiliary scaling layer after each afﬁne layer. However for homogeneous non-linearities, such as
+ReLU, Pooling or LRN, this scaling can be undone at in the next afﬁne layer without the need of a
+special scaling layer. The between-layer scale adjustment procedure is summarized in Algorithm 2.
+Adjusting the scale of all layers simultaneously can lead to an oscillatory behavior. To prevent this
+we add a small damping factor α (usually α = 0.25).
+
+With a relatively small number of steps (we use 10), this procedure results in roughly constant initial
+change rates of the parameters in all layers of the network, regardless of its depth.
+
+3.3 WEIGHT INITIALIZATIONS
+
+Until now, we used a random Gaussian initialization of the weights, but our procedure does not
+require this. Hence, we explored two data-driven initializations: a PCA-based initialization and a
+k-means based initialization. For the PCA-based initialization, we set the weights such that the
+layer outputs are white and decorrelated. For each layer k we record the features activations zk−1 of
+each channel c across all spatial locations for all images in D. Then then use the ﬁrst M principal
+components of those activations as our weight matrix Wk. For the k-means based initialization, we
+follow Coates & Ng (2012) and apply spherical k-means on whitened feature activations. We use the
+cluster centers of k-means as initial weights for our layers, such that each output unit corresponds
+to one centroid of k-means. k-means usually does a better job than PCA, as it captures the modes of
+the input data, instead of merely decorrelating it. We use both k-means and PCA on just the convo-
+lutional layers of the architecture, as we don’t have enough data to estimate the required number of
+weights for fully connected layers.
+
+In summary, we initialize weights or all ﬁlters (§ 3.3), then normalize those weights such that all
+activations are equally distributed (§ 3.1), and ﬁnally rescale each layer such that the gradient ratio
+is constant across layers (§ 3.2). This initialization encures that all weights learn at approximately
+the same rate, leading to a better convergence and more accurate models, as we will show next.
+
+4 EVALUATION
+
+We implement our initialization and all experiments in the open-source deep learning framework
+Caffe (Jia et al., 2014). To assess how easily a network can be ﬁne-tuned with limited data, we use
+the classiﬁcation and detection challenges in PASCAL VOC 2007 (Everingham et al., 2014), which
+contains 5011 images for training and 4952 for testing.
+
+5
+
+Published as a conference paper at ICLR 2016
+
+Gaussian
+Gaussian (ours)
+K-Means
+
+Gaussian (caffe)
+ImageNet
+K-Means (ours)
+
+103
+
+102
+
+101
+
+e
+t
+a
+r
+
+e
+g
+n
+a
+h
+c
+
+e
+g
+a
+r
+e
+v
+a
+
+30
+
+20
+
+10
+
+n
+o
+i
+t
+a
+i
+r
+a
+v
+
+f
+o
+
+t
+n
+e
+i
+c
+ﬁ
+f
+e
+o
+c
+
+0
+1
+v
+n
+o
+c
+
+1
+v
+n
+o
+c
+
+2
+v
+n
+o
+c
+
+3
+v
+n
+o
+c
+
+4
+v
+n
+o
+c
+
+5
+v
+n
+o
+c
+
+6
+c
+f
+
+7
+c
+f
+
+8
+c
+f
+
+2
+v
+n
+o
+c
+
+3
+v
+n
+o
+c
+
+4
+v
+n
+o
+c
+
+5
+v
+n
+o
+c
+
+6
+c
+f
+
+7
+c
+f
+
+8
+c
+f
+
+(a) average change rate
+
+(b) coefﬁcient of variation
+
+Figure 1: Visualization of the relative change rate ˜Ck,i,j in CaffeNet for various initializations esti-
+mated on 100 images. (a) shows the average change rate per layer, a ﬂat curve is better, as all layers
+learn at the same rate. (b) shows the coefﬁcient of variation for the change rate within each layer,
+lower is better as weights within a layer train more uniformly.
+
+Architectures Most of our experiments are performed on the 8 layer CaffeNet architecture a small
+modiﬁcation of AlexNet (Krizhevsky et al., 2012). We use the default architecture for all com-
+parisons, except for Doersch et al. (2015) which removed groups in the convolutional layers. We
+also show results on the much deeper GoogLeNet (Szegedy et al., 2015) and VGG (Simonyan &
+Zisserman, 2015) architectures.
+
+Image classiﬁcation The VOC image classiﬁcation task is to predict the presence or absence of
+each of 20 object classes in an image. For this task we ﬁne-tune all networks using a sigmoid cross-
+entropy loss on random crops of each image. We optimize each network via Stochastic Gradient
+Descent (SGD) for 80,000 iterations with an initial learning rate of 0.001 (dropped by 0.5 every
+10,000 iterations), batch size of 10, and momentum of 0.9. The total training takes one hour on a
+Titan X GPU for CaffeNet. We tried different settings for various methods, but found these setting to
+work best for all initializations. At test time we average 10 random crops of the image to determine
+the presence or absence of an object. The CNN estimates the likelihood that each object is present,
+which we use as a score to compute a precision-recall curve per class. We evaluate all algorithms
+using mean average precision (mAP) (Everingham et al., 2014).
+
+Object detection In addition to predicting the presence of absence of an object in a scene, object
+detection requires the precise localization of each object using a bounding box. We again eval-
+uate mean average precision (Everingham et al., 2014). We ﬁne-tune all our models using Fast
+R-CNN (Girshick, 2015). For a fair comparison we varied the parameters of the ﬁne-tuning for
+each of the different initializations. We tried three different learning rates (0.01, 0.002 and 0.001)
+dropped by 0.1 every 50,000 iterations, with a total of 150,000 training iterations. We used multi-
+scale training and ﬁne-tuned all layers. We evaluate all models on single scale. All other settings
+were kept at their default values. Training and evaluation took roughly 8 hours in a Titan X GPU for
+CaffeNet. All models are trained from scratch unless otherwise stated.
+
+For both experiments we use 160 images of the VOC2007 training set for our initialization. 160
+images are sufﬁcient to robustly estimate activation statistics, as each unit usually sees tens of thou-
+sands of activations throughout all spacial locations in an images. At the same time, this relatively
+small set of images keeps the computational cost low.
+
+4.1 SCALING AND LEARNING ALGORITHMS
+
+We begin our evaluation by measuring and comparing the relative change rate ˜Ck,i,j of all weights
+in the network (see Equation (2)) for different initializations. We estimate ˜Ck,i,j using 100 images
+of the VOC 2007 validation set. We compare our models to an ImageNet pretrained model, ini-
+tialized with random Gaussian weights (with standard deviation σ = 0.01), an unscaled k-means
+initialization, as well as the Gaussian initialization in Caffe (Jia et al., 2014), for which biases and
+standard deviations were handpicked per layer. Figure 1a visualizes the average change rate per
+layer. Our initialization, as well as the ImageNet pretrained model, have similar change rates for
+all layers (i.e., all layers learn at the same rate), while random initializations and k-means have a
+
+6
+
+Published as a conference paper at ICLR 2016
+
+drastically different change rates. Figure 1b measures the coefﬁcient of variation of the change rate
+for each layer, deﬁned as the standard deviation of the change rate, divided by their mean value. Our
+coefﬁcient of variation is low throughout all layers, despite scaling the rate of change of columns
+of the weight matrix, instead of individual elements. Note that the low values are mirrored in the
+hand-tuned Caffe initialization.
+
+Next we explore how those different initializations perform on the VOC 2007 classiﬁcation task, as
+shown in Table 1. We train both a random Gaussian and k-means initialization using different initial
+scalings. Without scaling the random Gaussian initialization fares quite well, however the k-means
+initialization does poorly, due to the worse initial change rate as shown in Figure 1. Correcting for
+the within-layer scaling alone does not improve the performance much, as it worsens the between-
+layer scaling for both initializations. However in combination with the between-layer adjustment
+both initializations perform very well.
+
+Both the between-layer and within-layer scaling could potentially be addressed by a stronger second
+order optimization method, such as ADAM (Kingma & Ba, 2015) or batch normalization (Ioffe &
+Szegedy, 2015). In general, ADAM is able to slightly improve on SGD for an unscaled initializa-
+tion, especially when combined with batch normalization. Neither batch-norm nor ADAM alone or
+combined does perform as well as simple SGD with our k-means initialization. More interestingly,
+our initialization complements those stronger optimization methods and we see an improvement by
+combining them with our initialization.
+
+4.2 WEIGHT INITIALIZATION
+
+Next we compare our Gaussian, PCA and k-means based weights, with initializations proposed by
+Glorot & Bengio (2010) (commonly known as “xavier”), He et al. (2015), and a carefully chosen
+Gaussian initialization of Jia et al. (2014). We followed the suggestions of He et al. and used their
+initialization only for the convolutional layers, while choosing a random Gaussian initialization for
+the fully connected layers. We compare all methods on both classiﬁcation and detection performance
+in Table 2.
+
+The ﬁrst thing to notice is that both Glorot & Bengio and He et al. perform worse than a carefully
+chosen random Gaussian initialization. One possibility for the drop in performance comes from
+the additional layers, such as Pooling or LRN used in CaffeNet. Neither Glorot & Bengio nor
+He et al. consider those layers but rather focus on linear layers followed by tanh or ReLU non-
+linearities.
+
+Our initialization on the other hand has no trouble with those additional layers and substantially
+improves on the random Gaussian initialization.
+
+4.3 COMPARISON TO UNSUPERVISED PRE-TRAINING
+
+We now compare our simple, properly scaled initializations to the state-of-the-art unsupervised pre-
+training methods on VOC 2007 classiﬁcation and detection. Table 3 shows a summary of the results,
+including the amount of pre-training time, as well as the type of supervision used. Agrawal et al.
+(2015) uses egomotion, as measured by a moving car in a city to pre-train a model. While this
+information is not always readily available, it can be read from sensors and is thus “free.” We
+believe egomotion information does not often correlate with the kind of semantic information that is
+required for classiﬁcation or detection, and hence the egomotion pretrained model performs worse
+than our random baseline. Wang & Gupta (2015) supervise their pre-training using relative motion
+
+Scaling
+
+no scaling
+
+SGD
+
+SGD + BN
+
+ADAM
+
+ADAM + BN
+
+Gaus.
+
+k-mns. Gaus.
+
+k-mns. Gaus.
+
+k-mns. Gaus.
+
+k-mns.
+
+50.8% 41.2% 51.6% 49.4% 50.9% 52.0% 55.7% 53.8%
+
+Within-layer (Ours)
+Between-layer (Ours)
+Both (Ours)
+
+47.6% 41.2%
+53.2% 53.1%
+54.5% 57.2%
+52.7% 55.7%
+53.3% 56.6% 56.6% 60.0% 53.1% 56.9% 56.9% 59.8%
+
+-
+-
+
+-
+-
+
+-
+-
+
+-
+-
+
+Table 1: Classiﬁcation performance of various initializations, training algorithms and with and with-
+out batch normalization (BN) on PASCAL VOC2007 for both random Gaussian (Gaus.) and k-
+means (k-mns.) initialized weights.
+
+7
+
+Published as a conference paper at ICLR 2016
+
+Method
+
+Classiﬁcation Detection
+
+Xavier Glorot & Bengio (2010)
+MSRA He et al. (2015)
+Random Gaussian (hand tuned)
+
+Ours (Random Gaussian)
+Ours (PCA)
+Ours (k-means)
+
+51.1%
+43.3%
+53.4%
+
+53.3%
+52.8%
+56.6%
+
+40.4%
+37.2%
+41.3%
+
+43.4%
+43.1%
+45.6%
+
+Table 2: Comparison of different initialization methods on PASCAL VOC2007 classiﬁcation and
+detection.
+
+of objects in pre-selected youtube videos, as obtained by a tracker. Their model is generally quite
+well scaled and trains well for both classiﬁcation and detection. Doersch et al. (2015) predict the
+relative arrangement of image patches to pre-train a model. Their model is trained the longest with
+4 weeks of training. It does well on detection, but lags behind other methods in classiﬁcation.
+
+Interestingly our k-means initialization is able to keep up with most unsupervised pre-training meth-
+ods, despite containing very little semantic information. To analyze what information is actually
+captured, we sampled 100 random ImageNet images and found nearest neighbors for them from
+a pool of 50,000 other random ImageNet images, using the high-level feature spaces from differ-
+ent methods. Figure 2 shows the results. Overall, different unsupervised methods seem to focus
+on different attributes for matching. For example, ours appears to have some texture and material
+information, whereas the method of Doersch et al. (2015) seems to preserve more speciﬁc shape
+information.
+
+As a ﬁnal experiment we reinitialize all unsupervised pre-training methods to be properly scaled and
+compare with our initializations which use no auxiliary training beyond the proposed initializations.
+In particular, we take their pretrained network weights and apply the between-layer adjustment de-
+scribed in Section 3.2. (We do not perform local scaling as we ﬁnd that the activations in these mod-
+els are already scaled reasonably well locally.) The bottom three rows of Table 3 give our results for
+our rescaled versions of these models on the VOC classiﬁcation and detection tasks. We ﬁnd that for
+two of the three models (Agrawal et al., 2015; Doersch et al., 2015) this rescaling improves results
+signiﬁcantly; our rescaling of Wang & Gupta (2015) on the other hand does not improve its perfor-
+mance, indicating it was likely relatively well-scaled globally to begin with. The best-performing
+method with auxiliary self-supervision using our rescaled features is that of Doersch et al. (2015)
+– in this case our rescaling improves its results on the classiﬁcation task by a relative margin of
+18%. This suggests that our method nicely complements existing unsupervised and self-supervised
+methods and could facilitate easier future exploration of this rich space of methods.
+
+4.4 DIFFERENT ARCHITECTURES
+
+Finally we compare our initialization across different architectures, again using PASCAL 2007 clas-
+siﬁcation and detection. We train both the deep architecture of Szegedy et al. (2015) and Simonyan
+& Zisserman (2015) using our k-means and Gaussian initializations. Unlike prior work we are able
+
+Method
+
+Supervision
+
+Pretraining time Classiﬁcation Detection
+
+Agrawal et al. (2015)
+Wang & Gupta (2015)2
+Doersch et al. (2015)
+
+egomotion
+motion
+unsupervised
+
+Krizhevsky et al. (2012)
+
+1000 class labels
+
+Ours (k-means)
+
+initialization
+
+54 seconds
+
+Ours + Agrawal et al. (2015)
+Ours + Wang & Gupta (2015)
+Ours + Doersch et al. (2015)
+
+egomotion
+motion
+unsupervised
+
+10 hours
+1 week
+4 weeks
+
+3 days
+
+10 hours
+1 week
+4 weeks
+
+52.9%
+62.8%
+55.3%
+
+78.2%
+
+56.6%
+
+54.2%
+63.1%
+65.3%
+
+41.8%
+47.4%
+46.6%
+
+56.8%
+
+45.6%
+
+43.9%
+47.2%
+51.1%
+
+Table 3: Comparison of classiﬁcation and detection results on the PASCAL VOC2007 test set.
+2an earlier version of this paper reported 58.4% and 44.0% for the color model of Wand & Gupta, this
+
+version uses the grayscale model which performs better.
+
+8
+
+Published as a conference paper at ICLR 2016
+
+to train those models without any intermediate losses or stage-wise supervised pre-training. We
+simply add a sigmoid cross-entropy loss to the top of both networks. Unfortunately neither network
+outperformed CaffeNet in the classiﬁcation tasks. GoogLeNet achieves a 50.0% and 55.0% mAP for
+the two initializations respectively, while 16-layer VGG performs as 53.8% and 56.5%. This might
+have to do with the limited amount of supervised training data available to the model at during train-
+ing. The training time was 4 and 12 times slower than CaffeNet, which made them prohibitively
+slow for detection.
+
+4.5
+
+IMAGENET TRAINING
+
+Finally, we test our data-dependent initializations on two well-known CNN architectures which have
+been successfully applied to the ImageNet LSVRC 1000-way classiﬁcation task: CaffeNet (Jia et al.,
+2014) and GoogLeNet (Szegedy et al., 2015). We initialize the 1000-way classiﬁcation layers to 0
+in these experiments (except in our reproductions of the reference models), as we ﬁnd this improves
+the initial learning velocity.
+
+CaffeNet We train instances of CaffeNet using our initializations, with the architecture and all
+other hyperparameters set to those used to train the reference model: learning rate 0.01 (dropped by
+a factor of 0.1 every 105 iterations), momentum 0.9, and batch size 256. We also train a variant of
+the architecture with no local response normalization (LRN) layers.
+
+Our CaffeNet training results are presented in Figure 3. Over the ﬁrst 100,000 iterations (Figure 3,
+middle row), and particularly over the ﬁrst 10,000 (Figure 3, top row), our initializations reduce the
+network’s classiﬁcation error on both the training and validation sets at a much faster rate than the
+reference initialization.
+
+With the full 320,000 training iterations, all initializations achieve similar accuracy on the training
+and validation sets; however, in these experiments the carefully chosen reference initialization pulled
+non-trivially ahead of our initializations’ error after the second learning rate drop to a rate of 10−4.
+We do not yet know why this occurs, or whether the difference is signiﬁcant.
+
+Over the ﬁrst 100,000 iterations, among models initialized using our method, the k-means initializa-
+tion reduces the loss slightly faster than the random initialization. Interestingly, the model variant
+without LRN layers seems to learn just as quickly as the directly comparable network with LRNs,
+suggesting such normalizations may not be necessary given a well-chosen initialization.
+
+GoogLeNet We apply our best-performing initialization from the CaffeNet experiments—k-
+means—to a deeper network, GoogLeNet (Szegedy et al., 2015). We use the SGD hyperparam-
+eters from the Caffe (Jia et al., 2014) GoogleNet implementation (speciﬁcally, the “quick” version
+which is trained for 2.4 million iterations), and also retrain our own instance of the model with the
+initialization used in the reference model (based on Glorot & Bengio (2010)).
+
+Due to the depth of the architecture (22 layers, compared to CaffeNet’s 8) and the difﬁculty of prop-
+agating gradient signal to the early layers of the network, GoogLeNet includes additional “auxiliary
+classiﬁers” branching off from intermediate layers of the network to amplify the gradient signal
+to learn these early layers. To verify that networks initialized using our proposed method should
+have no problem backpropagating appropriately scaled gradients through all layers of arbitrarily
+deep networks, we also train a variant of GoogLeNet which omits the two intermediate loss towers,
+otherwise keeping the rest of the architecture ﬁxed.
+
+Our GoogLeNet training results are presented in Figure 4. We plot only the loss of the ﬁnal clas-
+siﬁer for comparability with the single-classiﬁer model. The models initialized with our method
+learn much faster than the model using the reference initialization stategy. Furthermore, the model
+trained using only a single classiﬁer learns at roughly the same rate as the original three loss tower
+architecture, and each iteration of training in the single classiﬁer model is slightly faster due to the
+removal of layers to compute the additional losses. This result suggests that our initialization could
+signiﬁcantly ease exploration of new, deeper CNN architectures, bypassing the need for architectural
+tweaks like the intermediate losses used to train GoogLeNet.
+
+9
+
+Published as a conference paper at ICLR 2016
+
+5 DISCUSSION
+
+Our method is a conceptually simple data-dependent initialization strategy for CNNs which en-
+forces empirically identically distributed activations locally (within a layer), and roughly uniform
+global scaling of weight gradients across all layers of arbitrarily deep networks. Our experiments
+(Section 4) demonstrate that this rescaling of weights results in substantially improved CNN repre-
+sentations for tasks with limited labeled data (as in the PASCAL VOC classiﬁcation and detection
+training sets), improves representations learned by existing self-supervised and unsupervised meth-
+ods, and substantially accelerates the early stages of CNN training on large-scale datasets (e.g.,
+ImageNet). We hope that our initializations will facilitate further advancement in unsupervised and
+self-supervised learning as well as more efﬁcient exploration of deeper and larger CNN architec-
+tures.
+
+The thank Alyosha Efros for his input and encouragement, without his “Gelato bet” most of this
+work would not have been explored. We thank NVIDIA for their generous GPU donations.
+
+ACKNOWLEDGEMENTS
+
+REFERENCES
+
+Agrawal, Pulkit, Carreira, Joao, and Malik, Jitendra. Learning to see by moving. ICCV, 2015. 7, 8
+
+Bradley, David M. Learning in modular systems. Technical report, DTIC Document, 2010. 2
+
+Coates, Adam and Ng, Andrew Y. Learning feature representations with k-means. In Neural Net-
+
+works: Tricks of the Trade, pp. 561–580. Springer, 2012. 5
+
+Doersch, Carl, Gupta, Abhinav, and Efros, Alexei A. Unsupervised visual representation learning
+
+by context prediction. ICCV, 2015. 6, 8, 11
+
+Everingham, Mark, Eslami, SM Ali, Van Gool, Luc, Williams, Christopher KI, Winn, John, and
+Zisserman, Andrew. The Pascal Visual Object Classes challenge: A retrospective. IJCV, 111(1):
+98–136, 2014. 5, 6
+
+Girshick, Ross. Fast R-CNN. ICCV, 2015. 1, 6
+
+Glorot, Xavier and Bengio, Yoshua. Understanding the difﬁculty of training deep feedforward neural
+
+networks. In AISTATS, pp. 249–256, 2010. 2, 7, 8, 9
+
+He, Kaiming, Zhang, Xiangyu, Ren, Shaoqing, and Sun, Jian. Delving deep into rectiﬁers: Surpass-
+
+ing human-level performance on ImageNet classiﬁcation. In ICCV, 2015. 2, 7, 8, 12
+
+Ioffe, Sergey and Szegedy, Christian. Batch normalization: Accelerating deep network training by
+
+reducing internal covariate shift. In ICML, 2015. 2, 7
+
+Jia, Yangqing, Shelhamer, Evan, Donahue, Jeff, Karayev, Sergey, Long, Jonathan, Girshick, Ross B.,
+Guadarrama, Sergio, and Darrell, Trevor. Caffe: Convolutional architecture for fast feature em-
+bedding. In ACM Multimedia, MM, 2014. 5, 6, 7, 9, 12
+
+Kingma, Diederik and Ba, Jimmy. Adam: A method for stochastic optimization. ICLR, 2015. 7
+
+Krizhevsky, Alex, Sutskever, Ilya, and Hinton, Geoffrey E. ImageNet classiﬁcation with deep con-
+
+volutional neural networks. In NIPS, 2012. 2, 6, 8
+
+LeCun, Y., Bottou, L., Orr, G., and Muller, K. Efﬁcient backprop. In Neural Networks: Tricks of
+
+the trade. Springer, 1998. 2, 3
+
+Russakovsky, Olga, Deng, Jia, Su, Hao, Krause, Jonathan, Satheesh, Sanjeev, Ma, Sean, Huang,
+Zhiheng, Karpathy, Andrej, Khosla, Aditya, Bernstein, Michael, Berg, Alexander C., and Fei-Fei,
+Li. ImageNet large scale visual recognition challenge. IJCV, 2015. 1
+
+10
+
+Published as a conference paper at ICLR 2016
+
+Figure 2: Comparison of nearest neighbors for the given input image (top row) in the feature spaces
+of CaffeNet-based CNNs initialized using our method, the fully supervised CaffeNet, an untrained
+CaffeNet using Gaussian initialization, and three unsupervised or self-supervised methods from prior
+work. (For Doersch et al. (2015) we display neighbors in fc6 feature space; the rest use the fc7
+features.) While our initialization is clearly missing the semantics of CaffeNet, it does preserve
+some non-speciﬁc texture and shape information, which is often enough for meaningful matches.
+
+Saxe, Andrew M, McClelland, James L, and Ganguli, Surya. Exact solutions to the nonlinear dy-
+
+namics of learning in deep linear neural networks. arXiv preprint, 2013. 2
+
+Simonyan, Karen and Zisserman, Andrew. Very deep convolutional networks for large-scale image
+
+recognition. ICLR, 2015. 1, 2, 6, 8
+
+Sussillo, David and Abbot, Larry. Random walk initialization for training very deep feedforward
+
+networks. ICLR, 2015. 2
+
+Szegedy, Christian, Liu, Wei, Jia, Yangqing, Sermanet, Pierre, Reed, Scott, Anguelov, Dragomir,
+Erhan, Dumitru, Vanhoucke, Vincent, and Rabinovich, Andrew. Going deeper with convolutions.
+CVPR, 2015. 1, 2, 4, 6, 8, 9
+
+Wang, Xiaolong and Gupta, Abhinav. Unsupervised learning of visual representations using videos.
+
+ICCV, 2015. 7, 8
+
+Yosinski, Jason, Clune, Jeff, Bengio, Yoshua, and Lipson, Hod. How transferable are features in
+
+deep neural networks? In NIPS, 2014. 1
+
+11
+
+Published as a conference paper at ICLR 2016
+
+7
+
+6
+
+5
+
+4
+
+6
+
+5
+
+4
+
+3
+
+3
+0K
+7
+
+2
+0K
+7
+
+6
+
+5
+
+4
+
+3
+
+2
+
+1
+0K
+
+6
+
+4
+
+2
+
+2K
+
+4K
+
+6K
+
+8K
+
+10K
+
+2K
+
+4K
+
+6K
+
+8K
+
+10K
+
+20K
+
+40K
+
+60K
+
+80K
+
+100K
+
+20K
+
+40K
+
+60K
+
+80K
+
+100K
+
+50K 100K 150K 200K 250K 300K 350K
+
+0K
+
+50K 100K 150K 200K 250K 300K 350K
+
+(a) Training loss
+
+(b) Validation loss
+
+Figure 3: Training and validation loss curves for the CaffeNet architecture trained for the ILSVRC-
+2012 classiﬁcation task. The training error is unsmoothed in the topmost plot (10K); smoothed over
+one epoch in the others. The validation error is computed over the full validation set every 2000
+iterations and is unsmoothed. Our initializations (k-means, Random) handily outperform both the
+carefully chosen reference initialization (Jia et al., 2014) and the MSRA initialization (He et al.,
+2015) over the ﬁrst 100,000 iterations, but the other initializations catch up after the second learning
+rate drop at iteration 200,000.
+
+Reference
+MSRA
+Random (ours)
+k-means (ours)
+k-means, no LRN (ours)
+
+Reference
+k-means (ours)
+k-means, single loss (ours)
+
+0M
+
+0.5M
+
+1M
+
+1.5M
+
+2M
+
+0M
+
+0.5M
+
+1M
+
+1.5M
+
+2M
+
+(a) Training loss
+
+(b) Validation loss
+
+Figure 4: Training and validation loss curves for the GoogLeNet architecture trained for the
+ILSVRC-2012 classiﬁcation task. The training error plot is again smoothed over roughly the length
+of an epoch; the validation error (computed every 4000 iterations) is unsmoothed. Note that our k-
+means initializations outperform the reference initialization, and the single loss model (lacking the
+auxiliary classiﬁers) learns at roughly the same rate as the model with auxiliary classiﬁers. The ﬁnal
+top-5 validation error are 11.57% for the reference model, 10.85% for our single loss, and 10.69%
+for our auxiliary loss model.
+
+7
+
+6
+
+5
+
+4
+
+6
+
+5
+
+4
+
+3
+
+6
+
+5
+
+4
+
+3
+
+2
+
+0K
+7
+
+2
+0K
+7
+
+6
+
+4
+
+2
+
+12
+

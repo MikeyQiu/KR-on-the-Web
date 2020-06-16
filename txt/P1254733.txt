@@ -1,0 +1,3560 @@
+ICE-BA: Incremental, Consistent and Efﬁcient Bundle Adjustment for
+Visual-Inertial SLAM
+
+Haomin Liu1
+
+Mingyu Chen1
+
+Guofeng Zhang2
+
+Hujun Bao2
+
+Yingze Bao1
+
+1Baidu
+
+2State Key Lab of CAD&CG, Zhejiang University
+
+{liuhaomin,chenmingyu01,baoyingze}@baidu.com
+
+{zhangguofeng,bao}@cad.zju.edu.cn
+
+Abstract
+
+Modern visual-inertial SLAM (VI-SLAM) achieves
+higher accuracy and robustness than pure visual SLAM,
+thanks to the complementariness of visual features and in-
+ertial measurements. However, jointly using visual and in-
+ertial measurements to optimize SLAM objective functions
+is a problem of high computational complexity. In many VI-
+SLAM applications, the conventional optimization solvers
+can only use a very limited number of recent measure-
+ments for real time pose estimation, at the cost of subop-
+timal localization accuracy. In this work, we renovate the
+numerical solver for VI-SLAM. Compared to conventional
+solvers, our proposal provides an exact solution with sig-
+niﬁcantly higher computational efﬁciency. Our solver al-
+lows us to use remarkably larger number of measurements
+to achieve higher accuracy and robustness. Furthermore,
+our method resolves the global consistency problem that
+is unaddressed by many state-of-the-art SLAM systems: to
+guarantee the minimization of re-projection function and in-
+ertial constraint function during loop closure. Experiments
+demonstrate our novel formulation renders lower localiza-
+tion error and more than 10x speedup compared to alterna-
+tives. We release the source code of our implementation to
+beneﬁt the community 1.
+
+1. Introduction
+
+Simultaneous localization and mapping (SLAM) is a
+classic but ongoing research problem in many applications.
+In recent years, due to the mass availability of imaging and
+inertial sensors, visual-inertial SLAM (VI-SLAM) is in-
+creasingly adopted in products such as mobile augmented
+reality, drones, autonomous driving, robotics etc. Similar to
+pure visual SLAM, VI-SLAM extracts and establishes fea-
+ture correspondences across image frames. But it further
+utilizes inertial measurement (e.g. acceleration and angular
+
+1https://github.com/baidu/ICE-BA
+
+Figure 1: Our SLAM trajectory overlaid with an apartment ﬂoor
+map. The temporal sliding window (green solid line) for our real
+time pose solver is signiﬁcantly longer than other methods. Our
+novel algorithm allows us to use remarkably higher number of
+measurements without surrendering efﬁciency. The black dashed
+line is the full trajectory that is globally optimized and consistent
+with local optimization.
+
+velocity readings) as constraints in motion estimation. Iner-
+tial measurements are very effective for motion estimation
+especially when the motion is rapid and irregular, which is
+notoriously challenging for visual feature matching. Given
+sufﬁcient computation capacity, state-of-the-arts VI-SLAM
+[22, 26] have shown excellent results in terms of 6 degree of
+freedom (DOF) accuracy by using a large number of mea-
+surements.
+
+Since most applications of SLAM are mobile and time
+critical, the computational complexity of VI-SLAM also de-
+serves great attention. Only a minority of VI-SLAM sys-
+tems [24, 28, 11] can be deployed onto embedded devices.
+Improving the efﬁciency of VI-SLAM computation is in-
+evitably the key to popularizing its applications. There are
+two major computational tasks in VI-SLAM: front-end task
+and solver task. Front-end task includes visual feature ex-
+traction and matching. Front-end tasks are generally par-
+allelizable, and thus can be accomplished efﬁciently using
+modern heterogeneous computing architecture. The goal of
+
+1974
+
+the solver task is to optimize the pose parameters by mini-
+mizing the VI-SLAM objective functions given a set of vi-
+sual features and inertial measurements. The solver task is
+usually the speed bottleneck to VI-SLAM.
+
+Most previous VI-SLAM frameworks simply applied
+conventional numeric solvers to solve the objective func-
+tion. Bundle adjustment (BA) is an example of the solver
+task given only visual measurements.
+In this work, we
+generalize the term BA to denote the joint optimization
+of visual and inertial measurements. These conventional
+solvers such as Gauss-Newton and Levenberg-Marquardt
+are designed to provide numerically accurate results with-
+out much consideration for real time issues. Consequently,
+real time VI-SLAM applications [24, 7, 22] based on these
+solvers are only capable of using the most recent measure-
+ments to estimate the latest device pose (i.e. apply a very
+short sliding window in local BA). Theoretically, longer
+measurement history leads to higher estimation accuracy.
+The efﬁciency of BA is apparently one of the most crucial
+factors to the performance of VI-SLAM.
+
+We renovate the BA process for VI-SLAM, as we con-
+siderably improve the local and global optimization efﬁ-
+ciency and solve the inconsistency issue during loop clo-
+sure. In the SLAM problem, the incoming visual and in-
+ertial measurements arrive sequentially. We leverage this
+fact and propose to effectively re-use the intermediate re-
+sults of previous optimization to avoid redundant new com-
+putation. Our generalizable algorithm remarkably increases
+the solver speed and can be applied to most sliding-window
+based VI-SLAM.
+
+Furthermore, our method addresses the global consis-
+tency problem, which is critical to applications such as AR.
+A global map is considered to be consistent if loops can
+be closed and the re-projection error is sufﬁciently mini-
+mized. For visual SLAM, global consistency can be main-
+tained by running global BA or its pose graph approxima-
+tion [9, 25]. However, the problem is more complicated
+for VI-SLAM, where the constraints of velocity and IMU
+bias between frames create many local minimals in the op-
+timization problem. When measurements are removed from
+a temporal sliding window, naive marginalization accumu-
+lates error over time, which would ﬁnally conﬂict with the
+loop constraint. Previous methods either skip marginaliza-
+tion [26], or apply marginalization without resolving the
+conﬂict [28].
+
+This paper proposes a novel solver algorithm for visual-
+inertial SLAM with the following contributions: a new
+sliding window based solver that leverages the incremen-
+tal nature of SLAM measurements to achieve more than
+10x efﬁciency compared to the state-of-the-arts; a new rel-
+ative marginalization algorithm that resolves the conﬂicts
+between sliding window marginalization bias and global
+loop closure constraints; our experimentally validated im-
+
+plementation will be open sourced.
+
+2. Related Work
+
+Early SLAM are mostly EKF (Extended Kalman Fil-
+ter) based [6, 8]. The 6 DOF motion parameters and 3D
+landmarks are probabilistically represented as a single state
+vector. The complexity of classic EKF grows quadratically
+with the number of landmarks, restricting its scalability.
+
+Visual SLAM [20, 25, 9] solves the SLAM problem us-
+ing only visual features. By carefully extracting and match-
+ing a very large number of sophisticated visual features,
+these methods are capable of providing high tracking ac-
+curacy.
+
+Visual-inertial SLAM usually does not a require large
+number of image features to achieve reasonable accuracy,
+since inertial measurement (angular velocity and acceler-
+[24, 32] improve
+ation) provides additional constraints.
+early EKF SLAM by excluding 3D landmarks from the
+state vector. Thereby, they are capable of modeling multiple
+frames in the state. However, as a common behavior of EKF
+algorithms, they only maintain the most recent state, and
+thus they are sensitive to measurement error and difﬁcult to
+be recovered from unstable tracking status. [7, 22, 28, 26]
+use a temporally sliding window to select the most recent
+visual and inertial measurements for optimizing SLAM ob-
+jective functions. They show that in many cases sliding
+window based VI-SLAM is more robust and accurate than
+ﬁlter based methods. However, the objective function opti-
+mization is of high computational complexity. The perfor-
+mance of sliding window based VI-SLAM highly depends
+on the computational availability, which is strictly limited
+on mobile devices and drones. Our proposed novel method
+intends to address this problem by greatly improving efﬁ-
+ciency of the optimization solver.
+
+Optimization Solvers are commonly shared by various
+SLAM implementations, although their front-end systems
+and frameworks are very different. BA [30] of visual SLAM
+utilizes the sparseness structure of re-projection function
+and Hessian. In this work, the term BA is generalized to de-
+note joint optimization of visual and inertial measurements
+for VI-SLAM. [2, 4, 31] improve the efﬁciency of BA in
+large-scale setup. [17] shows that the block-based precon-
+ditioned conjugate gradient (PCG) can be used to solve the
+Schur complement for efﬁciency gain. There are also ex-
+cellently engineered implementations of BA [1, 21] that are
+commonly used by state-of-the-art SLAM systems. How-
+ever, all these methods suffer from the fact that its complex-
+ity grows quadratically w.r.t the number of cameras. Thus,
+the SLAM systems built upon these solvers can only use a
+very limited number of recent measurements for real time
+pose estimation.
+
+Incremental Solvers are recently being explored by re-
+searchers in attempts to exploit the previous optimization
+
+1975
+
+sj ◦ 1
+ρj
+
+{X1, · · · , Xnt }. Ct = (Tt, Mt), where Tt = (Rt, pt)
+is the camera pose, and Mt = (vt, bt) is the IMU state
+including velocity vt and sensor bias bt. A 3D point Xj
+is projected onto the i-th image plane corresponding to a
+2D feature measurement xij = π(Ti ◦ Xj) + nij, where
+nij is Gaussian noise nij ∼ N (0, Σvis
+ij ). The 3D point is
+parametrized using inverse depth [5] as Xj = T−1
+¯xsj j,
+where ρj is the inverse depth of j-th point, sj is the source
+frame from which j-th point is extracted. ¯x is the homoge-
+nous coordinate of x. The visual constraint is deﬁned as
+f vis
+¯xsj j)−xij ∼ N (0, Σvis
+ij (Ti, Tsj , ρj) = π(Ti◦T−1
+sj ◦
+(1)
+IMU measurements Zij obtained between frame i and j
+provide relative motion constraint. The IMU constraint is
+deﬁned as
+ij (Ci, Cj) = (eT
+r , eT
+f imu
+er = Log((Exp(∆Jr
+ev = Ri(vj − vi − g∆tij) − (∆vij + ∆Jv
+
+v , eT
+b )T ∼ N (0, Σimu
+ij )
+ij(bi − ˆbi))∆Rij)T RjRT
+i )
+
+ij(bi − ˆbi))
+
+p , eT
+
+1
+ρj
+
+ij ).
+
+ep = Ri(pj − pi − vi∆tij −
+
+− (∆pij + ∆Jp
+
+ij(bi − ˆbi))
+
+g∆t2
+
+ij)
+
+1
+2
+
+eb = bj − bi
+
+(2)
+The ∆’s and the covariance matrix Σimu
+ij depend only on Zij
+and can be pre-integrated before optimization. ˆbi is the bias
+estimate at the time of pre-integration. Please refer to [10]
+for more details.
+
+The absolute position and yaw around the gravity are un-
+observable in VI-SLAM [14]. A prior is imposed on the ﬁrst
+camera C0 , denoted as f prior
+
+(C0) ∼ N (0, Σprior
+
+).
+
+0
+
+0
+
+3.2. Local and Global Optimization
+
+It is infeasible to only perform global optimization in
+solving a long-time VI-SLAM problem. Similar to [28, 26],
+our framework (Fig. 2) includes both a local optimization
+(local BA) and a global optimization (global BA).
+
+Local BA optimizes the states within a temporarily slid-
+ing window that only contains the latest frames and points.
+The goal of local BA is to reduce accumulated error and ex-
+pand the map as fast as possible. The cost function of local
+BA is to minimize
+
+arg min
+{Ci,ρj |i=t0···t,j∈Vi}
+
+X
+i=t0
+
+X
+j∈Vi
+
+||f vis
+
+ij (Ti, Tsj , ρj)||Σvis
+
+ij
+
+(3)
+
++||f prior
+
+t0 (Ct0 )||Σprior
+t0
+
++
+
+||f imu
+
+i,i+1(Ci, Ci+1)||Σimu
+
+i,i+1
+
+t
+
+t−1
+
+X
+i=t0
+
+Figure 2: Local and global optimization framework
+
+result to reduce the amount of new computation. Kaess et
+al. [19, 18] propose to solve the optimization by QR fac-
+torization of the measurement matrix. Each new optimiza-
+tion iteration only updates a small portion of the factoriza-
+tion results instead of factorizing the entire graph. Simi-
+larly, Ila et al. [16] propose to incrementally recover the
+estimate and covariance, and recently propose to update
+Schur complement incrementally in BA [15]. However,
+the aforementioned methods are only suitable for solving
+”sparse” camera problem (i.e. most key points are only ob-
+servable in a small number of cameras). While this is true
+for large scale structure-from-motion, in SLAM problems,
+most frames in local sliding window share a large num-
+ber of common points, which degenerates those incremen-
+tal solvers into regular BA solver. As a result, they do not
+show better localization accuracy than other state-of-the-
+art SLAM. In this work, we propose a novel incremental
+solver that better leverages the speciﬁc block matrix struc-
+ture in SLAM, and shows superior performance in terms
+of speed and accuracy. As a major extension to our early
+work [23], this paper further discusses the acceleration of
+local BA and the relative marginalization for the global con-
+sistency. We also provide substantially more experimental
+results. To our best knowledge, this paper describes the ﬁrst
+BA based VI-SLAM solver, achieving unprecedented ef-
+ﬁciency with state-of-the-art accuracy, and simultaneously
+ensuring global consistency.
+
+3. Framework
+
+We ﬁrst deﬁne the constraint functions, and next explain
+
+our local and global optimization framework.
+
+3.1. Constraint Functions
+
+The goal of visual-inertial SLAM is deﬁned as using vi-
+sual and inertial measurements up to time point t to esti-
+mate the motion state Ct, as well as a set of 3D points
+
+where t0 = t−n+1 is the ﬁrst frame in sliding window and
+n is the size of sliding window. Vi denotes the set of points
+tracked in frame i. As one of our major contributions, Sec. 4
+explains how to efﬁciently solve Eq. (3).
+
+1976
+
+Global BA runs in parallel to local BA at a relatively
+lower frequency. Global BA optimizes the frames that are
+removed from local sliding window but selected as key
+frames in global map. A frame is selected as a key frame
+in global BA if it carries more than N (e.g. 20 in our ex-
+periments) features that have not been seen from all other
+frames. The cost function of global BA is
+
+arg min
+{Ci,ρj |i∈{k1···km},j∈Vi}
+
+km
+
+X
+i=k1
+
+X
+j∈Vi
+
+||f vis
+
+ij (Ti, Tsj , ρj)||Σvis
+
++
+
+ij
+
+||f prior
+0
+
+(Ck1 )||Σprior
+
++
+
+0
+
+||f imu
+
+ki,ki+1 (Cki , Cki+1 )||Σimu
+
++
+
+ki ,ki+1
+
+m−1
+
+X
+i=1
+
+||f rel
+
+i ({Tk∈Li })||Σrel
+
+i
+
+X
+i
+
+(4)
+where Li is the set of keyframes involved in i-th rela-
+tive pose constraint. Loop closure triggers global BA that
+should account for map consistency. For a typical loop con-
+straint, |Li| = 2. As one of our major contributions, Sec. 4
+explains how to efﬁciently solve Eq. (4).
+
+Relative Marginalization produces relative pose con-
+straint between the last keyframe in local BA and the latest
+frame that is removed from local BA (e.g. the constraint be-
+tween Ckm−1 and Ckm in Fig. 2), so that the constraints
+obtained from global BA (e.g. loop closure) can help an-
+chor the camera poses in local BA, preventing drifts caused
+by accumulation error. More details are discussed in Sec. 5.
+
+4. Efﬁcient Solver for VI-SLAM
+
+Efﬁciently solving Eq. (3) and Eq. (4) is the key to VI-
+SLAM speed. Minimizing such formulations can be gener-
+k ||fk(φ)||2. In a typical Gauss New-
+alized as arg minφ
+ton solver, the optimal values of φ are obtained by opti-
+mization iterations φ+ = φ− ⊕ δφ where the subscript −/+
+denotes state before/after iteration, and ⊕ is the generalized
+addition on manifold [10]. At each iteration, the cost func-
+tion fk is linearized at current estimate φ− as
+
+P
+
+fk(φ− ⊕ δφ) ≈ Jkδφ + ek
+
+(5)
+
+−
+
+⊕δφ)
+
+where Jk = ∂fk(φ
+|δφ=0 and ek = fk(φ−) are the
+Jacobian matrix and error vector respectively. δφ is solved
+by the normal equation
+
+∂δφ
+
+Aδφ = b
+
+[A|b] =
+
+[Ak|bk]
+
+X
+k
+[Ak|bk] = [JT
+k Jk| − Jkek]
+
+(6)
+
+example, f vis
+in (1) only involves 3 types of variables
+ij
+(Ti, Tsj , ρj). Then the corresponding Ak and bk has only
+9 and 3 blocks of non-zero entries. Leveraging such spar-
+sity patten [30] and the block structure [17] leads to an ef-
+ﬁcient construction of (6). Furthermore, due to the nature
+of SLAM problem, new states and measurements always
+arrive incrementally. As a result, only a small portion of
+variables change at each iteration, i.e. only an small portion
+of fk’s need to be re-linearized. This fact can be exploited
+In our
+to signiﬁcantly accelerate the construction of (6).
+early work [23], instead of computing (6) from scratch in
+each iteration, we incrementally update [A|b] as
+
+[A|b]+ = [A|b]− + [
+
+(7)
+where L is the set of cost functions that need to be re-
+linearized (i.e. involving at least one |δφi| exceeding a pre-
+set threshold), and [δAk|δbk] , [Ak|bk]+ − [Ak|bk]−.
+
+Pk∈L δbk ]
+
+Pk∈L δAk
+
+For BA problem, a common strategy to efﬁciently
+solve ((6)) is to marginalize points to obtain a reduced
+linear system involving only cameras. φ is reordered as
+p )T , ﬁrst camera then point parameters. Ac-
+φ = (φT
+cordingly, [A|b] can be written as
+
+c , φT
+
+(8)
+
+(9)
+
+[A|b] =
+
+U W u
+WT V v (cid:21)
+
+.
+
+(cid:20)
+
+The second row is eliminated to obtain the Schur comple-
+ment that involves only δφc
+
+Sδφc = s
+
+[S|s] =
+
+U − WV−1WT u − WV−1v
+
+(cid:3)
+
+(cid:2)
+
+Sj
+
+i ] =
+
+The block corresponding to (i1, i2) camera pair in S and
+i-th camera in s can be efﬁciently computed as
+ui −
+[Si1i2 |si] = h
+i1i2 |sj
+[Sj
+
+i1i2
+i2j WijV−1
+
+Pj∈Vi1 ∪Vi2
+jj WT
+
+Wi1jV−1
+
+Ui1i2 −
+
+Pj∈Vi
+
+sj
+i i
+
+jj vj
+
+(10)
+As introduced in [23], the incremental arrival of SLAM
+measurements can be exploited to accelerate the construc-
+tion of (10), by incrementally update [Si1i2 |si] as
+[Si1i2 |si]+ = [Si1i2 |si]− + h Pj∈Pi1 i2
+
+i1i2 Pj∈Pii
+
+δSj
+
+δsj
+
+(cid:2)
+
+(cid:3)
+
+i i
+
+Pi1i2 = P ∪ Vi1 ∪ Vi2
+
+(11)
+where P is the set of points involved in cost functions need
+to be re-linearized.
+
+Si1i2 is nonzero if and only if (i1, i2) share common
+points or have constraint between them. This particu-
+lar sparseness structure can be speciﬁcally leveraged by
+preconditioned conjugated gradient (PCG) to efﬁciently
+solve ((9)) [2, 4, 17]. After solving δφc, point variable δφp
+can be solved by back-substituting δφc to the second row
+of (8), for each point j separately
+
+4.1. General Incremental BA Solver
+
+In global optimization in VI-SLAM, each cost function
+fk involves only a very small subset of variables. For
+
+δφpj = V−1
+
+jj 
+
+vj −
+
+WT
+
+ijδφci 
+
+(12)
+
+
+where Xj denotes the set of cameras seeing point j.
+
+
+
+Xi∈Xj
+
+1977
+
+O-IBA: Total
+O-IBA: Schur
+ST-IBA: Total
+ST-IBA: Schur
+
+30
+
+25
+
+20
+
+15
+
+10
+
+)
+s
+m
+
+(
+ 
+e
+m
+
+i
+t
+
+5
+
+0
+
+0
+
+500
+
+1000
+
+2500
+
+3000
+
+3500
+
+1500
+
+2000
+frame index
+
+Figure 3: The total runtime and the Schur complement time for
+each frame in MH 01 easy sequence [3]. O-IBA is original IBA
+introduced in Sec. 4.1; ST-IBA is the sub-track based IBA intro-
+duced in Sec. 4.2. Between frame 400 to 900, O-IBA time sig-
+niﬁcantly increases since higher number of frames share the same
+feature points during this period of time. ST-IBA does not suffer
+from this as expected.
+
+4.2. Improvement for Local BA
+
+The incremental BA (IBA) introduced in Section 4.1 can
+signiﬁcantly accelerate global BA where most keyframes do
+not share common points. However, in local BA most points
+can be observed by most frames in the sliding window. As
+a result, a large portion of [Sj
+i ] deﬁned in (10) has to
+be re-evaluated, and the incremental update of Schur com-
+plement degrades to the standard process. Fig. 3 shows the
+runtime for this IBA process (original IBA, or O-IBA). The
+update of Schur complement dominates the total runtime.
+
+i1i2 |sj
+
+We propose an improved incremental BA solver to ad-
+dress the Schur complement problem in local BA. We name
+it Sub-Track based IBA (ST-IBA). The key idea is to split
+the origin long feature track Xj into several short over-
+lapping sub-tracks Xj1 , Xj2 , · · · , as illustrated in Fig. 4.
+Each sub-track Xjk spans over l neighboring frames with
+l < |Xj|. We set l = 5 in our experiments. Sub-tracks also
+include key frames in local BA. The corresponding inverse
+depth ρj becomes several identical duplicates ρj1 , ρj2 , · · · .
+Instead of marginalizing ρj that introduces nonzero block
+Si1i2 for each pairs of (i1, i2) ∈ Xj × Xj, we marginal-
+ize ρjk that introduces Si1i2 for a much smaller set of pairs
+(i1, i2) ∈ Xjk × Xjk . Consequently, S becomes from a
+dense full matrix - as long as there is one |Xj| reaches the
+size of sliding window n - to a diagonal band matrix. Fur-
+thermore, the incremental update of [Si1i2 |si] (11) becomes
+[Si1i2 |si]+ = [Si1i2 |si]− + h Pj∈ ¯Pi1 i2
+[¯Sj
+Wi1j ¯Qj
+
+i1i2 Pj∈ ¯Pii
+
+i2j Wi1j ¯qj
+
+i ] =
+
+δ ¯Sj
+
+δ¯sj
+
+i1i2
+
+i1i2 |¯sj
+i1i2 |¯qj
+
+[ ¯Qj
+
+(cid:2)
+i ] = h Pjk∈ ¯V
+
+j
+i1 i2
+
+WT
+V−1
+
+¯Pi1i2 = {j|∃k : jk ∈ ¯P ∪ ¯V j
+
+jkjk Pjk∈ ¯V
+i1i2 }
+
+i (cid:3)
+
+V−1
+jkjk
+
+j
+ii
+
+vjk i
+
+(13)
+where ¯P is the set of sub-track points involved in cost func-
+tions that need to be re-linearized, and ¯V j
+i1i2 denotes the set
+of common sub-track points of frame (i1, i2) corresponding
+to j-th point. Comparing to (11), (13) is more efﬁcient not
+only because S becomes sparser, but also because ¯Pi1i2 is
+
+i i
+
+(a) Original feature track Xj
+
+(b) Overlapping sub-tracks
+
+Figure 4: We split the original feature track Xj in (a) into 3 over-
+lapping sub-tracks Xj1 , Xj2 and Xj3 in (b), each spans l = 3
+neighboring frames and the keyframes K
+generally much smaller than Pi1i2 , as the probability that
+a short sub-track involved in re-linearization is very low.
+[ ¯Qj
+i ] deﬁned in (13) can also be incrementally updated
+for further speedup:
+
+i1i2 |¯qj
+
+¯Qj
+
+(cid:16)
+
+i1i2 (cid:17)
+
+¯Qj
+
+= (cid:16)
+
+i1i2 (cid:17)
+
+−
+
++
+
++
+
++
+
+(cid:16)¯qj
+i (cid:17)
+
+= (cid:16)¯qj
+i (cid:17)
+
+−
+
++
+
+i1i2 = ¯P ∪ ¯V j
+¯P j
+
+i1i2
+
+δ
+
+V−1
+
+jkjk (cid:1)
+
+(cid:0)
+
+X
+j
+i1 i2
+
+jk∈ ¯P
+
+V−1
+jkjk
+
+δ
+
+(cid:0)
+
+vjk (cid:1)
+
+X
+j
+jk∈ ¯P
+ii
+
+(14)
+
+Note that the sub-track process is only used for the update
+of Schur complement. After solving Schur complement, we
+update 3D points by (12) for each original point j rather
+than the sub-track points jk. Compared to the traditional
+method, since the objective function is exactly the same, es-
+pecially the point substitution still uses the original normal
+equation without any approximation, a few more iterations
+can make the solution converge and the ﬁnal accuracy does
+not decrease. As shown in Fig. 3 and Tab. 1, the proposed
+ST-IBA is faster than the original IBA by 2 ∼ 10 times
+without any noticeable loss of accuracy.
+
+4.3. Incremental PCG for IBA
+
+In order to solve (9), we renovated the original PCG al-
+gorithm [17]. In standard PCG, δφc is initialized as zero
+then iteratively updated toward the optimal values. In the
+case of IBA, the minimizer δφci will not actually update
+the state of camera i if δφci is not large enough (Sec. 4.1).
+For such camera i, the result of the next iteration δφ+
+ci will
+be very close to the previous one δφ−
+ci , because both results
+are obtained by updating the same φ−
+ci towards the similar
+optimal values. This observation helps us to better initial-
+ize δφc and accelerate convergence of PCG. Speciﬁcally,
+we initialize δφ+
+ci for those camera i whose state
+was not changed in the last iteration, and δφ+
+ci = 0 for the
+rest. We name this algorithm as incremental PCG (I-PCG)
+as it also utilizes the incremental nature of SLAM measure-
+ments. As shown in Tab. 1, I-PCG improves the accuracy
+by approx. 20% due to better convergence.
+
+ci = δφ−
+
+5. Relative Marginalization
+
+If the number of frames in the sliding window of lo-
+cal BA surpasses a threshold (e.g. 50 in our experiments),
+the earliest frame t0 in the sliding window needs to be
+eliminated.
+Instead of neglecting the information car-
+ried in this eliminated frame, marginalization converts it
+
+1978
+
+0
+
+0
+
+0, C′
+
+(g0, M′
+
+). The state M′
+
+0) ∼ N (0, Σprior
+
+0 connected to the prior factor hprior
+
+1) are marginalized out, which results in a prior factor hprior
+
+Figure 5: Relative marginalization. Let hvis, himu, hprior denote the visual, inertial, and prior factors, respectively. (a) For the ﬁrst frame
+t0 = 0, we add a weak prior factor hprior
+0) and the
+inertial factor himu
+01 (g0, M′
+). (b) For the next
+frame t0 = 1, the process is similar except that the visual factor hvis
+1 are marginalized. (c) In
+(k0 Tt0 , {k0 Tsj 6=k0|j∈Vt0 }). Marginalizing such a factor
+general, more keyframes other than k0 are involved in the visual factor hvis
+Vt0
+will introduce correlation among all the involved keyframes (yellow circles). Repeat this process until the marginalized frame t0 is a new
+keyframe as in (d). Then the process for local and global BA goes in different ways. (e) For global BA, we marginalize the prior factor
+hprior
+t0 (gk0 , M′
+t0 . A relative constraint is submitted to global BA as shown in Fig. 2. (f) For local
+BA, we ﬁrst marginalize the prior factor hprior
+t0 , {k0 Tk∈Kt0 }). All involved states except M′
+t0 are marginalized , producing a
+prior on M′
+t0 . At this point, t0 becomes the new reference keyframe. The new state gt0 appears, along with a weak prior on it, and the
+pose of the next frame t0 + 1 is represented in the reference of frame t0, i.e. t0 Tt0+1. We then marginalize the prior factor and the inertial
+factor himu
+t0,t0+1(gt0 , M′
+t0+1. After (e) and (f) are done, the system
+goes back to a state similar to (b).
+
+t0 , {k0 Tk∈Kt0 }) and the IMU state M′
+t0 (gk0 , M′
+
+t0 is marginalized out, producing a prior on gt0 and C′
+
+V1 (0T1) is involved, and both 0T1 and M′
+
+0
+1) ∼ N (0, Σprior
+
+t0+1). M′
+
+(g0, M′
+
+(g0, C′
+
+t0 , C′
+
+1
+
+1
+
+into a linear prior applied onto the remaining variables.
+Marginalization is commonly used in visual inertial odom-
+etry (VIO) [24, 22, 11] that does not maintain a global map.
+Nevertheless, in the case of VI-SLAM, error accumulation
+will gradually corrupt the prior produced by marginaliza-
+tion. The corrupted prior generated from the sliding win-
+dow will eventually conﬂict with the global map and loop
+closure constraints, and degrade the overall accuracy.
+
+One of our main contributions is maintaining the con-
+sistency between marginalization prior and global BA with
+the proposed relative marginalization. The key idea is to
+formulate the prior relative to the reference keyframe coor-
+dinate system instead of the global coordinate system. It is
+similar to the relative BA [29] for visual SLAM, in which
+all parameters are represented in the relative coordinate to
+avoid adjusting all parameters at loop closure. By contrast,
+we use the relative representation for marginalization. In
+addition, the relative representation is more complicated for
+
+VI-SLAM since the gravity direction becomes observable.
+Before explaining details, we ﬁrst recap the notations.
+Ci is the motion state of frame i, which comprises a pose
+Ti = (Ri, pi) and an IMU state Mi = (vi, bi). We
+can represent the global pose Ti and the gravity direction
+in reference of frame i’s closest keyframe k0 as follows:
+k0 Ti = Ti ◦ T−1
+and gk0 = Rk0 g. The velocity vi is rep-
+k0
+resented in its own reference as ivi = Rivi. The motion
+state can be represented locally as C′
+i) and
+i = (ivi, bi). Accordingly, f vis
+M′
+ij (k0 Ti, k0 Tsj , ρj) = π(k0 Ti ◦ k0 T−1
+hvis
+
+i = (k0 Ti, M′
+ij (Ti, Tsj , ρj) becomes
+1
+ρj
+
+¯xsj j) − xij.
+
+sj ◦
+
+(15)
+Marginalizing k0 Ti will result in full correlation among
+{ρj|j ∈ Vi}, invalidating the sparseness of BA. Inspired
+by [27], we maintain the sparseness by duplicating each
+ρj as ρ′
+j = ρj, and discard all measurements except xij.
+Then the duplicated points are marginalized out, producing
+
+1979
+
+a Gaussian factor
+Vi (k0 Ti, {k0 Tsj 6=k0|j∈Vi }) ∼ N (0, ΣVi ).
+hvis
+Similarly, f imu
+ij (Ci, Cj) becomes
+himu
+ij (gk0 , C′
+i, C′
+r = Log((Exp(∆Jr
+e′
+v = k0 Ri(k0 RT
+e′
+j
+
+v)T , (e′
+b )T
+ij(bi − ˆbi))∆Rij)T k0 Rj
+
+j) = ((e′
+
+r)T , (e′
+
+p)T , eT
+
+jvj − gk0 ∆tij) − ivi
+ij(bi − ˆbi))
+
+− (∆vij + ∆Jv
+
+k0 RT
+i )
+
+(16)
+
+(17)
+
+p = k0 Ri(k0 pj − k0 pi −
+e′
+
+gk0 ∆t2
+
+ij) − ivi∆tij
+
+1
+2
+
+− (∆pij + ∆Jp
+
+ij(bi − ˆbi))
+
+t0+1, {k0 Tk∈Kt0 }) ∼ N (0, Σprior
+
+We illustrate the relative marginalization process with
+detailed descriptions in Fig. 5. After marginalizing the ear-
+liest frame t0, the process will result in a prior on the next
+frame t0 + 1, denoted as
+hprior
+t0+1(gk0 , C′
+
+(18)
+where Kt0 is the set of involved keyframes that is evolving
+as Kt0 = Kt0−1 ∪ {sj|j ∈ Vt0 }\{k0}. Note that these rela-
+tive representation of states is only used in marginalization.
+During optimization, states and priors need to be converted
+to the global frame. We convert the prior factor (18) into the
+global frame, denoted as
+
+t0+1)
+
+t0+1).
+
+t0+1(Ct0+1) ∼ N (0, Σprior
+f prior
+Note that keyframe poses are only adjusted in global BA,
+thus eliminated from the prior factor for local BA. If the
+marginalized frame t0 is a new keyframe, the marginaliza-
+tion process will submit a relative constraint to global BA
+(Fig. 5e), denoted as
+
+(19)
+
+t0 (gk0 , {k0 Tk∈K′
+hrel
+
+}) ∼ N (0, Σrel
+t0 )
+
+t0
+
+(20)
+
+where K′
+t0 = Kt0−1 ∪ {t0}. Similarly, the relative con-
+straint is converted from the reference frame k0 to the global
+frame, denoted as
+t0 ({Tk∈Lt0 }) ∼ N (0, Σrel
+f rel
+t0 )
+t0 ∪ {k0}.
+
+(21)
+
+where Lt0 = K′
+6. Evaluation
+
+To evaluate our proposed solver, we build a SLAM sys-
+tem that consists of the proposed solver, a frontend for
+visual measurements, and a loop closure detector. The
+frontend detects Harris features [13], establish inter-frame
+feature tracks using optical-ﬂow [33], and match features
+across stereo frames using direct-matching [11]. Our
+loop closure detector stores bag-of-words features from
+keyframes for loop detection [12]. Once a loop closure is
+detected, we use the relative pose and covariance between
+the matched frames as a relative constraint in global BA.
+
+We perform quantitative evaluation using EuRoC [3]
+dataset, and qualitative comparison against Google Tango in
+a number of challenging environments. The sliding window
+size is set to 50 in all experiments. Larger sliding window
+does not increase accuracy but decreases efﬁciency.
+
+Conﬁguration
+Proposed
+w/o ﬁx. linear.
+w/o ST-IBA
+w/o I-PCG
+w/o rel. marg.
+
+RMSE (m)
+0.120792
+0.117973
+0.123548
+0.152073
+0.179655
+
+LBA time (ms)
+2.45
+10.3
+7.03
+-
+-
+
+GBA time (ms)
+12.90
+103.94
+-
+12.91
+13.50
+
+Table 1: Average RMSE and runtime of proposed methods for the
+whole EuRoC dataset. Fixing linearization points and ST-IBA sig-
+niﬁcantly improves efﬁciency without sacriﬁcing accuracy. I-PCG
+reduces RMSE due to better convergence, but not the computa-
+tion time because we set a minimal iteration number. Relative
+marginalization improves both the accuracy as expected, and efﬁ-
+ciency because the additional constraints accelerate convergence.
+
+Ours w/ loop
+
+Ours w/o loop
+
+OKVIS
+
+SVO
+
+iSAM2
+
+Seq.
+
+MH 01
+MH 02
+MH 03
+MH 04
+MH 05
+V1 01
+V1 02
+V1 03
+V2 01
+V2 02
+V2 03
+Avg
+
+0.11
+0.08
+0.05
+0.13
+0.11
+0.07
+0.08
+0.06
+0.06
+0.04
+0.11
+0.08
+
+0.09
+0.07
+0.11
+0.16
+0.27
+0.05
+0.05
+0.11
+0.12
+0.09
+0.17
+0.12
+
+0.22
+0.16
+0.12
+0.18
+0.29
+0.03
+0.06
+0.12
+0.05
+0.07
+0.14
+0.14
+
+0.06
+0.08
+0.16
+-
+0.63
+0.06
+0.12
+0.21
+0.22
+0.16
+-
+0.20
+
+0.07
+0.11
+0.12
+0.16
+0.25
+0.07
+0.08
+0.12
+0.10
+0.13
+0.20
+0.13
+
+Table 2: Translation RMSE (m) with EuRoC dataset. Note that
+the spatial alignment of estimated and ground-truth trajectories is
+performed without scale adjustment for stereo algorithms. The
+results of other methods are generated from our own experiments
+based on their released codes, which are slightly different from the
+reported numbers in their papers.
+
+6.1. Algorithm Validation
+
+We validate each step of our algorithm introduced in
+each sub-section. Tab. 1 shows the performance of the full
+system, as well as disabling ﬁxation of linearization point,
+ST-IBA, I-PCG and relative marginalization, respectively.
+All tests are run on a desktop PC with an i7 CPU @ 3.6GHz.
+
+6.2. Localization Accuracy
+
+We compare the end-to-end accuracy of different stereo
+SLAM systems in Tab. 2. OKVIS [22] and SVO [11] are
+both visual inertial odometry (VIO). We run iSAM2 [18]
+by feeding the same feature tracks as ours, without provid-
+ing loop constraints so it runs as a VIO. For a fair com-
+parison, we show both our results with and without loop
+closure. Without loop closure, our system already achieves
+better localization accuracy than state-of-the-art alternatives
+since we use 50 frames in our local sliding window. With
+loop closure relative constraints provided to our solver, the
+RMSE considerably decreases for most sequences.
+
+6.3. Solver Efﬁciency
+
+The efﬁciency of our solver is a key contribution of this
+work. We measure the optimization time of different SLAM
+systems as shown in Tab. 3. We also measure the speed of
+our solver using an oct-core ARM CPU (A9 x 4 + A15 x
+4). We conﬁgure the solver to run on A15 in single thread
+
+1980
+
+14
+
+12
+
+10
+
+8
+
+6
+
+4
+
+2
+
+0
+
+-2
+
+20
+
+10
+
+0
+
+-10
+
+-20
+
+-30
+
+-40
+
+-50
+
+-60
+
+-70
+
+10
+
+8
+
+6
+
+4
+
+2
+
+0
+
+-2
+
+45
+
+40
+
+35
+
+30
+
+25
+
+20
+
+15
+
+10
+
+5
+
+0
+
+IBA without loop
+IBA with loop
+Tango
+
+IBA without loop
+IBA with loop
+Tango
+
+y
+
+y
+
+(a) Indoor ofﬁce
+
+(b) Indoor ofﬁce
+
+-16
+
+-14
+
+-12
+
+-10
+
+-6
+
+-4
+
+-2
+
+0
+
+0
+
+5
+
+15
+
+20
+
+10
+x
+
+(c) Indoor ofﬁce
+
+IBA without loop
+IBA with loop
+Tango
+
+IBA without loop
+IBA with loop
+Tango
+
+y
+
+y
+
+IBA without loop
+IBA with loop
+Tango
+
+y
+
+60
+
+120
+
+100
+
+80
+
+40
+
+20
+
+0
+
+-120
+
+-100
+
+-80
+
+-60
+
+-20
+
+0
+
+20
+
+-25
+
+-20
+
+-15
+
+-10
+
+-5
+
+5
+
+10
+
+15
+
+20
+
+25
+
+-20
+
+0
+
+20
+
+40
+
+60
+
+80
+
+-40
+x
+
+(d) Outdoor road
+
+(e) Outdoor road
+
+x
+
+(f) Outdoor road
+
+Figure 6: Trajectories of our system and Google tango. Ideally the ﬁnal position of the trajectory should be identical to the initial position.
+
+mode. The optimization time is 12.18ms, 78.14ms, and
+193.72ms for local BA, global BA without and with loop,
+respectively. Our solver shows great potential to be applied
+to mobile and power-constraint applications.
+
+6.4. Qualitatively Comparison with Google Tango
+
+mized for robust and accurate motion tracking. We compare
+our stereo SLAM system with a Tango Phab 2 as shown in
+Fig. 6. Without loop closure, our system shows comparative
+trajectories and more accurate scale than Tango. With loop
+closure, our system consistently outperforms Tango.
+
+Google tango is a commercial device that is highly opti-
+
+7. Conclusion
+
+Ours w/o loop
+2.45
+12.90
+
+Ours w/ loop
+2.45
+24.67
+
+OKVIS
+26.83
+-
+
+iSAM2
+-
+225.87
+
+ORB-SLAM
+99
+3515
+
+LBA
+GBA
+
+Table 3: Comparison of runtime (ms) for local/global BA
+(LBA/GBA) with EuRoC dataset using an Intel i7 CPU. Multi-
+threading is disabled. The runtime does not include the fron-
+tend process (feature detection and matching). OKVIS [22] uses
+5 keyframes plus 3 IMU frames in sliding window, whereas our
+system uses 50 frames and still achieves 10x speedup. Note that
+the optimization time of SVO [11] cannot be measured directly.
+We feed our frontend results to iSAM2 [18] to emulate the op-
+timization time of SVO. iSAM2 is the solver used by SVO and
+also a state-of-the-arts incremental solver. We also measure the
+optimization time of ORB-SLAM [25] which uses g2o [21] as its
+solver. The runtime for LBA/GBA is approximately 40/140 times
+slower than ours. Note that ORB-SLAM requires more features
+for robust tracking, which is also a reason for the low efﬁciency. If
+we reduce the number of extracted features from default 1200 to
+490, tracking fails on 3/11 sequences on EuRoC dataset.
+
+In this paper, we have proposed a novel optimization al-
+gorithm for VI-SLAM that leverages the sparseness and the
+unique matrix structure for the optimization of sliding win-
+dow based bundle adjustment. In addition, a novel relative
+marginalization is proposed to improve global consistency.
+Experiments demonstrate our approach can not only sub-
+stantially accelerate the optimization process but also pro-
+vide lower pose estimation error than other state-of-the-art
+SLAM approaches as well as a commercial system.
+
+Acknowledgement
+
+We would like to thank Bangbang Yang and Quanhan
+Qian for their kind help in producing results of OKVIS,
+SVO, iSAM2 and ORB-SLAM in Tab. 2 and 3. Hujun
+Bao is partially supported by 973 program of China (No.
+2015CB352503), and Guofeng Zhang is partially supported
+by NSF of China (No. 61672457).
+
+-8
+x
+
+0
+x
+
+1981
+
+References
+
+[1] S. Agarwal, K. Mierle, et al. Ceres solver, 2012.
+[2] S. Agarwal, N. Snavely, S. M. Seitz, and R. Szeliski. Bundle
+adjustment in the large. In European Conference on Com-
+puter Vision, pages 29–42. Springer, 2010.
+
+[3] M. Burri, J. Nikolic, P. Gohl, T. Schneider, J. Rehder,
+S. Omari, M. W. Achtelik, and R. Siegwart. The EuRoC
+micro aerial vehicle datasets. The International Journal of
+Robotics Research, 2016.
+
+[4] M. Byr¨od and K. ˚Astr¨om. Conjugate gradient bundle adjust-
+ment. In European Conference on Computer Vision, pages
+114–127. Springer, 2010.
+
+[5] J. Civera, A. J. Davison, and J. M. Montiel. Inverse depth
+IEEE transactions
+
+parametrization for monocular SLAM.
+on robotics, 24(5):932–945, 2008.
+
+[6] A. J. Davison, I. D. Reid, N. D. Molton, and O. Stasse.
+IEEE
+MonoSLAM: Real-time single camera SLAM.
+Transactions on Pattern Analysis and Machine Intelligence,
+29(6):1052–1067, 2007.
+
+[7] T.-C. Dong-Si and A. I. Mourikis. Motion tracking with
+ﬁxed-lag smoothing: Algorithm and consistency analysis.
+In International Conference on Robotics and Automation,
+pages 5655–5662. IEEE, 2011.
+
+[8] E. Eade and T. Drummond. Monocular SLAM as a graph
+In International Conference on
+
+of coalesced observations.
+Computer Vision, pages 1–8. IEEE, 2007.
+
+[9] J. Engel, T. Sch¨ops, and D. Cremers. LSD-SLAM: Large-
+scale direct monocular SLAM. In European Conference on
+Computer Vision, pages 834–849. Springer, 2014.
+
+[10] C. Forster, L. Carlone, F. Dellaert, and D. Scaramuzza. On-
+manifold preintegration for real-time visual–inertial odome-
+try. IEEE Transactions on Robotics, 33(1):1–21, 2017.
+[11] C. Forster, Z. Zhang, M. Gassner, M. Werlberger, and
+D. Scaramuzza.
+SVO: Semidirect visual odometry for
+monocular and multicamera systems. IEEE Transactions on
+Robotics, 33(2):249–265, 2017.
+
+[12] D. G´alvez-L´opez and J. D. Tard´os. Bags of binary words for
+IEEE Transac-
+
+fast place recognition in image sequences.
+tions on Robotics, 28(5):1188–1197, October 2012.
+
+[13] C. Harris and M. Stephens. A combined corner and edge de-
+tector. In In Proc. of Fourth Alvey Vision Conference, pages
+147–151, 1988.
+
+[14] J. A. Hesch, D. G. Kottas, S. L. Bowman, and S. I. Roumelio-
+tis. Camera-IMU-based localization: Observability analysis
+and consistency improvement. The International Journal of
+Robotics Research, 33(1):182–201, 2014.
+
+[15] V. Ila, L. Polok, M. Solony, and K. Istenic. Fast incremental
+bundle adjustment with covariance recovery. In International
+Conference on 3D Vision, pages 4321–4330, 2017.
+
+[16] V. Ila, L. Polok, M. Solony, and P. Svoboda. SLAM++ 1-
+a highly efﬁcient and temporally scalable incremental slam
+framework. The International Journal of Robotics Research,
+36(2):210–230, 2017.
+
+[17] Y. Jeong, D. Nister, D. Steedly, R. Szeliski, and I.-S. Kweon.
+Pushing the envelope of modern methods for bundle adjust-
+ment. IEEE Transactions on Pattern Analysis and Machine
+Intelligence, 34(8):1605–1617, 2012.
+
+[18] M. Kaess, H. Johannsson, R. Roberts, V. Ila, J. J. Leonard,
+and F. Dellaert.
+iSAM2: Incremental smoothing and map-
+ping using the bayes tree. The International Journal of
+Robotics Research, 31(2):216–235, 2012.
+[19] M. Kaess, A. Ranganathan, and F. Dellaert.
+
+iSAM: In-
+IEEE Transactions on
+
+cremental smoothing and mapping.
+Robotics, 24(6):1365–1378, 2008.
+
+[20] G. Klein and D. Murray. Parallel tracking and mapping for
+small ar workspaces. In International Symposium on Mixed
+and Augmented Reality, pages 225–234. IEEE, 2007.
+[21] R. K¨ummerle, G. Grisetti, H. Strasdat, K. Konolige, and
+W. Burgard. g 2 o: A general framework for graph opti-
+mization. In International Conference on Robotics and Au-
+tomation, pages 3607–3613. IEEE, 2011.
+
+[22] S. Leutenegger, S. Lynen, M. Bosse, R. Siegwart, and P. Fur-
+gale. Keyframe-based visual–inertial odometry using non-
+linear optimization. The International Journal of Robotics
+Research, 34(3):314–334, 2015.
+
+[23] H. Liu, C. Li, G. Chen, G. Zhang, M. Kaess, and H. Bao. Ro-
+bust keyframe-based dense SLAM with an RGB-D camera.
+arXiv preprint arXiv:1711.05166, 2017.
+
+[24] A. I. Mourikis and S. I. Roumeliotis. A multi-state constraint
+kalman ﬁlter for vision-aided inertial navigation. In Interna-
+tional Conference on Robotics and Automation, pages 3565–
+3572. IEEE, 2007.
+
+[25] R. Mur-Artal, J. M. M. Montiel, and J. D. Tardos. ORB-
+SLAM: a versatile and accurate monocular SLAM system.
+IEEE Transactions on Robotics, 31(5):1147–1163, 2015.
+[26] R. Mur-Artal and J. D. Tard´os. Visual-inertial monocular
+SLAM with map reuse. Robotics and Automation Letters,
+2(2):796–803, 2017.
+
+[27] E. D. Nerurkar, K. J. Wu, and S. I. Roumeliotis. C-
+KLAM: Constrained keyframe-based localization and map-
+ping. In International Conference on Robotics and Automa-
+tion, pages 3638–3643. IEEE, 2014.
+
+[28] T. Qin, P. Li, and S. Shen. VINS-Mono: A robust and versa-
+tile monocular visual-inertial state estimator. arXiv preprint
+arXiv:1708.03852, 2017.
+
+[29] D. Sibley, C. Mei, I. D. Reid, and P. Newman. Adaptive rel-
+ative bundle adjustment. In Robotics: Science and Systems,
+volume 32, page 33, 2009.
+
+[30] B. Triggs, P. F. McLauchlan, R. I. Hartley, and A. W. Fitzgib-
+bon. Bundle adjustmenta modern synthesis. In International
+Workshop on Vision Algorithms, pages 298–372. Springer,
+1999.
+
+[31] C. Wu, S. Agarwal, B. Curless, and S. M. Seitz. Multicore
+bundle adjustment. In Computer Vision and Pattern Recog-
+nition, pages 3057–3064. IEEE, 2011.
+
+[32] K. Wu, A. Ahmed, G. A. Georgiou, and S. I. Roumeliotis.
+A square root inverse ﬁlter for efﬁcient vision-aided inertial
+navigation on mobile devices. In Robotics: Science and Sys-
+tems, 2015.
+
+[33] J. yves Bouguet. Pyramidal implementation of the Lucas
+Kanade feature tracker. Intel Corporation, Microprocessor
+Research Labs, 2000.
+
+1982
+
+ICE-BA: Incremental, Consistent and Efﬁcient Bundle Adjustment for
+Visual-Inertial SLAM
+
+Haomin Liu1
+
+Mingyu Chen1
+
+Guofeng Zhang2
+
+Hujun Bao2
+
+Yingze Bao1
+
+1Baidu
+
+2State Key Lab of CAD&CG, Zhejiang University
+
+{liuhaomin,chenmingyu01,baoyingze}@baidu.com
+
+{zhangguofeng,bao}@cad.zju.edu.cn
+
+Abstract
+
+Modern visual-inertial SLAM (VI-SLAM) achieves
+higher accuracy and robustness than pure visual SLAM,
+thanks to the complementariness of visual features and in-
+ertial measurements. However, jointly using visual and in-
+ertial measurements to optimize SLAM objective functions
+is a problem of high computational complexity. In many VI-
+SLAM applications, the conventional optimization solvers
+can only use a very limited number of recent measure-
+ments for real time pose estimation, at the cost of subop-
+timal localization accuracy. In this work, we renovate the
+numerical solver for VI-SLAM. Compared to conventional
+solvers, our proposal provides an exact solution with sig-
+niﬁcantly higher computational efﬁciency. Our solver al-
+lows us to use remarkably larger number of measurements
+to achieve higher accuracy and robustness. Furthermore,
+our method resolves the global consistency problem that
+is unaddressed by many state-of-the-art SLAM systems: to
+guarantee the minimization of re-projection function and in-
+ertial constraint function during loop closure. Experiments
+demonstrate our novel formulation renders lower localiza-
+tion error and more than 10x speedup compared to alterna-
+tives. We release the source code of our implementation to
+beneﬁt the community 1.
+
+1. Introduction
+
+Simultaneous localization and mapping (SLAM) is a
+classic but ongoing research problem in many applications.
+In recent years, due to the mass availability of imaging and
+inertial sensors, visual-inertial SLAM (VI-SLAM) is in-
+creasingly adopted in products such as mobile augmented
+reality, drones, autonomous driving, robotics etc. Similar to
+pure visual SLAM, VI-SLAM extracts and establishes fea-
+ture correspondences across image frames. But it further
+utilizes inertial measurement (e.g. acceleration and angular
+
+1https://github.com/baidu/ICE-BA
+
+Figure 1: Our SLAM trajectory overlaid with an apartment ﬂoor
+map. The temporal sliding window (green solid line) for our real
+time pose solver is signiﬁcantly longer than other methods. Our
+novel algorithm allows us to use remarkably higher number of
+measurements without surrendering efﬁciency. The black dashed
+line is the full trajectory that is globally optimized and consistent
+with local optimization.
+
+velocity readings) as constraints in motion estimation. Iner-
+tial measurements are very effective for motion estimation
+especially when the motion is rapid and irregular, which is
+notoriously challenging for visual feature matching. Given
+sufﬁcient computation capacity, state-of-the-arts VI-SLAM
+[22, 26] have shown excellent results in terms of 6 degree of
+freedom (DOF) accuracy by using a large number of mea-
+surements.
+
+Since most applications of SLAM are mobile and time
+critical, the computational complexity of VI-SLAM also de-
+serves great attention. Only a minority of VI-SLAM sys-
+tems [24, 28, 11] can be deployed onto embedded devices.
+Improving the efﬁciency of VI-SLAM computation is in-
+evitably the key to popularizing its applications. There are
+two major computational tasks in VI-SLAM: front-end task
+and solver task. Front-end task includes visual feature ex-
+traction and matching. Front-end tasks are generally par-
+allelizable, and thus can be accomplished efﬁciently using
+modern heterogeneous computing architecture. The goal of
+
+1974
+
+the solver task is to optimize the pose parameters by mini-
+mizing the VI-SLAM objective functions given a set of vi-
+sual features and inertial measurements. The solver task is
+usually the speed bottleneck to VI-SLAM.
+
+Most previous VI-SLAM frameworks simply applied
+conventional numeric solvers to solve the objective func-
+tion. Bundle adjustment (BA) is an example of the solver
+task given only visual measurements.
+In this work, we
+generalize the term BA to denote the joint optimization
+of visual and inertial measurements. These conventional
+solvers such as Gauss-Newton and Levenberg-Marquardt
+are designed to provide numerically accurate results with-
+out much consideration for real time issues. Consequently,
+real time VI-SLAM applications [24, 7, 22] based on these
+solvers are only capable of using the most recent measure-
+ments to estimate the latest device pose (i.e. apply a very
+short sliding window in local BA). Theoretically, longer
+measurement history leads to higher estimation accuracy.
+The efﬁciency of BA is apparently one of the most crucial
+factors to the performance of VI-SLAM.
+
+We renovate the BA process for VI-SLAM, as we con-
+siderably improve the local and global optimization efﬁ-
+ciency and solve the inconsistency issue during loop clo-
+sure. In the SLAM problem, the incoming visual and in-
+ertial measurements arrive sequentially. We leverage this
+fact and propose to effectively re-use the intermediate re-
+sults of previous optimization to avoid redundant new com-
+putation. Our generalizable algorithm remarkably increases
+the solver speed and can be applied to most sliding-window
+based VI-SLAM.
+
+Furthermore, our method addresses the global consis-
+tency problem, which is critical to applications such as AR.
+A global map is considered to be consistent if loops can
+be closed and the re-projection error is sufﬁciently mini-
+mized. For visual SLAM, global consistency can be main-
+tained by running global BA or its pose graph approxima-
+tion [9, 25]. However, the problem is more complicated
+for VI-SLAM, where the constraints of velocity and IMU
+bias between frames create many local minimals in the op-
+timization problem. When measurements are removed from
+a temporal sliding window, naive marginalization accumu-
+lates error over time, which would ﬁnally conﬂict with the
+loop constraint. Previous methods either skip marginaliza-
+tion [26], or apply marginalization without resolving the
+conﬂict [28].
+
+This paper proposes a novel solver algorithm for visual-
+inertial SLAM with the following contributions: a new
+sliding window based solver that leverages the incremen-
+tal nature of SLAM measurements to achieve more than
+10x efﬁciency compared to the state-of-the-arts; a new rel-
+ative marginalization algorithm that resolves the conﬂicts
+between sliding window marginalization bias and global
+loop closure constraints; our experimentally validated im-
+
+plementation will be open sourced.
+
+2. Related Work
+
+Early SLAM are mostly EKF (Extended Kalman Fil-
+ter) based [6, 8]. The 6 DOF motion parameters and 3D
+landmarks are probabilistically represented as a single state
+vector. The complexity of classic EKF grows quadratically
+with the number of landmarks, restricting its scalability.
+
+Visual SLAM [20, 25, 9] solves the SLAM problem us-
+ing only visual features. By carefully extracting and match-
+ing a very large number of sophisticated visual features,
+these methods are capable of providing high tracking ac-
+curacy.
+
+Visual-inertial SLAM usually does not a require large
+number of image features to achieve reasonable accuracy,
+since inertial measurement (angular velocity and acceler-
+[24, 32] improve
+ation) provides additional constraints.
+early EKF SLAM by excluding 3D landmarks from the
+state vector. Thereby, they are capable of modeling multiple
+frames in the state. However, as a common behavior of EKF
+algorithms, they only maintain the most recent state, and
+thus they are sensitive to measurement error and difﬁcult to
+be recovered from unstable tracking status. [7, 22, 28, 26]
+use a temporally sliding window to select the most recent
+visual and inertial measurements for optimizing SLAM ob-
+jective functions. They show that in many cases sliding
+window based VI-SLAM is more robust and accurate than
+ﬁlter based methods. However, the objective function opti-
+mization is of high computational complexity. The perfor-
+mance of sliding window based VI-SLAM highly depends
+on the computational availability, which is strictly limited
+on mobile devices and drones. Our proposed novel method
+intends to address this problem by greatly improving efﬁ-
+ciency of the optimization solver.
+
+Optimization Solvers are commonly shared by various
+SLAM implementations, although their front-end systems
+and frameworks are very different. BA [30] of visual SLAM
+utilizes the sparseness structure of re-projection function
+and Hessian. In this work, the term BA is generalized to de-
+note joint optimization of visual and inertial measurements
+for VI-SLAM. [2, 4, 31] improve the efﬁciency of BA in
+large-scale setup. [17] shows that the block-based precon-
+ditioned conjugate gradient (PCG) can be used to solve the
+Schur complement for efﬁciency gain. There are also ex-
+cellently engineered implementations of BA [1, 21] that are
+commonly used by state-of-the-art SLAM systems. How-
+ever, all these methods suffer from the fact that its complex-
+ity grows quadratically w.r.t the number of cameras. Thus,
+the SLAM systems built upon these solvers can only use a
+very limited number of recent measurements for real time
+pose estimation.
+
+Incremental Solvers are recently being explored by re-
+searchers in attempts to exploit the previous optimization
+
+1975
+
+sj ◦ 1
+ρj
+
+{X1, · · · , Xnt }. Ct = (Tt, Mt), where Tt = (Rt, pt)
+is the camera pose, and Mt = (vt, bt) is the IMU state
+including velocity vt and sensor bias bt. A 3D point Xj
+is projected onto the i-th image plane corresponding to a
+2D feature measurement xij = π(Ti ◦ Xj) + nij, where
+nij is Gaussian noise nij ∼ N (0, Σvis
+ij ). The 3D point is
+parametrized using inverse depth [5] as Xj = T−1
+¯xsj j,
+where ρj is the inverse depth of j-th point, sj is the source
+frame from which j-th point is extracted. ¯x is the homoge-
+nous coordinate of x. The visual constraint is deﬁned as
+f vis
+¯xsj j)−xij ∼ N (0, Σvis
+ij (Ti, Tsj , ρj) = π(Ti◦T−1
+sj ◦
+(1)
+IMU measurements Zij obtained between frame i and j
+provide relative motion constraint. The IMU constraint is
+deﬁned as
+ij (Ci, Cj) = (eT
+r , eT
+f imu
+er = Log((Exp(∆Jr
+ev = Ri(vj − vi − g∆tij) − (∆vij + ∆Jv
+
+v , eT
+b )T ∼ N (0, Σimu
+ij )
+ij(bi − ˆbi))∆Rij)T RjRT
+i )
+
+ij(bi − ˆbi))
+
+p , eT
+
+1
+ρj
+
+ij ).
+
+ep = Ri(pj − pi − vi∆tij −
+
+− (∆pij + ∆Jp
+
+ij(bi − ˆbi))
+
+g∆t2
+
+ij)
+
+1
+2
+
+eb = bj − bi
+
+(2)
+The ∆’s and the covariance matrix Σimu
+ij depend only on Zij
+and can be pre-integrated before optimization. ˆbi is the bias
+estimate at the time of pre-integration. Please refer to [10]
+for more details.
+
+The absolute position and yaw around the gravity are un-
+observable in VI-SLAM [14]. A prior is imposed on the ﬁrst
+camera C0 , denoted as f prior
+
+(C0) ∼ N (0, Σprior
+
+).
+
+0
+
+0
+
+3.2. Local and Global Optimization
+
+It is infeasible to only perform global optimization in
+solving a long-time VI-SLAM problem. Similar to [28, 26],
+our framework (Fig. 2) includes both a local optimization
+(local BA) and a global optimization (global BA).
+
+Local BA optimizes the states within a temporarily slid-
+ing window that only contains the latest frames and points.
+The goal of local BA is to reduce accumulated error and ex-
+pand the map as fast as possible. The cost function of local
+BA is to minimize
+
+arg min
+{Ci,ρj |i=t0···t,j∈Vi}
+
+X
+i=t0
+
+X
+j∈Vi
+
+||f vis
+
+ij (Ti, Tsj , ρj)||Σvis
+
+ij
+
+(3)
+
++||f prior
+
+t0 (Ct0 )||Σprior
+t0
+
++
+
+||f imu
+
+i,i+1(Ci, Ci+1)||Σimu
+
+i,i+1
+
+t
+
+t−1
+
+X
+i=t0
+
+Figure 2: Local and global optimization framework
+
+result to reduce the amount of new computation. Kaess et
+al. [19, 18] propose to solve the optimization by QR fac-
+torization of the measurement matrix. Each new optimiza-
+tion iteration only updates a small portion of the factoriza-
+tion results instead of factorizing the entire graph. Simi-
+larly, Ila et al. [16] propose to incrementally recover the
+estimate and covariance, and recently propose to update
+Schur complement incrementally in BA [15]. However,
+the aforementioned methods are only suitable for solving
+”sparse” camera problem (i.e. most key points are only ob-
+servable in a small number of cameras). While this is true
+for large scale structure-from-motion, in SLAM problems,
+most frames in local sliding window share a large num-
+ber of common points, which degenerates those incremen-
+tal solvers into regular BA solver. As a result, they do not
+show better localization accuracy than other state-of-the-
+art SLAM. In this work, we propose a novel incremental
+solver that better leverages the speciﬁc block matrix struc-
+ture in SLAM, and shows superior performance in terms
+of speed and accuracy. As a major extension to our early
+work [23], this paper further discusses the acceleration of
+local BA and the relative marginalization for the global con-
+sistency. We also provide substantially more experimental
+results. To our best knowledge, this paper describes the ﬁrst
+BA based VI-SLAM solver, achieving unprecedented ef-
+ﬁciency with state-of-the-art accuracy, and simultaneously
+ensuring global consistency.
+
+3. Framework
+
+We ﬁrst deﬁne the constraint functions, and next explain
+
+our local and global optimization framework.
+
+3.1. Constraint Functions
+
+The goal of visual-inertial SLAM is deﬁned as using vi-
+sual and inertial measurements up to time point t to esti-
+mate the motion state Ct, as well as a set of 3D points
+
+where t0 = t−n+1 is the ﬁrst frame in sliding window and
+n is the size of sliding window. Vi denotes the set of points
+tracked in frame i. As one of our major contributions, Sec. 4
+explains how to efﬁciently solve Eq. (3).
+
+1976
+
+Global BA runs in parallel to local BA at a relatively
+lower frequency. Global BA optimizes the frames that are
+removed from local sliding window but selected as key
+frames in global map. A frame is selected as a key frame
+in global BA if it carries more than N (e.g. 20 in our ex-
+periments) features that have not been seen from all other
+frames. The cost function of global BA is
+
+arg min
+{Ci,ρj |i∈{k1···km},j∈Vi}
+
+km
+
+X
+i=k1
+
+X
+j∈Vi
+
+||f vis
+
+ij (Ti, Tsj , ρj)||Σvis
+
++
+
+ij
+
+||f prior
+0
+
+(Ck1 )||Σprior
+
++
+
+0
+
+||f imu
+
+ki,ki+1 (Cki , Cki+1 )||Σimu
+
++
+
+ki ,ki+1
+
+m−1
+
+X
+i=1
+
+||f rel
+
+i ({Tk∈Li })||Σrel
+
+i
+
+X
+i
+
+(4)
+where Li is the set of keyframes involved in i-th rela-
+tive pose constraint. Loop closure triggers global BA that
+should account for map consistency. For a typical loop con-
+straint, |Li| = 2. As one of our major contributions, Sec. 4
+explains how to efﬁciently solve Eq. (4).
+
+Relative Marginalization produces relative pose con-
+straint between the last keyframe in local BA and the latest
+frame that is removed from local BA (e.g. the constraint be-
+tween Ckm−1 and Ckm in Fig. 2), so that the constraints
+obtained from global BA (e.g. loop closure) can help an-
+chor the camera poses in local BA, preventing drifts caused
+by accumulation error. More details are discussed in Sec. 5.
+
+4. Efﬁcient Solver for VI-SLAM
+
+Efﬁciently solving Eq. (3) and Eq. (4) is the key to VI-
+SLAM speed. Minimizing such formulations can be gener-
+k ||fk(φ)||2. In a typical Gauss New-
+alized as arg minφ
+ton solver, the optimal values of φ are obtained by opti-
+mization iterations φ+ = φ− ⊕ δφ where the subscript −/+
+denotes state before/after iteration, and ⊕ is the generalized
+addition on manifold [10]. At each iteration, the cost func-
+tion fk is linearized at current estimate φ− as
+
+P
+
+fk(φ− ⊕ δφ) ≈ Jkδφ + ek
+
+(5)
+
+−
+
+⊕δφ)
+
+where Jk = ∂fk(φ
+|δφ=0 and ek = fk(φ−) are the
+Jacobian matrix and error vector respectively. δφ is solved
+by the normal equation
+
+∂δφ
+
+Aδφ = b
+
+[A|b] =
+
+[Ak|bk]
+
+X
+k
+[Ak|bk] = [JT
+k Jk| − Jkek]
+
+(6)
+
+example, f vis
+in (1) only involves 3 types of variables
+ij
+(Ti, Tsj , ρj). Then the corresponding Ak and bk has only
+9 and 3 blocks of non-zero entries. Leveraging such spar-
+sity patten [30] and the block structure [17] leads to an ef-
+ﬁcient construction of (6). Furthermore, due to the nature
+of SLAM problem, new states and measurements always
+arrive incrementally. As a result, only a small portion of
+variables change at each iteration, i.e. only an small portion
+of fk’s need to be re-linearized. This fact can be exploited
+In our
+to signiﬁcantly accelerate the construction of (6).
+early work [23], instead of computing (6) from scratch in
+each iteration, we incrementally update [A|b] as
+
+[A|b]+ = [A|b]− + [
+
+(7)
+where L is the set of cost functions that need to be re-
+linearized (i.e. involving at least one |δφi| exceeding a pre-
+set threshold), and [δAk|δbk] , [Ak|bk]+ − [Ak|bk]−.
+
+Pk∈L δbk ]
+
+Pk∈L δAk
+
+For BA problem, a common strategy to efﬁciently
+solve ((6)) is to marginalize points to obtain a reduced
+linear system involving only cameras. φ is reordered as
+p )T , ﬁrst camera then point parameters. Ac-
+φ = (φT
+cordingly, [A|b] can be written as
+
+c , φT
+
+(8)
+
+(9)
+
+[A|b] =
+
+U W u
+WT V v (cid:21)
+
+.
+
+(cid:20)
+
+The second row is eliminated to obtain the Schur comple-
+ment that involves only δφc
+
+Sδφc = s
+
+[S|s] =
+
+U − WV−1WT u − WV−1v
+
+(cid:3)
+
+(cid:2)
+
+Sj
+
+i ] =
+
+The block corresponding to (i1, i2) camera pair in S and
+i-th camera in s can be efﬁciently computed as
+ui −
+[Si1i2 |si] = h
+i1i2 |sj
+[Sj
+
+i1i2
+i2j WijV−1
+
+Pj∈Vi1 ∪Vi2
+jj WT
+
+Wi1jV−1
+
+Ui1i2 −
+
+Pj∈Vi
+
+sj
+i i
+
+jj vj
+
+(10)
+As introduced in [23], the incremental arrival of SLAM
+measurements can be exploited to accelerate the construc-
+tion of (10), by incrementally update [Si1i2 |si] as
+[Si1i2 |si]+ = [Si1i2 |si]− + h Pj∈Pi1 i2
+
+i1i2 Pj∈Pii
+
+δSj
+
+δsj
+
+(cid:2)
+
+(cid:3)
+
+i i
+
+Pi1i2 = P ∪ Vi1 ∪ Vi2
+
+(11)
+where P is the set of points involved in cost functions need
+to be re-linearized.
+
+Si1i2 is nonzero if and only if (i1, i2) share common
+points or have constraint between them. This particu-
+lar sparseness structure can be speciﬁcally leveraged by
+preconditioned conjugated gradient (PCG) to efﬁciently
+solve ((9)) [2, 4, 17]. After solving δφc, point variable δφp
+can be solved by back-substituting δφc to the second row
+of (8), for each point j separately
+
+4.1. General Incremental BA Solver
+
+In global optimization in VI-SLAM, each cost function
+fk involves only a very small subset of variables. For
+
+δφpj = V−1
+
+jj 
+
+vj −
+
+WT
+
+ijδφci 
+
+(12)
+
+
+where Xj denotes the set of cameras seeing point j.
+
+
+
+Xi∈Xj
+
+1977
+
+O-IBA: Total
+O-IBA: Schur
+ST-IBA: Total
+ST-IBA: Schur
+
+30
+
+25
+
+20
+
+15
+
+10
+
+)
+s
+m
+
+(
+ 
+e
+m
+
+i
+t
+
+5
+
+0
+
+0
+
+500
+
+1000
+
+2500
+
+3000
+
+3500
+
+1500
+
+2000
+frame index
+
+Figure 3: The total runtime and the Schur complement time for
+each frame in MH 01 easy sequence [3]. O-IBA is original IBA
+introduced in Sec. 4.1; ST-IBA is the sub-track based IBA intro-
+duced in Sec. 4.2. Between frame 400 to 900, O-IBA time sig-
+niﬁcantly increases since higher number of frames share the same
+feature points during this period of time. ST-IBA does not suffer
+from this as expected.
+
+4.2. Improvement for Local BA
+
+The incremental BA (IBA) introduced in Section 4.1 can
+signiﬁcantly accelerate global BA where most keyframes do
+not share common points. However, in local BA most points
+can be observed by most frames in the sliding window. As
+a result, a large portion of [Sj
+i ] deﬁned in (10) has to
+be re-evaluated, and the incremental update of Schur com-
+plement degrades to the standard process. Fig. 3 shows the
+runtime for this IBA process (original IBA, or O-IBA). The
+update of Schur complement dominates the total runtime.
+
+i1i2 |sj
+
+We propose an improved incremental BA solver to ad-
+dress the Schur complement problem in local BA. We name
+it Sub-Track based IBA (ST-IBA). The key idea is to split
+the origin long feature track Xj into several short over-
+lapping sub-tracks Xj1 , Xj2 , · · · , as illustrated in Fig. 4.
+Each sub-track Xjk spans over l neighboring frames with
+l < |Xj|. We set l = 5 in our experiments. Sub-tracks also
+include key frames in local BA. The corresponding inverse
+depth ρj becomes several identical duplicates ρj1 , ρj2 , · · · .
+Instead of marginalizing ρj that introduces nonzero block
+Si1i2 for each pairs of (i1, i2) ∈ Xj × Xj, we marginal-
+ize ρjk that introduces Si1i2 for a much smaller set of pairs
+(i1, i2) ∈ Xjk × Xjk . Consequently, S becomes from a
+dense full matrix - as long as there is one |Xj| reaches the
+size of sliding window n - to a diagonal band matrix. Fur-
+thermore, the incremental update of [Si1i2 |si] (11) becomes
+[Si1i2 |si]+ = [Si1i2 |si]− + h Pj∈ ¯Pi1 i2
+[¯Sj
+Wi1j ¯Qj
+
+i1i2 Pj∈ ¯Pii
+
+i2j Wi1j ¯qj
+
+i ] =
+
+δ ¯Sj
+
+δ¯sj
+
+i1i2
+
+i1i2 |¯sj
+i1i2 |¯qj
+
+[ ¯Qj
+
+(cid:2)
+i ] = h Pjk∈ ¯V
+
+j
+i1 i2
+
+WT
+V−1
+
+¯Pi1i2 = {j|∃k : jk ∈ ¯P ∪ ¯V j
+
+jkjk Pjk∈ ¯V
+i1i2 }
+
+i (cid:3)
+
+V−1
+jkjk
+
+j
+ii
+
+vjk i
+
+(13)
+where ¯P is the set of sub-track points involved in cost func-
+tions that need to be re-linearized, and ¯V j
+i1i2 denotes the set
+of common sub-track points of frame (i1, i2) corresponding
+to j-th point. Comparing to (11), (13) is more efﬁcient not
+only because S becomes sparser, but also because ¯Pi1i2 is
+
+i i
+
+(a) Original feature track Xj
+
+(b) Overlapping sub-tracks
+
+Figure 4: We split the original feature track Xj in (a) into 3 over-
+lapping sub-tracks Xj1 , Xj2 and Xj3 in (b), each spans l = 3
+neighboring frames and the keyframes K
+generally much smaller than Pi1i2 , as the probability that
+a short sub-track involved in re-linearization is very low.
+[ ¯Qj
+i ] deﬁned in (13) can also be incrementally updated
+for further speedup:
+
+i1i2 |¯qj
+
+¯Qj
+
+(cid:16)
+
+i1i2 (cid:17)
+
+¯Qj
+
+= (cid:16)
+
+i1i2 (cid:17)
+
+−
+
++
+
++
+
++
+
+(cid:16)¯qj
+i (cid:17)
+
+= (cid:16)¯qj
+i (cid:17)
+
+−
+
++
+
+i1i2 = ¯P ∪ ¯V j
+¯P j
+
+i1i2
+
+δ
+
+V−1
+
+jkjk (cid:1)
+
+(cid:0)
+
+X
+j
+i1 i2
+
+jk∈ ¯P
+
+V−1
+jkjk
+
+δ
+
+(cid:0)
+
+vjk (cid:1)
+
+X
+j
+jk∈ ¯P
+ii
+
+(14)
+
+Note that the sub-track process is only used for the update
+of Schur complement. After solving Schur complement, we
+update 3D points by (12) for each original point j rather
+than the sub-track points jk. Compared to the traditional
+method, since the objective function is exactly the same, es-
+pecially the point substitution still uses the original normal
+equation without any approximation, a few more iterations
+can make the solution converge and the ﬁnal accuracy does
+not decrease. As shown in Fig. 3 and Tab. 1, the proposed
+ST-IBA is faster than the original IBA by 2 ∼ 10 times
+without any noticeable loss of accuracy.
+
+4.3. Incremental PCG for IBA
+
+In order to solve (9), we renovated the original PCG al-
+gorithm [17]. In standard PCG, δφc is initialized as zero
+then iteratively updated toward the optimal values. In the
+case of IBA, the minimizer δφci will not actually update
+the state of camera i if δφci is not large enough (Sec. 4.1).
+For such camera i, the result of the next iteration δφ+
+ci will
+be very close to the previous one δφ−
+ci , because both results
+are obtained by updating the same φ−
+ci towards the similar
+optimal values. This observation helps us to better initial-
+ize δφc and accelerate convergence of PCG. Speciﬁcally,
+we initialize δφ+
+ci for those camera i whose state
+was not changed in the last iteration, and δφ+
+ci = 0 for the
+rest. We name this algorithm as incremental PCG (I-PCG)
+as it also utilizes the incremental nature of SLAM measure-
+ments. As shown in Tab. 1, I-PCG improves the accuracy
+by approx. 20% due to better convergence.
+
+ci = δφ−
+
+5. Relative Marginalization
+
+If the number of frames in the sliding window of lo-
+cal BA surpasses a threshold (e.g. 50 in our experiments),
+the earliest frame t0 in the sliding window needs to be
+eliminated.
+Instead of neglecting the information car-
+ried in this eliminated frame, marginalization converts it
+
+1978
+
+0
+
+0
+
+0, C′
+
+(g0, M′
+
+). The state M′
+
+0) ∼ N (0, Σprior
+
+0 connected to the prior factor hprior
+
+1) are marginalized out, which results in a prior factor hprior
+
+Figure 5: Relative marginalization. Let hvis, himu, hprior denote the visual, inertial, and prior factors, respectively. (a) For the ﬁrst frame
+t0 = 0, we add a weak prior factor hprior
+0) and the
+inertial factor himu
+01 (g0, M′
+). (b) For the next
+frame t0 = 1, the process is similar except that the visual factor hvis
+1 are marginalized. (c) In
+(k0 Tt0 , {k0 Tsj 6=k0|j∈Vt0 }). Marginalizing such a factor
+general, more keyframes other than k0 are involved in the visual factor hvis
+Vt0
+will introduce correlation among all the involved keyframes (yellow circles). Repeat this process until the marginalized frame t0 is a new
+keyframe as in (d). Then the process for local and global BA goes in different ways. (e) For global BA, we marginalize the prior factor
+hprior
+t0 (gk0 , M′
+t0 . A relative constraint is submitted to global BA as shown in Fig. 2. (f) For local
+BA, we ﬁrst marginalize the prior factor hprior
+t0 , {k0 Tk∈Kt0 }). All involved states except M′
+t0 are marginalized , producing a
+prior on M′
+t0 . At this point, t0 becomes the new reference keyframe. The new state gt0 appears, along with a weak prior on it, and the
+pose of the next frame t0 + 1 is represented in the reference of frame t0, i.e. t0 Tt0+1. We then marginalize the prior factor and the inertial
+factor himu
+t0,t0+1(gt0 , M′
+t0+1. After (e) and (f) are done, the system
+goes back to a state similar to (b).
+
+t0 , {k0 Tk∈Kt0 }) and the IMU state M′
+t0 (gk0 , M′
+
+t0 is marginalized out, producing a prior on gt0 and C′
+
+V1 (0T1) is involved, and both 0T1 and M′
+
+0
+1) ∼ N (0, Σprior
+
+t0+1). M′
+
+(g0, M′
+
+(g0, C′
+
+t0 , C′
+
+1
+
+1
+
+into a linear prior applied onto the remaining variables.
+Marginalization is commonly used in visual inertial odom-
+etry (VIO) [24, 22, 11] that does not maintain a global map.
+Nevertheless, in the case of VI-SLAM, error accumulation
+will gradually corrupt the prior produced by marginaliza-
+tion. The corrupted prior generated from the sliding win-
+dow will eventually conﬂict with the global map and loop
+closure constraints, and degrade the overall accuracy.
+
+One of our main contributions is maintaining the con-
+sistency between marginalization prior and global BA with
+the proposed relative marginalization. The key idea is to
+formulate the prior relative to the reference keyframe coor-
+dinate system instead of the global coordinate system. It is
+similar to the relative BA [29] for visual SLAM, in which
+all parameters are represented in the relative coordinate to
+avoid adjusting all parameters at loop closure. By contrast,
+we use the relative representation for marginalization. In
+addition, the relative representation is more complicated for
+
+VI-SLAM since the gravity direction becomes observable.
+Before explaining details, we ﬁrst recap the notations.
+Ci is the motion state of frame i, which comprises a pose
+Ti = (Ri, pi) and an IMU state Mi = (vi, bi). We
+can represent the global pose Ti and the gravity direction
+in reference of frame i’s closest keyframe k0 as follows:
+k0 Ti = Ti ◦ T−1
+and gk0 = Rk0 g. The velocity vi is rep-
+k0
+resented in its own reference as ivi = Rivi. The motion
+state can be represented locally as C′
+i) and
+i = (ivi, bi). Accordingly, f vis
+M′
+ij (k0 Ti, k0 Tsj , ρj) = π(k0 Ti ◦ k0 T−1
+hvis
+
+i = (k0 Ti, M′
+ij (Ti, Tsj , ρj) becomes
+1
+ρj
+
+¯xsj j) − xij.
+
+sj ◦
+
+(15)
+Marginalizing k0 Ti will result in full correlation among
+{ρj|j ∈ Vi}, invalidating the sparseness of BA. Inspired
+by [27], we maintain the sparseness by duplicating each
+ρj as ρ′
+j = ρj, and discard all measurements except xij.
+Then the duplicated points are marginalized out, producing
+
+1979
+
+a Gaussian factor
+Vi (k0 Ti, {k0 Tsj 6=k0|j∈Vi }) ∼ N (0, ΣVi ).
+hvis
+Similarly, f imu
+ij (Ci, Cj) becomes
+himu
+ij (gk0 , C′
+i, C′
+r = Log((Exp(∆Jr
+e′
+v = k0 Ri(k0 RT
+e′
+j
+
+v)T , (e′
+b )T
+ij(bi − ˆbi))∆Rij)T k0 Rj
+
+j) = ((e′
+
+r)T , (e′
+
+p)T , eT
+
+jvj − gk0 ∆tij) − ivi
+ij(bi − ˆbi))
+
+− (∆vij + ∆Jv
+
+k0 RT
+i )
+
+(16)
+
+(17)
+
+p = k0 Ri(k0 pj − k0 pi −
+e′
+
+gk0 ∆t2
+
+ij) − ivi∆tij
+
+1
+2
+
+− (∆pij + ∆Jp
+
+ij(bi − ˆbi))
+
+t0+1, {k0 Tk∈Kt0 }) ∼ N (0, Σprior
+
+We illustrate the relative marginalization process with
+detailed descriptions in Fig. 5. After marginalizing the ear-
+liest frame t0, the process will result in a prior on the next
+frame t0 + 1, denoted as
+hprior
+t0+1(gk0 , C′
+
+(18)
+where Kt0 is the set of involved keyframes that is evolving
+as Kt0 = Kt0−1 ∪ {sj|j ∈ Vt0 }\{k0}. Note that these rela-
+tive representation of states is only used in marginalization.
+During optimization, states and priors need to be converted
+to the global frame. We convert the prior factor (18) into the
+global frame, denoted as
+
+t0+1)
+
+t0+1).
+
+t0+1(Ct0+1) ∼ N (0, Σprior
+f prior
+Note that keyframe poses are only adjusted in global BA,
+thus eliminated from the prior factor for local BA. If the
+marginalized frame t0 is a new keyframe, the marginaliza-
+tion process will submit a relative constraint to global BA
+(Fig. 5e), denoted as
+
+(19)
+
+t0 (gk0 , {k0 Tk∈K′
+hrel
+
+}) ∼ N (0, Σrel
+t0 )
+
+t0
+
+(20)
+
+where K′
+t0 = Kt0−1 ∪ {t0}. Similarly, the relative con-
+straint is converted from the reference frame k0 to the global
+frame, denoted as
+t0 ({Tk∈Lt0 }) ∼ N (0, Σrel
+f rel
+t0 )
+t0 ∪ {k0}.
+
+(21)
+
+where Lt0 = K′
+6. Evaluation
+
+To evaluate our proposed solver, we build a SLAM sys-
+tem that consists of the proposed solver, a frontend for
+visual measurements, and a loop closure detector. The
+frontend detects Harris features [13], establish inter-frame
+feature tracks using optical-ﬂow [33], and match features
+across stereo frames using direct-matching [11]. Our
+loop closure detector stores bag-of-words features from
+keyframes for loop detection [12]. Once a loop closure is
+detected, we use the relative pose and covariance between
+the matched frames as a relative constraint in global BA.
+
+We perform quantitative evaluation using EuRoC [3]
+dataset, and qualitative comparison against Google Tango in
+a number of challenging environments. The sliding window
+size is set to 50 in all experiments. Larger sliding window
+does not increase accuracy but decreases efﬁciency.
+
+Conﬁguration
+Proposed
+w/o ﬁx. linear.
+w/o ST-IBA
+w/o I-PCG
+w/o rel. marg.
+
+RMSE (m)
+0.120792
+0.117973
+0.123548
+0.152073
+0.179655
+
+LBA time (ms)
+2.45
+10.3
+7.03
+-
+-
+
+GBA time (ms)
+12.90
+103.94
+-
+12.91
+13.50
+
+Table 1: Average RMSE and runtime of proposed methods for the
+whole EuRoC dataset. Fixing linearization points and ST-IBA sig-
+niﬁcantly improves efﬁciency without sacriﬁcing accuracy. I-PCG
+reduces RMSE due to better convergence, but not the computa-
+tion time because we set a minimal iteration number. Relative
+marginalization improves both the accuracy as expected, and efﬁ-
+ciency because the additional constraints accelerate convergence.
+
+Ours w/ loop
+
+Ours w/o loop
+
+OKVIS
+
+SVO
+
+iSAM2
+
+Seq.
+
+MH 01
+MH 02
+MH 03
+MH 04
+MH 05
+V1 01
+V1 02
+V1 03
+V2 01
+V2 02
+V2 03
+Avg
+
+0.11
+0.08
+0.05
+0.13
+0.11
+0.07
+0.08
+0.06
+0.06
+0.04
+0.11
+0.08
+
+0.09
+0.07
+0.11
+0.16
+0.27
+0.05
+0.05
+0.11
+0.12
+0.09
+0.17
+0.12
+
+0.22
+0.16
+0.12
+0.18
+0.29
+0.03
+0.06
+0.12
+0.05
+0.07
+0.14
+0.14
+
+0.06
+0.08
+0.16
+-
+0.63
+0.06
+0.12
+0.21
+0.22
+0.16
+-
+0.20
+
+0.07
+0.11
+0.12
+0.16
+0.25
+0.07
+0.08
+0.12
+0.10
+0.13
+0.20
+0.13
+
+Table 2: Translation RMSE (m) with EuRoC dataset. Note that
+the spatial alignment of estimated and ground-truth trajectories is
+performed without scale adjustment for stereo algorithms. The
+results of other methods are generated from our own experiments
+based on their released codes, which are slightly different from the
+reported numbers in their papers.
+
+6.1. Algorithm Validation
+
+We validate each step of our algorithm introduced in
+each sub-section. Tab. 1 shows the performance of the full
+system, as well as disabling ﬁxation of linearization point,
+ST-IBA, I-PCG and relative marginalization, respectively.
+All tests are run on a desktop PC with an i7 CPU @ 3.6GHz.
+
+6.2. Localization Accuracy
+
+We compare the end-to-end accuracy of different stereo
+SLAM systems in Tab. 2. OKVIS [22] and SVO [11] are
+both visual inertial odometry (VIO). We run iSAM2 [18]
+by feeding the same feature tracks as ours, without provid-
+ing loop constraints so it runs as a VIO. For a fair com-
+parison, we show both our results with and without loop
+closure. Without loop closure, our system already achieves
+better localization accuracy than state-of-the-art alternatives
+since we use 50 frames in our local sliding window. With
+loop closure relative constraints provided to our solver, the
+RMSE considerably decreases for most sequences.
+
+6.3. Solver Efﬁciency
+
+The efﬁciency of our solver is a key contribution of this
+work. We measure the optimization time of different SLAM
+systems as shown in Tab. 3. We also measure the speed of
+our solver using an oct-core ARM CPU (A9 x 4 + A15 x
+4). We conﬁgure the solver to run on A15 in single thread
+
+1980
+
+14
+
+12
+
+10
+
+8
+
+6
+
+4
+
+2
+
+0
+
+-2
+
+20
+
+10
+
+0
+
+-10
+
+-20
+
+-30
+
+-40
+
+-50
+
+-60
+
+-70
+
+10
+
+8
+
+6
+
+4
+
+2
+
+0
+
+-2
+
+45
+
+40
+
+35
+
+30
+
+25
+
+20
+
+15
+
+10
+
+5
+
+0
+
+IBA without loop
+IBA with loop
+Tango
+
+IBA without loop
+IBA with loop
+Tango
+
+y
+
+y
+
+(a) Indoor ofﬁce
+
+(b) Indoor ofﬁce
+
+-16
+
+-14
+
+-12
+
+-10
+
+-6
+
+-4
+
+-2
+
+0
+
+0
+
+5
+
+15
+
+20
+
+10
+x
+
+(c) Indoor ofﬁce
+
+IBA without loop
+IBA with loop
+Tango
+
+IBA without loop
+IBA with loop
+Tango
+
+y
+
+y
+
+IBA without loop
+IBA with loop
+Tango
+
+y
+
+60
+
+120
+
+100
+
+80
+
+40
+
+20
+
+0
+
+-120
+
+-100
+
+-80
+
+-60
+
+-20
+
+0
+
+20
+
+-25
+
+-20
+
+-15
+
+-10
+
+-5
+
+5
+
+10
+
+15
+
+20
+
+25
+
+-20
+
+0
+
+20
+
+40
+
+60
+
+80
+
+-40
+x
+
+(d) Outdoor road
+
+(e) Outdoor road
+
+x
+
+(f) Outdoor road
+
+Figure 6: Trajectories of our system and Google tango. Ideally the ﬁnal position of the trajectory should be identical to the initial position.
+
+mode. The optimization time is 12.18ms, 78.14ms, and
+193.72ms for local BA, global BA without and with loop,
+respectively. Our solver shows great potential to be applied
+to mobile and power-constraint applications.
+
+6.4. Qualitatively Comparison with Google Tango
+
+mized for robust and accurate motion tracking. We compare
+our stereo SLAM system with a Tango Phab 2 as shown in
+Fig. 6. Without loop closure, our system shows comparative
+trajectories and more accurate scale than Tango. With loop
+closure, our system consistently outperforms Tango.
+
+Google tango is a commercial device that is highly opti-
+
+7. Conclusion
+
+Ours w/o loop
+2.45
+12.90
+
+Ours w/ loop
+2.45
+24.67
+
+OKVIS
+26.83
+-
+
+iSAM2
+-
+225.87
+
+ORB-SLAM
+99
+3515
+
+LBA
+GBA
+
+Table 3: Comparison of runtime (ms) for local/global BA
+(LBA/GBA) with EuRoC dataset using an Intel i7 CPU. Multi-
+threading is disabled. The runtime does not include the fron-
+tend process (feature detection and matching). OKVIS [22] uses
+5 keyframes plus 3 IMU frames in sliding window, whereas our
+system uses 50 frames and still achieves 10x speedup. Note that
+the optimization time of SVO [11] cannot be measured directly.
+We feed our frontend results to iSAM2 [18] to emulate the op-
+timization time of SVO. iSAM2 is the solver used by SVO and
+also a state-of-the-arts incremental solver. We also measure the
+optimization time of ORB-SLAM [25] which uses g2o [21] as its
+solver. The runtime for LBA/GBA is approximately 40/140 times
+slower than ours. Note that ORB-SLAM requires more features
+for robust tracking, which is also a reason for the low efﬁciency. If
+we reduce the number of extracted features from default 1200 to
+490, tracking fails on 3/11 sequences on EuRoC dataset.
+
+In this paper, we have proposed a novel optimization al-
+gorithm for VI-SLAM that leverages the sparseness and the
+unique matrix structure for the optimization of sliding win-
+dow based bundle adjustment. In addition, a novel relative
+marginalization is proposed to improve global consistency.
+Experiments demonstrate our approach can not only sub-
+stantially accelerate the optimization process but also pro-
+vide lower pose estimation error than other state-of-the-art
+SLAM approaches as well as a commercial system.
+
+Acknowledgement
+
+We would like to thank Bangbang Yang and Quanhan
+Qian for their kind help in producing results of OKVIS,
+SVO, iSAM2 and ORB-SLAM in Tab. 2 and 3. Hujun
+Bao is partially supported by 973 program of China (No.
+2015CB352503), and Guofeng Zhang is partially supported
+by NSF of China (No. 61672457).
+
+-8
+x
+
+0
+x
+
+1981
+
+References
+
+[1] S. Agarwal, K. Mierle, et al. Ceres solver, 2012.
+[2] S. Agarwal, N. Snavely, S. M. Seitz, and R. Szeliski. Bundle
+adjustment in the large. In European Conference on Com-
+puter Vision, pages 29–42. Springer, 2010.
+
+[3] M. Burri, J. Nikolic, P. Gohl, T. Schneider, J. Rehder,
+S. Omari, M. W. Achtelik, and R. Siegwart. The EuRoC
+micro aerial vehicle datasets. The International Journal of
+Robotics Research, 2016.
+
+[4] M. Byr¨od and K. ˚Astr¨om. Conjugate gradient bundle adjust-
+ment. In European Conference on Computer Vision, pages
+114–127. Springer, 2010.
+
+[5] J. Civera, A. J. Davison, and J. M. Montiel. Inverse depth
+IEEE transactions
+
+parametrization for monocular SLAM.
+on robotics, 24(5):932–945, 2008.
+
+[6] A. J. Davison, I. D. Reid, N. D. Molton, and O. Stasse.
+IEEE
+MonoSLAM: Real-time single camera SLAM.
+Transactions on Pattern Analysis and Machine Intelligence,
+29(6):1052–1067, 2007.
+
+[7] T.-C. Dong-Si and A. I. Mourikis. Motion tracking with
+ﬁxed-lag smoothing: Algorithm and consistency analysis.
+In International Conference on Robotics and Automation,
+pages 5655–5662. IEEE, 2011.
+
+[8] E. Eade and T. Drummond. Monocular SLAM as a graph
+In International Conference on
+
+of coalesced observations.
+Computer Vision, pages 1–8. IEEE, 2007.
+
+[9] J. Engel, T. Sch¨ops, and D. Cremers. LSD-SLAM: Large-
+scale direct monocular SLAM. In European Conference on
+Computer Vision, pages 834–849. Springer, 2014.
+
+[10] C. Forster, L. Carlone, F. Dellaert, and D. Scaramuzza. On-
+manifold preintegration for real-time visual–inertial odome-
+try. IEEE Transactions on Robotics, 33(1):1–21, 2017.
+[11] C. Forster, Z. Zhang, M. Gassner, M. Werlberger, and
+D. Scaramuzza.
+SVO: Semidirect visual odometry for
+monocular and multicamera systems. IEEE Transactions on
+Robotics, 33(2):249–265, 2017.
+
+[12] D. G´alvez-L´opez and J. D. Tard´os. Bags of binary words for
+IEEE Transac-
+
+fast place recognition in image sequences.
+tions on Robotics, 28(5):1188–1197, October 2012.
+
+[13] C. Harris and M. Stephens. A combined corner and edge de-
+tector. In In Proc. of Fourth Alvey Vision Conference, pages
+147–151, 1988.
+
+[14] J. A. Hesch, D. G. Kottas, S. L. Bowman, and S. I. Roumelio-
+tis. Camera-IMU-based localization: Observability analysis
+and consistency improvement. The International Journal of
+Robotics Research, 33(1):182–201, 2014.
+
+[15] V. Ila, L. Polok, M. Solony, and K. Istenic. Fast incremental
+bundle adjustment with covariance recovery. In International
+Conference on 3D Vision, pages 4321–4330, 2017.
+
+[16] V. Ila, L. Polok, M. Solony, and P. Svoboda. SLAM++ 1-
+a highly efﬁcient and temporally scalable incremental slam
+framework. The International Journal of Robotics Research,
+36(2):210–230, 2017.
+
+[17] Y. Jeong, D. Nister, D. Steedly, R. Szeliski, and I.-S. Kweon.
+Pushing the envelope of modern methods for bundle adjust-
+ment. IEEE Transactions on Pattern Analysis and Machine
+Intelligence, 34(8):1605–1617, 2012.
+
+[18] M. Kaess, H. Johannsson, R. Roberts, V. Ila, J. J. Leonard,
+and F. Dellaert.
+iSAM2: Incremental smoothing and map-
+ping using the bayes tree. The International Journal of
+Robotics Research, 31(2):216–235, 2012.
+[19] M. Kaess, A. Ranganathan, and F. Dellaert.
+
+iSAM: In-
+IEEE Transactions on
+
+cremental smoothing and mapping.
+Robotics, 24(6):1365–1378, 2008.
+
+[20] G. Klein and D. Murray. Parallel tracking and mapping for
+small ar workspaces. In International Symposium on Mixed
+and Augmented Reality, pages 225–234. IEEE, 2007.
+[21] R. K¨ummerle, G. Grisetti, H. Strasdat, K. Konolige, and
+W. Burgard. g 2 o: A general framework for graph opti-
+mization. In International Conference on Robotics and Au-
+tomation, pages 3607–3613. IEEE, 2011.
+
+[22] S. Leutenegger, S. Lynen, M. Bosse, R. Siegwart, and P. Fur-
+gale. Keyframe-based visual–inertial odometry using non-
+linear optimization. The International Journal of Robotics
+Research, 34(3):314–334, 2015.
+
+[23] H. Liu, C. Li, G. Chen, G. Zhang, M. Kaess, and H. Bao. Ro-
+bust keyframe-based dense SLAM with an RGB-D camera.
+arXiv preprint arXiv:1711.05166, 2017.
+
+[24] A. I. Mourikis and S. I. Roumeliotis. A multi-state constraint
+kalman ﬁlter for vision-aided inertial navigation. In Interna-
+tional Conference on Robotics and Automation, pages 3565–
+3572. IEEE, 2007.
+
+[25] R. Mur-Artal, J. M. M. Montiel, and J. D. Tardos. ORB-
+SLAM: a versatile and accurate monocular SLAM system.
+IEEE Transactions on Robotics, 31(5):1147–1163, 2015.
+[26] R. Mur-Artal and J. D. Tard´os. Visual-inertial monocular
+SLAM with map reuse. Robotics and Automation Letters,
+2(2):796–803, 2017.
+
+[27] E. D. Nerurkar, K. J. Wu, and S. I. Roumeliotis. C-
+KLAM: Constrained keyframe-based localization and map-
+ping. In International Conference on Robotics and Automa-
+tion, pages 3638–3643. IEEE, 2014.
+
+[28] T. Qin, P. Li, and S. Shen. VINS-Mono: A robust and versa-
+tile monocular visual-inertial state estimator. arXiv preprint
+arXiv:1708.03852, 2017.
+
+[29] D. Sibley, C. Mei, I. D. Reid, and P. Newman. Adaptive rel-
+ative bundle adjustment. In Robotics: Science and Systems,
+volume 32, page 33, 2009.
+
+[30] B. Triggs, P. F. McLauchlan, R. I. Hartley, and A. W. Fitzgib-
+bon. Bundle adjustmenta modern synthesis. In International
+Workshop on Vision Algorithms, pages 298–372. Springer,
+1999.
+
+[31] C. Wu, S. Agarwal, B. Curless, and S. M. Seitz. Multicore
+bundle adjustment. In Computer Vision and Pattern Recog-
+nition, pages 3057–3064. IEEE, 2011.
+
+[32] K. Wu, A. Ahmed, G. A. Georgiou, and S. I. Roumeliotis.
+A square root inverse ﬁlter for efﬁcient vision-aided inertial
+navigation on mobile devices. In Robotics: Science and Sys-
+tems, 2015.
+
+[33] J. yves Bouguet. Pyramidal implementation of the Lucas
+Kanade feature tracker. Intel Corporation, Microprocessor
+Research Labs, 2000.
+
+1982
+

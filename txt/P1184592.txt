@@ -1718,3 +1718,3443 @@ LDAMP
 
 14
 
+7
+1
+0
+2
+ 
+v
+o
+N
+ 
+6
+ 
+ 
+]
+L
+M
+
+.
+t
+a
+t
+s
+[
+ 
+ 
+4
+v
+5
+2
+6
+6
+0
+.
+4
+0
+7
+1
+:
+v
+i
+X
+r
+a
+
+Learned D-AMP: Principled Neural Network based
+Compressive Image Recovery
+
+Christopher A. Metzler
+Rice University
+chris.metzler@rice.edu
+
+Ali Mousavi
+Rice University
+ali.mousavi@rice.edu
+
+Richard G. Baraniuk
+Rice University
+richb@rice.edu
+
+Abstract
+
+Compressive image recovery is a challenging problem that requires fast and accu-
+rate algorithms. Recently, neural networks have been applied to this problem with
+promising results. By exploiting massively parallel GPU processing architectures
+and oodles of training data, they can run orders of magnitude faster than existing
+techniques. However, these methods are largely unprincipled black boxes that are
+difﬁcult to train and often-times speciﬁc to a single measurement matrix.
+
+It was recently demonstrated that iterative sparse-signal-recovery algorithms can
+be “unrolled” to form interpretable deep networks. Taking inspiration from this
+work, we develop a novel neural network architecture that mimics the behavior of
+the denoising-based approximate message passing (D-AMP) algorithm. We call
+this new network Learned D-AMP (LDAMP).
+
+The LDAMP network is easy to train, can be applied to a variety of different
+measurement matrices, and comes with a state-evolution heuristic that accurately
+predicts its performance. Most importantly, it outperforms the state-of-the-art
+BM3D-AMP and NLR-CS algorithms in terms of both accuracy and run time. At
+high resolutions, and when used with sensing matrices that have fast implemen-
+tations, LDAMP runs over 50× faster than BM3D-AMP and hundreds of times
+faster than NLR-CS.
+
+1
+
+Introduction
+
+Over the last few decades computational imaging systems have proliferated in a host of different
+imaging domains, from synthetic aperture radar to functional MRI and CT scanners. The majority of
+these systems capture linear measurements y ∈ Rm of the signal of interest x ∈ Rn via y = Ax + (cid:15),
+where A ∈ Rm×n is a measurement matrix and (cid:15) ∈ Rm is noise.
+
+Given the measurements y and the measurement matrix A, a computational imaging system seeks to
+recover x. When m < n this problem is underdetermined, and prior knowledge about x must be used
+to recovery the signal. This problem is broadly referred to as compressive sampling (CS) [1; 2].
+
+There are myriad ways to use priors to recover an image x from compressive measurements. In the
+following, we brieﬂy describe some of these methods. Note that the ways in which these algorithms
+use priors span a spectrum; from simple hand-designed models to completely data-driven methods
+(see Figure 1).
+
+31st Conference on Neural Information Processing Systems (NIPS 2017), Long Beach, CA, USA.
+
+Figure 1: The spectrum of compressive signal recovery algorithms.
+
+1.1 Hand-designed recovery methods
+
+The vast majority of CS recovery algorithms can be considered “hand-designed” in the sense that they
+use some sort of expert knowledge, i.e., prior, about the structure of x. The most common signal prior
+is that x is sparse in some basis. Algorithms using sparsity priors include CoSaMP [3], ISTA [4],
+approximate message passing (AMP) [5], and VAMP [6], among many others. Researchers have also
+developed priors and algorithms that more accurately describe the structure of natural images, such as
+minimal total variation, e.g., TVAL3 [7], markov-tree models on the wavelet coefﬁcients, e.g., Model-
+CoSaMP [8], and nonlocal self-similarity, e.g., NLR-CS [9]. Off-the-shelf denoising and compression
+algorithms have also been used to impose priors on the reconstruction, e.g., Denoising-based AMP
+(D-AMP) [10], D-VAMP [11], and C-GD [12]. When applied to natural images, algorithms using
+advanced priors outperform simple priors, like wavelet sparsity, by a large margin [10].
+
+The appeal of hand-designed methods is that they are based on interpretable priors and often have
+well understood behavior. Moreover, when they are set up as convex optimization problems they often
+have theoretical convergence guarantees. Unfortunately, among the algorithms that use accurate priors
+on the signal, even the fastest is too slow for many real-time applications [10]. More importantly,
+these algorithms do not take advantage of potentially available training data. As we will see, this
+leaves much room for improvement.
+
+1.2 Data-driven recovery methods
+
+At the other end of the spectrum are data-driven (often deep learning-based) methods that use no
+hand-designed models whatsoever. Instead, researchers provide neural networks (NNs) vast amounts
+of training data, and the networks learn how to best use the structure within the data [13–16].
+
+The ﬁrst paper to apply this approach was [13], where the authors used stacked denoising autoen-
+coders (SDA) [17] to recover signals from their undersampled measurements. Other papers in this
+line of work have used either pure convolutional layers (DeepInverse [15]) or a combination of
+convolutional and fully connected layers (DR2-Net [16] and ReconNet [14]) to build deep learning
+frameworks capable of solving the CS recovery problem. As demonstrated in [13], these methods can
+compete with state-of-the-art methods in terms of accuracy while running thousands of times faster.
+Unfortunately, these methods are held back by the fact that there exists almost no theory governing
+their performance and that, so far, they must be trained for speciﬁc measurement matrices and noise
+levels.
+
+1.3 Mixing hand-designed and data-driven methods for recovery
+
+The third class of recovery algorithms blends data-driven models with hand-designed algorithms.
+These methods ﬁrst use expert knowledge to set up a recovery algorithm and then use training
+data to learn priors within this algorithm. Such methods beneﬁt from the ability to learn more
+realistic signal priors from the training data, while still maintaining the interpretability and guarantees
+that made hand-designed methods so appealing. Algorithms of this class can be divided into two
+subcategories. The ﬁrst subcategory uses a black box neural network that performs some function
+within the algorithm, such as the proximal mapping. The second subcategory explicitly unrolls and
+iterative algorithm and turns it into a deep NN. Following this unrolling, the network can be tuned
+with training data. Our LDAMP algorithm uses ideas from both these camps.
+
+Black box neural nets. The simplest way to use a NN in a principled way to solve the CS problem
+is to treat it as a black box that performs some function; such as computing a posterior probability.
+
+2
+
+(a) D-IT Iterations
+
+(b) D-AMP Iterations
+
+Figure 2: Reconstruction behavior of D-IT (left) and D-AMP (right) with an idealized denoiser.
+Because D-IT allows bias to build up over iterations of the algorithm, its denoiser becomes ineffective
+at projecting onto the set C of all natural images. The Onsager correction term enables D-AMP to
+avoid this issue. Figure adapted from [10].
+
+Examples of this approach include RBM-AMP and its generalizations [18–20], which use Restricted
+Boltzmann Machines to learn non-i.i.d. priors; RIDE-CS [21], which uses the RIDE [22] generative
+model to compute the probability of a given estimate of the image; and OneNet [23], which uses a
+NN as a proximal mapping/denoiser.
+
+Unrolled algorithms. The second way to use a NN in a principled way to solve the CS problem is
+to simply take a well-understood iterative recovery algorithm and unroll/unfold it. This method is
+best illustrated by the the LISTA [24; 25] and LAMP [26] NNs. In these works, the authors simply
+unroll the iterative ISTA [4] and AMP [5] algorithms, respectively, and then treat parameters of
+the algorithm as weights to be learned. Following the unrolling, training data can be fed through
+the network, and stochastic gradient descent can be used to update and optimize its parameters.
+Unrolling was recently applied to the ADMM algorithm to solve the CS-MRI problem [27]. The
+resulting network, ADMM-Net, uses training data to learn ﬁlters, penalties, simple nonlinearities,
+and multipliers. Moving beyond CS, the unrolling principle has been applied successfully in speech
+enhancement [28], non-negative matrix factorization applied to music transcription [29], and beyond.
+In these applications, unrolling and training signiﬁcantly improve both the quality and speed of signal
+reconstruction.
+
+2 Learned D-AMP
+
+2.1 D-IT and D-AMP
+
+Learned D-AMP (LDAMP), is a mixed hand-designed/data-driven compressive signal recovery
+framework that is builds on the D-AMP algorithm [10]. We describe D-AMP now, as well as the
+simpler denoising-based iterative thresholding (D-IT) algorithm. For concreteness, but without loss
+of generality, we focus on image recovery.
+
+A compressive image recovery algorithm solves the ill-posed inverse problem of ﬁnding the image x
+given the low-dimensional measurements y = Ax by exploiting prior information on x, such as fact
+that x ∈ C, where C is the set of all natural images. A natural optimization formulation reads
+
+(1)
+When no measurement noise (cid:15) is present, a compressive image recovery algorithm should return the
+(hopefully unique) image xo at the intersection of the set C and the afﬁne subspace {x|y = Ax} (see
+Figure 2).
+
+2 subject to x ∈ C.
+
+argminx(cid:107)y − Ax(cid:107)2
+
+The premise of D-IT and D-AMP is that high-performance image denoisers Dσ, such as BM3D
+[30], are high-quality approximate projections onto the set C of natural images.1,2 That is, suppose
+
+1The notation Dσ indicates that the denoiser can be parameterized by the standard deviation of the noise σ.
+2Denoisers can also be thought of as a proximal mapping with respect to the negative log likelihood of natural
+images [31] or as taking a gradient step with respect to the data generating function of natural images [32; 33].
+
+3
+
+xo + σz is a noisy observation of a natural image, with xo ∈ C and z ∼ N (0, I). An ideal denoiser
+Dσ would simply ﬁnd the point in the set C that is closest to the observation xo + σz
+
+Dσ(x) = argminx(cid:107)xo + σz − x(cid:107)2
+
+2 subject to x ∈ C.
+
+(2)
+
+Combining (1) and (2) leads naturally to the D-IT algorithm, presented in (3) and illustrated in Figure
+2(a). Starting from x0 = 0, D-IT takes a gradient step towards the {x|y = Ax} afﬁne subspace and
+then applies the denoiser Dσ to move to x1 in the set C of natural images . Gradient stepping and
+denoising is repeated for t = 1, 2, . . . until convergence.
+
+D-IT Algorithm
+
+zt = y − Axt,
+
+xt+1 = Dˆσt(xt + AH zt).
+
+Let νt = xt + AH zt − xo denote the difference between xt + AH zt and the true signal xo at each
+iteration. νt is known as the effective noise. At each iteration, D-IT denoises xt + AH zt = xo + νt,
+i.e., the true signal plus the effective noise. Most denoisers are designed to work with νt as additive
+white Gaussian noise (AWGN). Unfortunately, as D-IT iterates, the denoiser biases the intermediate
+solutions, and νt soon deviates from AWGN. Consequently, the denoising iterations become less
+effective [5; 10; 26], and convergence slows.
+
+D-AMP differs from D-IT in that it corrects for the bias in the effective noise at each iteration
+t = 0, 1, . . . using an Onsager correction term bt.
+
+D-AMP Algorithm
+
+bt =
+
+zt−1divDˆσt−1(xt−1 + AH zt−1)
+m
+
+,
+
+zt = y − Axt + bt,
+(cid:107)zt(cid:107)2√
+m
+xt+1 = Dˆσt(xt + AH zt).
+
+ˆσt =
+
+,
+
+(3)
+
+(4)
+
+The Onsager correction term removes the bias from the intermediate solutions so that the effective
+noise νt follows the AWGN model expected by typical image denoisers. For more information on the
+Onsager correction, its origins, and its connection to the Thouless-Anderson-Palmer equations [34],
+see [5] and [35]. Note that (cid:107)zt(cid:107)2√
+m serves as a useful and accurate estimate of the standard deviation of
+νt [36]. Typically, D-AMP algorithms use a Monte-Carlo approximation for the divergence divD(·),
+which was ﬁrst introduced in [37; 10].
+
+2.2 Denoising convolutional neural network
+
+NNs have a long history in signal denoising; see, for instance [38]. However, only recently have they
+begun to signiﬁcantly outperform established methods like BM3D [30]. In this section we review the
+recently developed Denoising Convolutional Neural Network (DnCNN) image denoiser [39], which
+is both more accurate and far faster than competing techniques.
+
+The DnCNN neural network consists of 16 to 20 convolutional layers, organized as follows. The ﬁrst
+convolutional layer uses 64 different 3 × 3 × c ﬁlters (where c denotes the number of color channels)
+and is followed by a rectiﬁed linear unit (ReLU) [40]. The next 14 to 18 convolutional layers each use
+64 different 3 × 3 × 64 ﬁlters which are each followed by batch-normalization [41] and a ReLU. The
+ﬁnal convolutional layer uses c separate 3 × 3 × 64 ﬁlters to reconstruct the signal. The parameters
+are learned via residual learning [42].
+
+2.3 Unrolling D-IT and D-AMP into networks
+
+The central contribution of this work is to apply the unrolling ideas described in Section 1.3 to D-IT
+and D-AMP to form the LDIT and LDAMP neural networks. The LDAMP network, presented in (5)
+and illustrated in Figure 3, consists of 10 AMP layers where each AMP layer contains two denoisers
+
+4
+
+Figure 3: Two layers of the LDAMP neural network. When used with the DnCNN denoiser, each
+denoiser block is a 16 to 20 convolutional-layer neural network. The forward and backward operators
+are represented as the matrices A and AH ; however function handles work as well.
+
+with tied weights. One denoiser is used to update xl, and the other is used to estimate the divergence
+using the Monte-Carlo approximation from [37; 10]. The LDIT network is nearly identical but does
+not compute an Onsager correction term and hence, only applies one denoiser per layer. One of the
+few challenges to unrolling D-IT and D-AMP is that, to enable training, we must use a denoiser
+that easily propagates gradients; a black box denoiser like BM3D will not work. This restricts us to
+denoisers such as DnCNN, which, fortunately, offers improved performance.
+
+LDAMP Neural Network
+
+bl =
+
+zl−1divDl
+
+wl−1(ˆσl−1)(xl−1 + AH zl−1)
+
+,
+
+m
+
+ˆσl =
+
+zl = y − Axl + bl,
+(cid:107)zl(cid:107)2√
+m
+wl(ˆσl)(xl + AH zl).
+
+xl+1 = Dl
+
+,
+
+(5)
+
+Within (5), we use the slightly cumbersome notation Dl
+wl(ˆσl) to indicate that layer l of the network
+uses denoiser Dl, that this denoiser depends on its weights/biases wl, and that these weights may be a
+function of the estimated standard deviation of the noise ˆσl. During training, the only free parameters
+we learn are the denoiser weights w1, ...wL. This is distinct from the LISTA and LAMP networks,
+where the authors decouple and learn the A and AH matrices used in the network [24; 26].
+
+3 Training the LDIT and LDAMP networks
+
+We experimented with three different methods to train the LDIT and LDAMP networks. Here we
+describe and compare these training methods at a high level; the details are described in Section 5.
+
+• End-to-end training: We train all the weights of the network simultaneously. This is the
+
+standard method of training a neural network.
+
+• Layer-by-layer training: We train a 1 AMP layer network (which itself contains a 16-20
+layer denoiser) to recover the signal, ﬁx these weights, add an AMP layer, train the second
+layer of the resulting 2 layer network to recover the signal, ﬁx these weights, and repeat
+until we have trained a 10 layer network.
+
+• Denoiser-by-denoiser training: We decouple the denoisers from the rest of the network
+and train each on AWGN denoising problems at different noise levels. During inference,
+the network uses its estimate of the standard deviation of the noise to select which set of
+denoiser weights to use. Note that, in selecting which denoiser weights to use, we must
+discretize the expected range of noise levels; e.g., if ˆσ = 35, then we use the denoiser for
+noise standard deviations between 20 and 40.
+
+5
+
+End-to-end
+Layer-by-layer
+Denoiser-by-denoiser
+(a)
+
+LDIT LDAMP
+32.1
+26.1
+28.0
+
+33.1
+33.1
+31.6
+
+End-to-end
+Layer-by-layer
+Denoiser-by-denoiser
+(b)
+
+LDIT LDAMP
+
+8.0
+-2.6
+22.1
+
+18.7
+18.7
+25.9
+
+Figure 4: Average PSNRs4 of 100 40 × 40 image reconstructions with i.i.d. Gaussian measurements
+trained at a sampling rate of m
+n = 0.20 and tested at sampling rates of m
+n = 0.05
+(b).
+
+n = 0.20 (a) and m
+
+Comparing Training Methods. Stochastic gradient descent theory suggests that layer-by-layer
+and denoiser-by-denoiser training should sacriﬁce performance as compared to end-to-end training
+[43]. In Section 4.2 we will prove that this is not the case for LDAMP. For LDAMP, layer-by-layer and
+denoiser-by-denoiser training are minimum-mean-squared-error (MMSE) optimal. These theoretical
+results are born out experimentally in Tables 4(a) and 4(b). Each of the networks tested in this section
+consists of 10 unrolled DAMP/DIT layers that each contain a 16 layer DnCNN denoiser.
+
+Table 4(a) demonstrates that, as suggested by theory, layer-by-layer training of LDAMP is optimal;
+additional end-to-end training does not improve the performance of the network. In contrast, the table
+demonstrates that layer-by-layer training of LDIT, which represents the behavior of a typical neural
+network, is suboptimal; additional end-to-end training dramatically improves its performance.
+
+Despite the theoretical result the denoiser-by-denoiser training is optimal, Table 4(a) shows that
+LDAMP trained denoiser-by-denoiser performs slightly worse than the end-to-end and layer-by-layer
+trained networks. This gap in performance is likely due to the discretization of the noise levels, which
+is not modeled in our theory. This gap can be reduced by using a ﬁner discretization of the noise
+levels or by using deeper denoiser networks that can better handle a range of noise levels [39].
+
+In Table 4(b) we report on the performance of the two networks when trained at a one sampling
+rate and tested at another. LDIT and LDAMP networks trained end-to-end and layer-by-layer at a
+sampling rate of m
+n = 0.05. In contrast, the
+denoiser-by-denoiser trained networks, which were not trained at a speciﬁc sampling rate, generalize
+well to different sampling rates.
+
+n = 0.2 perform poorly when tested at a sampling rate of m
+
+4 Theoretical analysis of LDAMP
+
+This section makes two theoretical contributions. First, we show that the state-evolution (S.E.), a
+framework that predicts the performance of AMP/D-AMP, holds for LDAMP as well.5 Second, we
+use the S.E. to prove that layer-by-layer and denoiser-by-denoiser training of LDAMP are MMSE
+optimal.
+
+4.1 State-evolution
+
+In the context of LAMP and LDAMP, the S.E. equations predict the intermediate mean squared error
+(MSE) of the network over each of its layers [26]. Starting from θ0 = (cid:107)xo(cid:107)2
+the S.E. generates a
+sequence of numbers through the following iterations:
+
+n
+
+2
+
+θl+1(xo, δ, σ2
+
+(cid:15) ) =
+
+E(cid:15)(cid:107)Dl
+
+wl(σ)(xo + σl(cid:15)) − xo(cid:107)2
+2,
+
+(6)
+
+1
+n
+
+(cid:15) ) + σ2
+
+δ θl(xo, δ, σ2
+
+where (σl)2 = 1
+(cid:15) , the scalar σ(cid:15) is the standard deviation of the measurement noise
+(cid:15), and the expectation is with respect to (cid:15) ∼ N (0, I). Note that the notation θl+1(xo, δ, σ2
+(cid:15) ) is used to
+emphasize that θl may depend on the signal xo, the under-determinacy δ, and the measurement noise.
+Let xl denote the estimate at layer l of LDAMP. Our empirical ﬁndings, illustrated in Figure 5, show
+that the MSE of LDAMP is predicted accurately by the S.E. We formally state our ﬁnding.
+
+4PSNR = 10 log10(
+5For D-AMP and LDAMP, the S.E. is entirely observational; no rigorous theory exists. For AMP, the S.E. has
+
+mean((ˆx−xo)2) ) when the pixel range is 0 to 255.
+
+2552
+
+been proven asymptotically accurate for i.i.d. Gaussian measurements [44].
+
+6
+
+Figure 5: The MSE of intermediate reconstructions of the Boat test image across different layers for
+the DnCNN variants of LDAMP and LDIT alongside their predicted S.E. The image was sampled
+with Gaussian measurements at a rate of m
+n = 0.1. Note that LDAMP is well predicted by the S.E.,
+whereas LDIT is not.
+
+Finding 1. If the LDAMP network starts from x0 = 0, then for large values of m and n, the
+(cid:13)
+2
+S.E. predicts the mean square error of LDAMP at each layer, i.e., θl(xo, δ, σ2
+2 , if
+(cid:13)
+the following conditions hold: (i) The elements of the matrix A are i.i.d. Gaussian (or subgaussian)
+with mean zero and standard deviation 1/m. (ii) The noise w is also i.i.d. Gaussian. (iii) The
+denoisers Dl at each layer are Lipschitz continuous.6
+
+(cid:13)
+(cid:13)xl − xo
+
+(cid:15) ) ≈ 1
+n
+
+4.2 Layer-by-layer and denoiser-by-denoiser training is optimal
+
+The S.E. framework enables us to prove the following results: Layer-by-layer and denoiser-by-
+denoiser training of LDAMP are MMSE optimal. Both these results rely upon the following lemma.
+Lemma 1. Suppose that D1, D2, ...DL are monotone denoisers in the sense that for l = 1, 2, ...L
+inf wl E(cid:107)Dl
+2 is a non-decreasing function of σ. If the weights w1 of D1 are set
+to minimize Ex0[θ1] and ﬁxed; and then the weights w2 of D2 are set to minimize Ex0 [θ2] and ﬁxed,
+. . . and then the weights wL of DL are set to minimize Ex0[θL], then together they minimize Ex0[θL].
+
+wl(σ)(xo + σ(cid:15)) − xo(cid:107)2
+
+Lemma 1 can be derived using the proof technique for Lemma 3 of [10], but with θl replaced by
+Ex0[θl] throughout. It leads to the following two results.
+Corollary 1. Under the conditions in Lemma 1, layer-by-layer training of LDAMP is MMSE optimal.
+
+This result follows from Lemma 1 and the equivalence between Ex0[θl] and Ex0[ 1
+Corollary 2. Under the conditions in Lemma 1, denoiser-by-denoiser training of LDAMP is MMSE
+optimal.
+
+n (cid:107)xl − xo(cid:107)2
+2].
+
+This result follows from Lemma 1 and the equivalence between Ex0 [θl] and Ex0[ 1
+n
+σl(cid:15)) − xo(cid:107)2
+2].
+
+E(cid:15)(cid:107)Dl
+
+wl(σ)(xo +
+
+5 Experiments
+
+Datasets Training images were pulled from Berkeley’s BSD-500 dataset [46]. From this dataset,
+we used 400 images for training, 50 for validation, and 50 for testing. For the results presented in
+Section 3, the training images were cropped, rescaled, ﬂipped, and rotated to form a set of 204,800
+overlapping 40 × 40 patches. The validation images were cropped to form 1,000 non-overlapping
+40 × 40 patches. We used 256 non-overlapping 40 × 40 patches for test. For the results presented in
+this section, we used 382,464 50 × 50 patches for training, 6,528 50 × 50 patches for validation, and
+seven standard test images, illustrated in Figure 6 and rescaled to various resolutions, for test.
+
+Implementation. We implemented LDAMP and LDIT, using the DnCNN denoiser [39], in both
+TensorFlow and MatConvnet [47], which is a toolbox for Matlab. Public implementations of both
+versions of the algorithm are available at https://github.com/ricedsp/D-AMP_Toolbox.
+
+6A denoiser is said to be L-Lipschitz continuous if for every x1, x2 ∈ C we have (cid:107)D(x1) − D(x2)(cid:107)2
+
+2 ≤
+2. While we did not ﬁnd it necessary in practice, weight clipping and gradient norm penalization
+
+L(cid:107)x1 − x2(cid:107)2
+can be used to ensure Lipschitz continuity of the convolutional denoiser [45].
+
+7
+
+(a) Barbara
+
+(b) Boat
+
+(c) Couple
+
+(d) Peppers
+
+(e) Fingerprint
+
+(f) Mandrill
+
+(g) Bridge
+
+Figure 6: The seven test images.
+
+Training parameters. We trained all the networks using the Adam optimizer [48] with a training
+rate of 0.001, which we dropped to 0.0001 and then 0.00001 when the validation error stopped
+improving. We used mini-batches of 32 to 256 patches, depending on network size and memory
+usage. For layer-by-layer and denoiser-by-denoiser training, we used a different randomly generated
+measurement matrix for each mini-batch. Training generally took between 3 and 5 hours per denoiser
+on an Nvidia Pascal Titan X. Results in this section are for denoiser-by-denoiser trained networks
+which consists of 10 unrolled DAMP/DIT layers that each contain a 20 layer DnCNN denoiser.
+
+Competition. We compared the performance of LDAMP to three state-of-the-art image recovery
+algorithms; TVAL3 [7], NLR-CS [9], and BM3D-AMP [10]. We also include a comparison with LDIT
+to demonstrate the beneﬁts of the Onsager correction term. Our results do not include comparisons
+with any other NN-based techniques. While many NN-based methods are very specialized and only
+work for ﬁxed matrices [13–16; 27], the recently proposed OneNet [23] and RIDE-CS [21] methods
+can be applied more generally. Unfortunately, we were unable to train and test the OneNet code
+in time for this submission. While RIDE-CS code was available, the implementation requires the
+measurement matrices to have orthonormalized rows. When tested on matrices without orthonormal
+rows, RIDE-CS performed signiﬁcantly worse than the other methods.
+
+Algorithm parameters. All algorithms used their default parameters. However, NLR-CS was
+initialized using 8 iterations of BM3D-AMP, as described in [10]. BM3D-AMP was run for 10
+iterations. LDIT and LDAMP used 10 layers. LDIT had its per layer noise standard deviation estimate
+ˆσ parameter set to 2(cid:107)zl(cid:107)2/
+
+m, as was done with D-IT in [10].
+
+√
+
+Testing setup. We tested the algorithms with i.i.d. Gaussian measurements and with measurements
+from a randomly sampled coded diffraction pattern [49]. The coded diffraction pattern forward
+operator was formed as a composition of three steps; randomly (uniformly) change the phase, take a
+2D FFT, and then randomly (uniformly) subsample. Except for the results in Figure 7, we tested the
+algorithms with 128 × 128 images (n = 1282). We report recovery accuracy in terms of PSNR. We
+report run times in seconds. Results broken down by image are provided in the supplement.
+
+Gaussian measurements. With noise-free Gaussian measurements, the LDAMP network produces
+the best reconstructions at every sampling rate on every image except Fingerprints, which looks very
+unlike the natural images the network was trained on. With noise-free Gaussian measurements, LDIT
+and LDAMP produce reconstructions signiﬁcantly faster than the competing methods. Note that,
+despite having to perform twice as many denoising operations, at a sampling rate of m
+n = 0.25 the
+LDAMP network is only about 25% slower than LDIT. This indicates that matrix multiplies, not
+denoising operations, are the dominant source of computation. Average recovery PSNRs and run
+times are reported in Table 1. With noisy Gaussian measurements, LDAMP uniformly outperformed
+the other methods; these results can be found in the supplement.
+
+Coded diffraction measurements. With noise-free coded diffraction measurements, the LDAMP
+network again produces the best reconstructions on every image except Fingerprints. With coded
+diffraction measurements, LDIT and LDAMP produce reconstructions signiﬁcantly faster than com-
+peting methods. Note that because the coded diffraction measurement forward and backward operator
+can be applied in O(n log n) operations, denoising becomes the dominant source of computations:
+LDAMP, which has twice as many denoising operations as LDIT, takes roughly 2× longer to com-
+plete. Average recovery PSNRs and run times are reported in Table 2. We end this section with a
+visual comparison of 512 × 512 reconstructions from TVAL3, BM3D-AMP, and LDAMP, presented
+
+8
+
+Table 1: PSNRs and run times (sec) of 128 × 128 reconstructions with i.i.d. Gaussian measurements
+and no measurement noise at various sampling rates.
+
+Method
+
+TVAL3
+BM3D-AMP
+LDIT
+LDAMP
+NLR-CS
+
+m
+n = 0.10
+PSNR Time
+
+21.5
+23.1
+20.1
+23.7
+23.2
+
+2.2
+4.8
+0.3
+0.4
+85.9
+
+m
+n = 0.15
+
+m
+n = 0.20
+
+m
+n = 0.25
+
+PSNR
+
+Time
+
+PSNR
+
+Time
+
+PSNR
+
+Time
+
+22.8
+25.1
+20.7
+25.7
+25.2
+
+2.9
+4.4
+0.4
+0.5
+104.0
+
+24.0
+26.6
+21.1
+27.2
+26.8
+
+3.6
+4.2
+0.4
+0.5
+124.4
+
+25.0
+27.9
+21.7
+28.5
+28.2
+
+4.3
+4.1
+0.5
+0.6
+146.3
+
+Table 2: PSNRs and run times (sec) of 128×128 reconstructions with coded diffraction measurements
+and no measurement noise at various sampling rates.
+
+Method
+
+m
+n = 0.10
+
+m
+n = 0.15
+
+m
+n = 0.20
+
+m
+n = 0.25
+
+PSNR
+
+Time
+
+PSNR
+
+Time
+
+PSNR
+
+Time
+
+PSNR
+
+Time
+
+TVAL3
+BM3D-AMP
+LDIT
+LDAMP
+NLR-CS
+
+24.0
+23.8
+22.9
+25.3
+21.6
+
+0.52
+4.55
+0.14
+0.26
+87.82
+
+26.0
+25.7
+25.6
+27.4
+22.8
+
+0.46
+4.29
+0.14
+0.26
+87.43
+
+27.9
+27.5
+27.4
+28.9
+25.1
+
+0.43
+3.67
+0.14
+0.27
+87.18
+
+29.7
+29.1
+28.9
+30.5
+26.4
+
+0.41
+3.40
+0.14
+0.26
+86.87
+
+in Figure 7. At high resolutions, the LDAMP reconstructions are incrementally better than those of
+BM3D-AMP yet computed over 60× faster.
+
+(a) Original Image
+
+(b) TVAL3 (26.4 dB, 6.85
+
+(c) BM3D-AMP (27.2 dB,
+
+(d) LDAMP (28.1
+
+dB,
+
+sec)
+
+75.04 sec)
+
+1.22 sec)
+
+Figure 7: Reconstructions of 512 × 512 Boat test image sampled at a rate of m
+n = 0.05 using
+coded diffraction pattern measurements and no measurement noise. LDAMP’s reconstructions are
+noticeably cleaner and far faster than the competing methods.
+
+6 Conclusions
+
+In this paper, we have developed, analyzed, and validated a novel neural network architecture that
+mimics the behavior of the powerful D-AMP signal recovery algorithm. The LDAMP network is
+easy to train, can be applied to a variety of different measurement matrices, and comes with a state-
+evolution heuristic that accurately predicts its performance. Most importantly, LDAMP outperforms
+the state-of-the-art BM3D-AMP and NLR-CS algorithms in terms of both accuracy and run time.
+
+LDAMP represents the latest example in a trend towards using training data (and lots of ofﬂine
+computations) to improve the performance of iterative algorithms. The key idea behind this paper
+is that, rather than training a fairly arbitrary black box to learn to recover signals, we can unroll
+a conventional iterative algorithm and treat the result as a NN, which produces a network with
+well-understood behavior, performance guarantees, and predictable shortcomings. It is our hope this
+paper highlights the beneﬁts of this approach and encourages future research in this direction.
+
+9
+
+References
+
+[1] E. J. Candes, J. Romberg, and T. Tao, “Robust uncertainty principles: Exact signal reconstruction from
+highly incomplete frequency information,” IEEE Trans. Inform. Theory, vol. 52, no. 2, pp. 489–509, Feb.
+2006.
+
+[2] R. G. Baraniuk, “Compressive sensing [lecture notes],” IEEE Signal Processing Mag., vol. 24, no. 4, pp.
+
+118–121, 2007.
+
+[3] D. Needell and J. A. Tropp, “CoSaMP: Iterative signal recovery from incomplete and inaccurate samples,”
+
+Appl. Comput. Harmon. Anal., vol. 26, no. 3, pp. 301–321, 2009.
+
+[4] I. Daubechies, M. Defrise, and C. D. Mol, “An iterative thresholding algorithm for linear inverse problems
+
+with a sparsity constraint,” Comm. on Pure and Applied Math., vol. 75, pp. 1412–1457, 2004.
+
+[5] D. L. Donoho, A. Maleki, and A. Montanari, “Message passing algorithms for compressed sensing,” Proc.
+
+Natl. Acad. Sci., vol. 106, no. 45, pp. 18 914–18 919, 2009.
+
+[6] S. Rangan, P. Schniter, and A. Fletcher, “Vector approximate message passing,” arXiv preprint
+
+arXiv:1610.03082, 2016.
+
+[7] C. Li, W. Yin, and Y. Zhang, “User’s guide for TVAL3: TV minimization by augmented Lagrangian and
+
+alternating direction algorithms,” Rice CAAM Department report, vol. 20, pp. 46–47, 2009.
+
+[8] R. G. Baraniuk, V. Cevher, M. F. Duarte, and C. Hegde, “Model-based compressive sensing,” IEEE Trans.
+
+Inform. Theory, vol. 56, no. 4, pp. 1982 –2001, Apr. 2010.
+
+[9] W. Dong, G. Shi, X. Li, Y. Ma, and F. Huang, “Compressive sensing via nonlocal low-rank regularization,”
+
+IEEE Trans. Image Processing, vol. 23, no. 8, pp. 3618–3632, 2014.
+
+[10] C. A. Metzler, A. Maleki, and R. G. Baraniuk, “From denoising to compressed sensing,” IEEE Trans.
+
+Inform. Theory, vol. 62, no. 9, pp. 5117–5144, 2016.
+
+[11] P. Schniter, S. Rangan, and A. Fletcher, “Denoising based vector approximate message passing,” arXiv
+
+preprint arXiv:1611.01376, 2016.
+
+[12] S. Beygi, S. Jalali, A. Maleki, and U. Mitra, “An efﬁcient algorithm for compression-based compressed
+
+sensing,” arXiv preprint arXiv:1704.01992, 2017.
+
+[13] A. Mousavi, A. B. Patel, and R. G. Baraniuk, “A deep learning approach to structured signal recovery,”
+
+Proc. Allerton Conf. Communication, Control, and Computing, pp. 1336–1343, 2015.
+
+[14] K. Kulkarni, S. Lohit, P. Turaga, R. Kerviche, and A. Ashok, “Reconnet: Non-iterative reconstruction of
+images from compressively sensed measurements,” Proceedings of the IEEE Conference on Computer
+Vision and Pattern Recognition, pp. 449–458, 2016.
+
+[15] A. Mousavi and R. G. Baraniuk, “Learning to invert: Signal recovery via deep convolutional networks,”
+
+Proc. IEEE Int. Conf. Acoust., Speech, and Signal Processing (ICASSP), pp. 2272–2276, 2017.
+
+[16] H. Yao, F. Dai, D. Zhang, Y. Ma, S. Zhang, and Y. Zhang, “DR2-net: Deep residual reconstruction network
+
+for image compressive sensing,” arXiv preprint arXiv:1702.05743, 2017.
+
+[17] P. Vincent, H. Larochelle, I. Lajoie, Y. Bengio, and P.-A. Manzagol, “Stacked denoising autoencoders:
+Learning useful representations in a deep network with a local denoising criterion,” J. Machine Learning
+Research, vol. 11, pp. 3371–3408, 2010.
+
+[18] E. W. Tramel, A. Drémeau, and F. Krzakala, “Approximate message passing with restricted Boltzmann
+machine priors,” Journal of Statistical Mechanics: Theory and Experiment, vol. 2016, no. 7, p. 073401,
+2016.
+
+[19] E. W. Tramel, A. Manoel, F. Caltagirone, M. Gabrié, and F. Krzakala, “Inferring sparsity: Compressed
+sensing using generalized restricted Boltzmann machines,” Proc. IEEE Information Theory Workshop
+(ITW), pp. 265–269, 2016.
+
+[20] E. W. Tramel, M. Gabrié, A. Manoel, F. Caltagirone, and F. Krzakala, “A deterministic and gen-
+eralized framework for unsupervised learning with restricted Boltzmann machines,” arXiv preprint
+arXiv:1702.03260, 2017.
+
+[21] A. Dave, A. K. Vadathya, and K. Mitra, “Compressive image recovery using recurrent generative model,”
+
+arXiv preprint arXiv:1612.04229, 2016.
+
+10
+
+[22] L. Theis and M. Bethge, “Generative image modeling using spatial LSTMs,” Proc. Adv. in Neural
+
+Processing Systems (NIPS), pp. 1927–1935, 2015.
+
+[23] J. Rick Chang, C.-L. Li, B. Poczos, B. Vijaya Kumar, and A. C. Sankaranarayanan, “One network to solve
+them all–Solving linear inverse problems using deep projection models,” Proc. IEEE Int. Conf. Comp.
+Vision, and Pattern Recognition, pp. 5888–5897, 2017.
+
+[24] K. Gregor and Y. LeCun, “Learning fast approximations of sparse coding,” Proc. Int. Conf. Machine
+
+Learning, pp. 399–406, 2010.
+
+[25] U. S. Kamilov and H. Mansour, “Learning optimal nonlinearities for iterative thresholding algorithms,”
+
+IEEE Signal Process. Lett., vol. 23, no. 5, pp. 747–751, 2016.
+
+[26] M. Borgerding and P. Schniter, “Onsager-corrected deep networks for sparse linear inverse problems,”
+
+arXiv preprint arXiv:1612.01183, 2016.
+
+[27] Y. Yang, J. Sun, H. Li, and Z. Xu, “Deep ADMM-net for compressive sensing MRI,” Proc. Adv. in Neural
+
+Processing Systems (NIPS), vol. 29, pp. 10–18, 2016.
+
+[28] J. R. Hershey, J. L. Roux, and F. Weninger, “Deep unfolding: Model-based inspiration of novel deep
+
+architectures,” arXiv preprint arXiv:1409.2574, 2014.
+
+[29] T. B. Yakar, P. Sprechmann, R. Litman, A. M. Bronstein, and G. Sapiro, “Bilevel sparse models for
+
+polyphonic music transcription.” ISMIR, pp. 65–70, 2013.
+
+[30] K. Dabov, A. Foi, V. Katkovnik, and K. Egiazarian, “Image denoising by sparse 3-d transform-domain
+collaborative ﬁltering,” IEEE Trans. Image Processing, vol. 16, no. 8, pp. 2080–2095, Aug. 2007.
+
+[31] S. V. Venkatakrishnan, C. A. Bouman, and B. Wohlberg, “Plug-and-play priors for model based reconstruc-
+
+tion,” Proc. Global Conf. on Signal and Inform. Processing (GlobalSIP), pp. 945–948, 2013.
+
+[32] G. Alain and Y. Bengio, “What regularized auto-encoders learn from the data-generating distribution,” J.
+
+Machine Learning Research, vol. 15, no. 1, pp. 3563–3593, 2014.
+
+[33] C. K. Sønderby, J. Caballero, L. Theis, W. Shi, and F. Huszár, “Amortised map inference for image
+
+super-resolution,” Proc. Int. Conf. on Learning Representations (ICLR), 2017.
+
+[34] D. J. Thouless, P. W. Anderson, and R. G. Palmer, “Solution of ‘Solvable model of a spin glass’,” Philos.
+
+Mag., vol. 35, no. 3, pp. 593–601, 1977.
+
+[35] M. Mézard and A. Montanari, Information, Physics, Computation: Probabilistic Approaches. Cambridge
+
+[36] A. Maleki, “Approximate message passing algorithm for compressed sensing,” Stanford University PhD
+
+University Press, 2008.
+
+Thesis, Nov. 2010.
+
+[37] S. Ramani, T. Blu, and M. Unser, “Monte-Carlo sure: A black-box optimization of regularization parameters
+
+for general denoising algorithms,” IEEE Trans. Image Processing, pp. 1540–1554, 2008.
+
+[38] H. C. Burger, C. J. Schuler, and S. Harmeling, “Image denoising: Can plain neural networks compete with
+
+BM3D?” Proc. IEEE Int. Conf. Comp. Vision, and Pattern Recognition, pp. 2392–2399, 2012.
+
+[39] K. Zhang, W. Zuo, Y. Chen, D. Meng, and L. Zhang, “Beyond a Gaussian denoiser: Residual learning of
+
+deep CNN for image denoising,” IEEE Trans. Image Processing, 2017.
+
+[40] A. Krizhevsky, I. Sutskever, and G. E. Hinton, “Imagenet classiﬁcation with deep convolutional neural
+
+networks,” Proc. Adv. in Neural Processing Systems (NIPS), pp. 1097–1105, 2012.
+
+[41] S. Ioffe and C. Szegedy, “Batch normalization: Accelerating deep network training by reducing internal
+
+covariate shift,” arXiv preprint arXiv:1502.03167, 2015.
+
+[42] K. He, X. Zhang, S. Ren, and J. Sun, “Deep residual learning for image recognition,” Proc. IEEE Int. Conf.
+
+Comp. Vision, and Pattern Recognition, pp. 770–778, 2016.
+
+[43] F. J. ´Smieja, “Neural network constructive algorithms: Trading generalization for learning efﬁciency?”
+
+Circuits, Systems, and Signal Processing, vol. 12, no. 2, pp. 331–374, 1993.
+
+[44] M. Bayati and A. Montanari, “The dynamics of message passing on dense graphs, with applications to
+
+compressed sensing,” IEEE Trans. Inform. Theory, vol. 57, no. 2, pp. 764–785, 2011.
+
+11
+
+[45] I. Gulrajani, F. Ahmed, M. Arjovsky, V. Dumoulin, and A. Courville, “Improved training of Wasserstein
+
+GANs,” arXiv preprint arXiv:1704.00028, 2017.
+
+[46] D. Martin, C. Fowlkes, D. Tal, and J. Malik, “A database of human segmented natural images and its
+application to evaluating segmentation algorithms and measuring ecological statistics,” Proc. Int. Conf.
+Computer Vision, vol. 2, pp. 416–423, July 2001.
+
+[47] A. Vedaldi and K. Lenc, “Matconvnet – Convolutional neural networks for MATLAB,” Proc. ACM Int.
+
+[48] D. Kingma and J. Ba, “Adam: A method for stochastic optimization,” arXiv preprint arXiv:1412.6980,
+
+[49] E. J. Candes, X. Li, and M. Soltanolkotabi, “Phase retrieval from coded diffraction patterns,” Appl. Comput.
+
+Harmon. Anal., vol. 39, no. 2, pp. 277–299, 2015.
+
+Conf. on Multimedia, 2015.
+
+2014.
+
+Supplementary Results
+
+Table 3: PSNR of 128 × 128 reconstructions with i.i.d. Gaussian measurements and no measurement
+noise.
+
+m
+n = .05 Barbara
+19.32
+TVAL3
+18.04
+BM3D-AMP
+17.20
+LDIT
+21.26
+LDAMP
+NLR-CS
+20.31
+m
+n = .10 Barbara
+21.75
+TVAL3
+24.36
+BM3D-AMP
+19.39
+LDIT
+25.80
+LDAMP
+25.17
+NLR-CS
+m
+n = .15 Barbara
+23.47
+TVAL3
+27.35
+BM3D-AMP
+20.53
+LDIT
+28.78
+LDAMP
+NLR-CS
+28.10
+m
+n = .20 Barbara
+25.20
+TVAL3
+29.57
+BM3D-AMP
+20.42
+LDIT
+31.10
+LDAMP
+30.42
+NLR-CS
+m
+n = .25 Barbara
+26.57
+TVAL3
+31.39
+BM3D-AMP
+21.59
+LDIT
+32.68
+LDAMP
+32.42
+NLR-CS
+
+Boat Fingerprint Mandrill Peppers Couple Bridge
+
+19.22
+21.05
+16.77
+18.92
+18.08
+19.37
+20.17
+22.44
+21.51
+19.22
+Boat Fingerprint Mandrill Peppers Couple Bridge
+
+21.98
+20.79
+20.43
+22.84
+22.05
+
+19.36
+18.28
+17.49
+21.30
+19.69
+
+16.49
+12.25
+16.94
+17.04
+14.96
+
+21.09
+20.38
+19.51
+22.74
+21.55
+
+22.95
+20.86
+24.04
+22.05
+21.49
+19.82
+24.67
+22.52
+21.80
+23.84
+Boat Fingerprint Mandrill Peppers Couple Bridge
+
+16.77
+18.07
+17.23
+17.36
+17.84
+
+23.07
+24.79
+21.24
+25.43
+24.91
+
+23.21
+24.12
+22.17
+24.37
+23.56
+
+21.98
+24.44
+19.13
+26.00
+25.18
+
+22.00
+24.25
+23.35
+25.67
+19.50
+22.54
+23.97
+26.79
+25.57
+23.10
+Boat Fingerprint Mandrill Peppers Couple Bridge
+
+24.74
+26.96
+21.89
+27.65
+26.82
+
+24.09
+25.02
+23.17
+25.40
+24.45
+
+24.18
+27.37
+19.74
+29.38
+28.06
+
+16.97
+19.94
+17.29
+17.65
+20.11
+
+25.47
+23.08
+27.40
+24.45
+22.50
+20.95
+28.58
+25.21
+24.18
+27.34
+Boat Fingerprint Mandrill Peppers Couple Bridge
+
+25.90
+29.55
+21.45
+31.88
+30.47
+
+24.84
+25.80
+22.66
+26.31
+25.56
+
+26.17
+28.55
+22.29
+29.57
+28.54
+
+17.32
+21.19
+17.34
+18.07
+21.29
+
+26.53
+28.89
+23.02
+30.17
+28.78
+
+17.62
+21.97
+17.57
+18.13
+22.04
+
+25.46
+26.50
+23.61
+27.06
+26.52
+
+27.49
+31.27
+21.65
+33.87
+32.47
+
+27.44
+30.01
+23.22
+31.06
+30.13
+
+23.98
+25.37
+21.04
+26.20
+25.26
+
+12
+
+Table 4: PSNR of 128×128 reconstructions with coded diffraction measurements and no measurement
+noise.
+
+m
+n = .05
+TVAL3
+BM3D-AMP
+LDIT
+LDAMP
+NLR-CS
+m
+n = .10
+TVAL3
+BM3D-AMP
+LDIT
+LDAMP
+NLR-CS
+m
+n = .15
+TVAL3
+BM3D-AMP
+LDIT
+LDAMP
+NLR-CS
+m
+n = .20
+TVAL3
+BM3D-AMP
+LDIT
+LDAMP
+NLR-CS
+m
+n = .25
+TVAL3
+BM3D-AMP
+LDIT
+LDAMP
+NLR-CS
+
+Barbara Boat
+
+Fingerprint Mandrill Peppers Couple Bridge
+
+21.66
+18.37
+20.20
+22.10
+15.14
+
+22.70
+17.89
+21.09
+23.45
+13.44
+Barbara Boat
+
+25.08
+25.40
+24.02
+27.90
+24.12
+
+25.39
+24.48
+24.77
+26.50
+21.56
+Barbara Boat
+
+27.78
+28.96
+28.44
+30.85
+27.35
+
+27.71
+25.98
+26.59
+28.79
+24.16
+Barbara Boat
+
+30.05
+32.08
+31.60
+33.10
+26.41
+
+29.93
+28.07
+28.61
+30.20
+25.26
+Barbara Boat
+
+32.37
+34.69
+34.00
+34.58
+31.74
+
+32.13
+29.59
+30.43
+32.62
+28.16
+
+16.79
+13.46
+16.69
+17.33
+11.73
+
+20.92
+20.83
+19.98
+20.94
+16.04
+Fingerprint Mandrill Peppers Couple Bridge
+
+21.94
+17.80
+19.07
+22.32
+17.23
+
+22.98
+16.91
+20.85
+23.50
+17.70
+
+23.20
+13.32
+22.31
+23.54
+18.43
+
+17.34
+18.68
+17.31
+17.56
+17.11
+
+23.13
+22.56
+20.21
+23.87
+21.04
+Fingerprint Mandrill Peppers Couple Bridge
+
+25.83
+25.52
+24.36
+28.18
+24.05
+
+24.79
+24.48
+24.74
+25.57
+21.15
+
+26.13
+25.53
+25.24
+27.24
+22.27
+
+17.96
+20.39
+17.31
+17.86
+18.99
+
+24.90
+23.63
+24.28
+25.69
+20.58
+Fingerprint Mandrill Peppers Couple Bridge
+
+26.05
+25.12
+25.73
+26.68
+23.28
+
+28.54
+27.11
+26.92
+29.54
+24.23
+
+28.90
+28.67
+30.21
+32.07
+21.24
+
+18.73
+21.41
+17.30
+17.94
+21.04
+
+26.55
+24.57
+25.57
+27.24
+23.47
+Fingerprint Mandrill Peppers Couple Bridge
+
+31.62
+31.47
+32.15
+34.06
+28.18
+
+30.77
+28.99
+30.49
+32.17
+27.67
+
+27.32
+25.89
+26.06
+27.59
+23.48
+
+19.63
+22.26
+17.65
+18.60
+20.64
+
+28.63
+26.36
+26.24
+29.01
+25.79
+
+34.20
+34.74
+35.37
+36.07
+28.60
+
+33.05
+30.51
+31.02
+33.86
+28.89
+
+28.12
+25.69
+27.63
+28.60
+21.04
+
+13
+
+Table 5: PSNR of reconstruction of 128 × 128 Boat test image with additive white Gaussian
+measurement noise (AWGN) with various standard deviations (s.d.).
+
+Sampling rate
+
+TVAL3
+BM3D-AMP
+LDAMP
+
+m
+
+n = .05 m
+21.08
+16.99
+22.41
+
+n = .05 m
+24.06
+25.40
+26.36
+
+n = .05 m
+24.97
+26.79
+27.62
+
+n = .05
+25.75
+27.64
+28.56
+
+AWGN with s.d. 10
+n = .05 m
+22.84
+23.98
+24.56
+AWGN with s.d. 20
+n = .05 m
+22.60
+23.67
+24.24
+AWGN with s.d. 30
+n = .05 m
+22.23
+23.34
+23.80
+AWGN with s.d. 40
+n = .05 m
+21.80
+23.02
+23.41
+AWGN with s.d. 50
+n = .05 m
+21.33
+22.69
+22.96
+
+n = .05 m
+21.00
+21.03
+22.33
+
+n = .05 m
+20.90
+18.43
+22.11
+
+n = .05 m
+20.77
+19.24
+21.85
+
+n = .05 m
+20.58
+19.45
+21.58
+
+n = .05 m
+23.50
+24.63
+25.35
+
+n = .05 m
+23.94
+25.45
+26.33
+
+n = .05
+24.16
+26.03
+26.75
+
+n = .05 m
+22.74
+24.09
+24.55
+
+n = .05 m
+22.74
+24.46
+25.10
+
+n = .05
+22.57
+24.80
+25.34
+
+n = .05 m
+21.93
+23.55
+23.90
+
+n = .05 m
+21.60
+23.77
+24.33
+
+n = .05
+21.12
+23.94
+24.50
+
+n = .05 m
+21.17
+23.13
+23.44
+
+n = .05 m
+20.53
+23.28
+23.65
+
+n = .05
+19.84
+23.38
+23.76
+
+Sampling Rate m
+
+TVAL3
+BM3D-AMP
+LDAMP
+
+Sampling Rate m
+
+TVAL3
+BM3D-AMP
+LDAMP
+
+Sampling Rate m
+
+TVAL3
+BM3D-AMP
+LDAMP
+
+Sampling Rate m
+
+TVAL3
+BM3D-AMP
+LDAMP
+
+14
+
+7
+1
+0
+2
+ 
+v
+o
+N
+ 
+6
+ 
+ 
+]
+L
+M
+
+.
+t
+a
+t
+s
+[
+ 
+ 
+4
+v
+5
+2
+6
+6
+0
+.
+4
+0
+7
+1
+:
+v
+i
+X
+r
+a
+
+Learned D-AMP: Principled Neural Network based
+Compressive Image Recovery
+
+Christopher A. Metzler
+Rice University
+chris.metzler@rice.edu
+
+Ali Mousavi
+Rice University
+ali.mousavi@rice.edu
+
+Richard G. Baraniuk
+Rice University
+richb@rice.edu
+
+Abstract
+
+Compressive image recovery is a challenging problem that requires fast and accu-
+rate algorithms. Recently, neural networks have been applied to this problem with
+promising results. By exploiting massively parallel GPU processing architectures
+and oodles of training data, they can run orders of magnitude faster than existing
+techniques. However, these methods are largely unprincipled black boxes that are
+difﬁcult to train and often-times speciﬁc to a single measurement matrix.
+
+It was recently demonstrated that iterative sparse-signal-recovery algorithms can
+be “unrolled” to form interpretable deep networks. Taking inspiration from this
+work, we develop a novel neural network architecture that mimics the behavior of
+the denoising-based approximate message passing (D-AMP) algorithm. We call
+this new network Learned D-AMP (LDAMP).
+
+The LDAMP network is easy to train, can be applied to a variety of different
+measurement matrices, and comes with a state-evolution heuristic that accurately
+predicts its performance. Most importantly, it outperforms the state-of-the-art
+BM3D-AMP and NLR-CS algorithms in terms of both accuracy and run time. At
+high resolutions, and when used with sensing matrices that have fast implemen-
+tations, LDAMP runs over 50× faster than BM3D-AMP and hundreds of times
+faster than NLR-CS.
+
+1
+
+Introduction
+
+Over the last few decades computational imaging systems have proliferated in a host of different
+imaging domains, from synthetic aperture radar to functional MRI and CT scanners. The majority of
+these systems capture linear measurements y ∈ Rm of the signal of interest x ∈ Rn via y = Ax + (cid:15),
+where A ∈ Rm×n is a measurement matrix and (cid:15) ∈ Rm is noise.
+
+Given the measurements y and the measurement matrix A, a computational imaging system seeks to
+recover x. When m < n this problem is underdetermined, and prior knowledge about x must be used
+to recovery the signal. This problem is broadly referred to as compressive sampling (CS) [1; 2].
+
+There are myriad ways to use priors to recover an image x from compressive measurements. In the
+following, we brieﬂy describe some of these methods. Note that the ways in which these algorithms
+use priors span a spectrum; from simple hand-designed models to completely data-driven methods
+(see Figure 1).
+
+31st Conference on Neural Information Processing Systems (NIPS 2017), Long Beach, CA, USA.
+
+Figure 1: The spectrum of compressive signal recovery algorithms.
+
+1.1 Hand-designed recovery methods
+
+The vast majority of CS recovery algorithms can be considered “hand-designed” in the sense that they
+use some sort of expert knowledge, i.e., prior, about the structure of x. The most common signal prior
+is that x is sparse in some basis. Algorithms using sparsity priors include CoSaMP [3], ISTA [4],
+approximate message passing (AMP) [5], and VAMP [6], among many others. Researchers have also
+developed priors and algorithms that more accurately describe the structure of natural images, such as
+minimal total variation, e.g., TVAL3 [7], markov-tree models on the wavelet coefﬁcients, e.g., Model-
+CoSaMP [8], and nonlocal self-similarity, e.g., NLR-CS [9]. Off-the-shelf denoising and compression
+algorithms have also been used to impose priors on the reconstruction, e.g., Denoising-based AMP
+(D-AMP) [10], D-VAMP [11], and C-GD [12]. When applied to natural images, algorithms using
+advanced priors outperform simple priors, like wavelet sparsity, by a large margin [10].
+
+The appeal of hand-designed methods is that they are based on interpretable priors and often have
+well understood behavior. Moreover, when they are set up as convex optimization problems they often
+have theoretical convergence guarantees. Unfortunately, among the algorithms that use accurate priors
+on the signal, even the fastest is too slow for many real-time applications [10]. More importantly,
+these algorithms do not take advantage of potentially available training data. As we will see, this
+leaves much room for improvement.
+
+1.2 Data-driven recovery methods
+
+At the other end of the spectrum are data-driven (often deep learning-based) methods that use no
+hand-designed models whatsoever. Instead, researchers provide neural networks (NNs) vast amounts
+of training data, and the networks learn how to best use the structure within the data [13–16].
+
+The ﬁrst paper to apply this approach was [13], where the authors used stacked denoising autoen-
+coders (SDA) [17] to recover signals from their undersampled measurements. Other papers in this
+line of work have used either pure convolutional layers (DeepInverse [15]) or a combination of
+convolutional and fully connected layers (DR2-Net [16] and ReconNet [14]) to build deep learning
+frameworks capable of solving the CS recovery problem. As demonstrated in [13], these methods can
+compete with state-of-the-art methods in terms of accuracy while running thousands of times faster.
+Unfortunately, these methods are held back by the fact that there exists almost no theory governing
+their performance and that, so far, they must be trained for speciﬁc measurement matrices and noise
+levels.
+
+1.3 Mixing hand-designed and data-driven methods for recovery
+
+The third class of recovery algorithms blends data-driven models with hand-designed algorithms.
+These methods ﬁrst use expert knowledge to set up a recovery algorithm and then use training
+data to learn priors within this algorithm. Such methods beneﬁt from the ability to learn more
+realistic signal priors from the training data, while still maintaining the interpretability and guarantees
+that made hand-designed methods so appealing. Algorithms of this class can be divided into two
+subcategories. The ﬁrst subcategory uses a black box neural network that performs some function
+within the algorithm, such as the proximal mapping. The second subcategory explicitly unrolls and
+iterative algorithm and turns it into a deep NN. Following this unrolling, the network can be tuned
+with training data. Our LDAMP algorithm uses ideas from both these camps.
+
+Black box neural nets. The simplest way to use a NN in a principled way to solve the CS problem
+is to treat it as a black box that performs some function; such as computing a posterior probability.
+
+2
+
+(a) D-IT Iterations
+
+(b) D-AMP Iterations
+
+Figure 2: Reconstruction behavior of D-IT (left) and D-AMP (right) with an idealized denoiser.
+Because D-IT allows bias to build up over iterations of the algorithm, its denoiser becomes ineffective
+at projecting onto the set C of all natural images. The Onsager correction term enables D-AMP to
+avoid this issue. Figure adapted from [10].
+
+Examples of this approach include RBM-AMP and its generalizations [18–20], which use Restricted
+Boltzmann Machines to learn non-i.i.d. priors; RIDE-CS [21], which uses the RIDE [22] generative
+model to compute the probability of a given estimate of the image; and OneNet [23], which uses a
+NN as a proximal mapping/denoiser.
+
+Unrolled algorithms. The second way to use a NN in a principled way to solve the CS problem is
+to simply take a well-understood iterative recovery algorithm and unroll/unfold it. This method is
+best illustrated by the the LISTA [24; 25] and LAMP [26] NNs. In these works, the authors simply
+unroll the iterative ISTA [4] and AMP [5] algorithms, respectively, and then treat parameters of
+the algorithm as weights to be learned. Following the unrolling, training data can be fed through
+the network, and stochastic gradient descent can be used to update and optimize its parameters.
+Unrolling was recently applied to the ADMM algorithm to solve the CS-MRI problem [27]. The
+resulting network, ADMM-Net, uses training data to learn ﬁlters, penalties, simple nonlinearities,
+and multipliers. Moving beyond CS, the unrolling principle has been applied successfully in speech
+enhancement [28], non-negative matrix factorization applied to music transcription [29], and beyond.
+In these applications, unrolling and training signiﬁcantly improve both the quality and speed of signal
+reconstruction.
+
+2 Learned D-AMP
+
+2.1 D-IT and D-AMP
+
+Learned D-AMP (LDAMP), is a mixed hand-designed/data-driven compressive signal recovery
+framework that is builds on the D-AMP algorithm [10]. We describe D-AMP now, as well as the
+simpler denoising-based iterative thresholding (D-IT) algorithm. For concreteness, but without loss
+of generality, we focus on image recovery.
+
+A compressive image recovery algorithm solves the ill-posed inverse problem of ﬁnding the image x
+given the low-dimensional measurements y = Ax by exploiting prior information on x, such as fact
+that x ∈ C, where C is the set of all natural images. A natural optimization formulation reads
+
+(1)
+When no measurement noise (cid:15) is present, a compressive image recovery algorithm should return the
+(hopefully unique) image xo at the intersection of the set C and the afﬁne subspace {x|y = Ax} (see
+Figure 2).
+
+2 subject to x ∈ C.
+
+argminx(cid:107)y − Ax(cid:107)2
+
+The premise of D-IT and D-AMP is that high-performance image denoisers Dσ, such as BM3D
+[30], are high-quality approximate projections onto the set C of natural images.1,2 That is, suppose
+
+1The notation Dσ indicates that the denoiser can be parameterized by the standard deviation of the noise σ.
+2Denoisers can also be thought of as a proximal mapping with respect to the negative log likelihood of natural
+images [31] or as taking a gradient step with respect to the data generating function of natural images [32; 33].
+
+3
+
+xo + σz is a noisy observation of a natural image, with xo ∈ C and z ∼ N (0, I). An ideal denoiser
+Dσ would simply ﬁnd the point in the set C that is closest to the observation xo + σz
+
+Dσ(x) = argminx(cid:107)xo + σz − x(cid:107)2
+
+2 subject to x ∈ C.
+
+(2)
+
+Combining (1) and (2) leads naturally to the D-IT algorithm, presented in (3) and illustrated in Figure
+2(a). Starting from x0 = 0, D-IT takes a gradient step towards the {x|y = Ax} afﬁne subspace and
+then applies the denoiser Dσ to move to x1 in the set C of natural images . Gradient stepping and
+denoising is repeated for t = 1, 2, . . . until convergence.
+
+D-IT Algorithm
+
+zt = y − Axt,
+
+xt+1 = Dˆσt(xt + AH zt).
+
+Let νt = xt + AH zt − xo denote the difference between xt + AH zt and the true signal xo at each
+iteration. νt is known as the effective noise. At each iteration, D-IT denoises xt + AH zt = xo + νt,
+i.e., the true signal plus the effective noise. Most denoisers are designed to work with νt as additive
+white Gaussian noise (AWGN). Unfortunately, as D-IT iterates, the denoiser biases the intermediate
+solutions, and νt soon deviates from AWGN. Consequently, the denoising iterations become less
+effective [5; 10; 26], and convergence slows.
+
+D-AMP differs from D-IT in that it corrects for the bias in the effective noise at each iteration
+t = 0, 1, . . . using an Onsager correction term bt.
+
+D-AMP Algorithm
+
+bt =
+
+zt−1divDˆσt−1(xt−1 + AH zt−1)
+m
+
+,
+
+zt = y − Axt + bt,
+(cid:107)zt(cid:107)2√
+m
+xt+1 = Dˆσt(xt + AH zt).
+
+ˆσt =
+
+,
+
+(3)
+
+(4)
+
+The Onsager correction term removes the bias from the intermediate solutions so that the effective
+noise νt follows the AWGN model expected by typical image denoisers. For more information on the
+Onsager correction, its origins, and its connection to the Thouless-Anderson-Palmer equations [34],
+see [5] and [35]. Note that (cid:107)zt(cid:107)2√
+m serves as a useful and accurate estimate of the standard deviation of
+νt [36]. Typically, D-AMP algorithms use a Monte-Carlo approximation for the divergence divD(·),
+which was ﬁrst introduced in [37; 10].
+
+2.2 Denoising convolutional neural network
+
+NNs have a long history in signal denoising; see, for instance [38]. However, only recently have they
+begun to signiﬁcantly outperform established methods like BM3D [30]. In this section we review the
+recently developed Denoising Convolutional Neural Network (DnCNN) image denoiser [39], which
+is both more accurate and far faster than competing techniques.
+
+The DnCNN neural network consists of 16 to 20 convolutional layers, organized as follows. The ﬁrst
+convolutional layer uses 64 different 3 × 3 × c ﬁlters (where c denotes the number of color channels)
+and is followed by a rectiﬁed linear unit (ReLU) [40]. The next 14 to 18 convolutional layers each use
+64 different 3 × 3 × 64 ﬁlters which are each followed by batch-normalization [41] and a ReLU. The
+ﬁnal convolutional layer uses c separate 3 × 3 × 64 ﬁlters to reconstruct the signal. The parameters
+are learned via residual learning [42].
+
+2.3 Unrolling D-IT and D-AMP into networks
+
+The central contribution of this work is to apply the unrolling ideas described in Section 1.3 to D-IT
+and D-AMP to form the LDIT and LDAMP neural networks. The LDAMP network, presented in (5)
+and illustrated in Figure 3, consists of 10 AMP layers where each AMP layer contains two denoisers
+
+4
+
+Figure 3: Two layers of the LDAMP neural network. When used with the DnCNN denoiser, each
+denoiser block is a 16 to 20 convolutional-layer neural network. The forward and backward operators
+are represented as the matrices A and AH ; however function handles work as well.
+
+with tied weights. One denoiser is used to update xl, and the other is used to estimate the divergence
+using the Monte-Carlo approximation from [37; 10]. The LDIT network is nearly identical but does
+not compute an Onsager correction term and hence, only applies one denoiser per layer. One of the
+few challenges to unrolling D-IT and D-AMP is that, to enable training, we must use a denoiser
+that easily propagates gradients; a black box denoiser like BM3D will not work. This restricts us to
+denoisers such as DnCNN, which, fortunately, offers improved performance.
+
+LDAMP Neural Network
+
+bl =
+
+zl−1divDl
+
+wl−1(ˆσl−1)(xl−1 + AH zl−1)
+
+,
+
+m
+
+ˆσl =
+
+zl = y − Axl + bl,
+(cid:107)zl(cid:107)2√
+m
+wl(ˆσl)(xl + AH zl).
+
+xl+1 = Dl
+
+,
+
+(5)
+
+Within (5), we use the slightly cumbersome notation Dl
+wl(ˆσl) to indicate that layer l of the network
+uses denoiser Dl, that this denoiser depends on its weights/biases wl, and that these weights may be a
+function of the estimated standard deviation of the noise ˆσl. During training, the only free parameters
+we learn are the denoiser weights w1, ...wL. This is distinct from the LISTA and LAMP networks,
+where the authors decouple and learn the A and AH matrices used in the network [24; 26].
+
+3 Training the LDIT and LDAMP networks
+
+We experimented with three different methods to train the LDIT and LDAMP networks. Here we
+describe and compare these training methods at a high level; the details are described in Section 5.
+
+• End-to-end training: We train all the weights of the network simultaneously. This is the
+
+standard method of training a neural network.
+
+• Layer-by-layer training: We train a 1 AMP layer network (which itself contains a 16-20
+layer denoiser) to recover the signal, ﬁx these weights, add an AMP layer, train the second
+layer of the resulting 2 layer network to recover the signal, ﬁx these weights, and repeat
+until we have trained a 10 layer network.
+
+• Denoiser-by-denoiser training: We decouple the denoisers from the rest of the network
+and train each on AWGN denoising problems at different noise levels. During inference,
+the network uses its estimate of the standard deviation of the noise to select which set of
+denoiser weights to use. Note that, in selecting which denoiser weights to use, we must
+discretize the expected range of noise levels; e.g., if ˆσ = 35, then we use the denoiser for
+noise standard deviations between 20 and 40.
+
+5
+
+End-to-end
+Layer-by-layer
+Denoiser-by-denoiser
+(a)
+
+LDIT LDAMP
+32.1
+26.1
+28.0
+
+33.1
+33.1
+31.6
+
+End-to-end
+Layer-by-layer
+Denoiser-by-denoiser
+(b)
+
+LDIT LDAMP
+
+8.0
+-2.6
+22.1
+
+18.7
+18.7
+25.9
+
+Figure 4: Average PSNRs4 of 100 40 × 40 image reconstructions with i.i.d. Gaussian measurements
+trained at a sampling rate of m
+n = 0.20 and tested at sampling rates of m
+n = 0.05
+(b).
+
+n = 0.20 (a) and m
+
+Comparing Training Methods. Stochastic gradient descent theory suggests that layer-by-layer
+and denoiser-by-denoiser training should sacriﬁce performance as compared to end-to-end training
+[43]. In Section 4.2 we will prove that this is not the case for LDAMP. For LDAMP, layer-by-layer and
+denoiser-by-denoiser training are minimum-mean-squared-error (MMSE) optimal. These theoretical
+results are born out experimentally in Tables 4(a) and 4(b). Each of the networks tested in this section
+consists of 10 unrolled DAMP/DIT layers that each contain a 16 layer DnCNN denoiser.
+
+Table 4(a) demonstrates that, as suggested by theory, layer-by-layer training of LDAMP is optimal;
+additional end-to-end training does not improve the performance of the network. In contrast, the table
+demonstrates that layer-by-layer training of LDIT, which represents the behavior of a typical neural
+network, is suboptimal; additional end-to-end training dramatically improves its performance.
+
+Despite the theoretical result the denoiser-by-denoiser training is optimal, Table 4(a) shows that
+LDAMP trained denoiser-by-denoiser performs slightly worse than the end-to-end and layer-by-layer
+trained networks. This gap in performance is likely due to the discretization of the noise levels, which
+is not modeled in our theory. This gap can be reduced by using a ﬁner discretization of the noise
+levels or by using deeper denoiser networks that can better handle a range of noise levels [39].
+
+In Table 4(b) we report on the performance of the two networks when trained at a one sampling
+rate and tested at another. LDIT and LDAMP networks trained end-to-end and layer-by-layer at a
+sampling rate of m
+n = 0.05. In contrast, the
+denoiser-by-denoiser trained networks, which were not trained at a speciﬁc sampling rate, generalize
+well to different sampling rates.
+
+n = 0.2 perform poorly when tested at a sampling rate of m
+
+4 Theoretical analysis of LDAMP
+
+This section makes two theoretical contributions. First, we show that the state-evolution (S.E.), a
+framework that predicts the performance of AMP/D-AMP, holds for LDAMP as well.5 Second, we
+use the S.E. to prove that layer-by-layer and denoiser-by-denoiser training of LDAMP are MMSE
+optimal.
+
+4.1 State-evolution
+
+In the context of LAMP and LDAMP, the S.E. equations predict the intermediate mean squared error
+(MSE) of the network over each of its layers [26]. Starting from θ0 = (cid:107)xo(cid:107)2
+the S.E. generates a
+sequence of numbers through the following iterations:
+
+n
+
+2
+
+θl+1(xo, δ, σ2
+
+(cid:15) ) =
+
+E(cid:15)(cid:107)Dl
+
+wl(σ)(xo + σl(cid:15)) − xo(cid:107)2
+2,
+
+(6)
+
+1
+n
+
+(cid:15) ) + σ2
+
+δ θl(xo, δ, σ2
+
+where (σl)2 = 1
+(cid:15) , the scalar σ(cid:15) is the standard deviation of the measurement noise
+(cid:15), and the expectation is with respect to (cid:15) ∼ N (0, I). Note that the notation θl+1(xo, δ, σ2
+(cid:15) ) is used to
+emphasize that θl may depend on the signal xo, the under-determinacy δ, and the measurement noise.
+Let xl denote the estimate at layer l of LDAMP. Our empirical ﬁndings, illustrated in Figure 5, show
+that the MSE of LDAMP is predicted accurately by the S.E. We formally state our ﬁnding.
+
+4PSNR = 10 log10(
+5For D-AMP and LDAMP, the S.E. is entirely observational; no rigorous theory exists. For AMP, the S.E. has
+
+mean((ˆx−xo)2) ) when the pixel range is 0 to 255.
+
+2552
+
+been proven asymptotically accurate for i.i.d. Gaussian measurements [44].
+
+6
+
+Figure 5: The MSE of intermediate reconstructions of the Boat test image across different layers for
+the DnCNN variants of LDAMP and LDIT alongside their predicted S.E. The image was sampled
+with Gaussian measurements at a rate of m
+n = 0.1. Note that LDAMP is well predicted by the S.E.,
+whereas LDIT is not.
+
+Finding 1. If the LDAMP network starts from x0 = 0, then for large values of m and n, the
+(cid:13)
+2
+S.E. predicts the mean square error of LDAMP at each layer, i.e., θl(xo, δ, σ2
+2 , if
+(cid:13)
+the following conditions hold: (i) The elements of the matrix A are i.i.d. Gaussian (or subgaussian)
+with mean zero and standard deviation 1/m. (ii) The noise w is also i.i.d. Gaussian. (iii) The
+denoisers Dl at each layer are Lipschitz continuous.6
+
+(cid:13)
+(cid:13)xl − xo
+
+(cid:15) ) ≈ 1
+n
+
+4.2 Layer-by-layer and denoiser-by-denoiser training is optimal
+
+The S.E. framework enables us to prove the following results: Layer-by-layer and denoiser-by-
+denoiser training of LDAMP are MMSE optimal. Both these results rely upon the following lemma.
+Lemma 1. Suppose that D1, D2, ...DL are monotone denoisers in the sense that for l = 1, 2, ...L
+inf wl E(cid:107)Dl
+2 is a non-decreasing function of σ. If the weights w1 of D1 are set
+to minimize Ex0[θ1] and ﬁxed; and then the weights w2 of D2 are set to minimize Ex0 [θ2] and ﬁxed,
+. . . and then the weights wL of DL are set to minimize Ex0[θL], then together they minimize Ex0[θL].
+
+wl(σ)(xo + σ(cid:15)) − xo(cid:107)2
+
+Lemma 1 can be derived using the proof technique for Lemma 3 of [10], but with θl replaced by
+Ex0[θl] throughout. It leads to the following two results.
+Corollary 1. Under the conditions in Lemma 1, layer-by-layer training of LDAMP is MMSE optimal.
+
+This result follows from Lemma 1 and the equivalence between Ex0[θl] and Ex0[ 1
+Corollary 2. Under the conditions in Lemma 1, denoiser-by-denoiser training of LDAMP is MMSE
+optimal.
+
+n (cid:107)xl − xo(cid:107)2
+2].
+
+This result follows from Lemma 1 and the equivalence between Ex0 [θl] and Ex0[ 1
+n
+σl(cid:15)) − xo(cid:107)2
+2].
+
+E(cid:15)(cid:107)Dl
+
+wl(σ)(xo +
+
+5 Experiments
+
+Datasets Training images were pulled from Berkeley’s BSD-500 dataset [46]. From this dataset,
+we used 400 images for training, 50 for validation, and 50 for testing. For the results presented in
+Section 3, the training images were cropped, rescaled, ﬂipped, and rotated to form a set of 204,800
+overlapping 40 × 40 patches. The validation images were cropped to form 1,000 non-overlapping
+40 × 40 patches. We used 256 non-overlapping 40 × 40 patches for test. For the results presented in
+this section, we used 382,464 50 × 50 patches for training, 6,528 50 × 50 patches for validation, and
+seven standard test images, illustrated in Figure 6 and rescaled to various resolutions, for test.
+
+Implementation. We implemented LDAMP and LDIT, using the DnCNN denoiser [39], in both
+TensorFlow and MatConvnet [47], which is a toolbox for Matlab. Public implementations of both
+versions of the algorithm are available at https://github.com/ricedsp/D-AMP_Toolbox.
+
+6A denoiser is said to be L-Lipschitz continuous if for every x1, x2 ∈ C we have (cid:107)D(x1) − D(x2)(cid:107)2
+
+2 ≤
+2. While we did not ﬁnd it necessary in practice, weight clipping and gradient norm penalization
+
+L(cid:107)x1 − x2(cid:107)2
+can be used to ensure Lipschitz continuity of the convolutional denoiser [45].
+
+7
+
+(a) Barbara
+
+(b) Boat
+
+(c) Couple
+
+(d) Peppers
+
+(e) Fingerprint
+
+(f) Mandrill
+
+(g) Bridge
+
+Figure 6: The seven test images.
+
+Training parameters. We trained all the networks using the Adam optimizer [48] with a training
+rate of 0.001, which we dropped to 0.0001 and then 0.00001 when the validation error stopped
+improving. We used mini-batches of 32 to 256 patches, depending on network size and memory
+usage. For layer-by-layer and denoiser-by-denoiser training, we used a different randomly generated
+measurement matrix for each mini-batch. Training generally took between 3 and 5 hours per denoiser
+on an Nvidia Pascal Titan X. Results in this section are for denoiser-by-denoiser trained networks
+which consists of 10 unrolled DAMP/DIT layers that each contain a 20 layer DnCNN denoiser.
+
+Competition. We compared the performance of LDAMP to three state-of-the-art image recovery
+algorithms; TVAL3 [7], NLR-CS [9], and BM3D-AMP [10]. We also include a comparison with LDIT
+to demonstrate the beneﬁts of the Onsager correction term. Our results do not include comparisons
+with any other NN-based techniques. While many NN-based methods are very specialized and only
+work for ﬁxed matrices [13–16; 27], the recently proposed OneNet [23] and RIDE-CS [21] methods
+can be applied more generally. Unfortunately, we were unable to train and test the OneNet code
+in time for this submission. While RIDE-CS code was available, the implementation requires the
+measurement matrices to have orthonormalized rows. When tested on matrices without orthonormal
+rows, RIDE-CS performed signiﬁcantly worse than the other methods.
+
+Algorithm parameters. All algorithms used their default parameters. However, NLR-CS was
+initialized using 8 iterations of BM3D-AMP, as described in [10]. BM3D-AMP was run for 10
+iterations. LDIT and LDAMP used 10 layers. LDIT had its per layer noise standard deviation estimate
+ˆσ parameter set to 2(cid:107)zl(cid:107)2/
+
+m, as was done with D-IT in [10].
+
+√
+
+Testing setup. We tested the algorithms with i.i.d. Gaussian measurements and with measurements
+from a randomly sampled coded diffraction pattern [49]. The coded diffraction pattern forward
+operator was formed as a composition of three steps; randomly (uniformly) change the phase, take a
+2D FFT, and then randomly (uniformly) subsample. Except for the results in Figure 7, we tested the
+algorithms with 128 × 128 images (n = 1282). We report recovery accuracy in terms of PSNR. We
+report run times in seconds. Results broken down by image are provided in the supplement.
+
+Gaussian measurements. With noise-free Gaussian measurements, the LDAMP network produces
+the best reconstructions at every sampling rate on every image except Fingerprints, which looks very
+unlike the natural images the network was trained on. With noise-free Gaussian measurements, LDIT
+and LDAMP produce reconstructions signiﬁcantly faster than the competing methods. Note that,
+despite having to perform twice as many denoising operations, at a sampling rate of m
+n = 0.25 the
+LDAMP network is only about 25% slower than LDIT. This indicates that matrix multiplies, not
+denoising operations, are the dominant source of computation. Average recovery PSNRs and run
+times are reported in Table 1. With noisy Gaussian measurements, LDAMP uniformly outperformed
+the other methods; these results can be found in the supplement.
+
+Coded diffraction measurements. With noise-free coded diffraction measurements, the LDAMP
+network again produces the best reconstructions on every image except Fingerprints. With coded
+diffraction measurements, LDIT and LDAMP produce reconstructions signiﬁcantly faster than com-
+peting methods. Note that because the coded diffraction measurement forward and backward operator
+can be applied in O(n log n) operations, denoising becomes the dominant source of computations:
+LDAMP, which has twice as many denoising operations as LDIT, takes roughly 2× longer to com-
+plete. Average recovery PSNRs and run times are reported in Table 2. We end this section with a
+visual comparison of 512 × 512 reconstructions from TVAL3, BM3D-AMP, and LDAMP, presented
+
+8
+
+Table 1: PSNRs and run times (sec) of 128 × 128 reconstructions with i.i.d. Gaussian measurements
+and no measurement noise at various sampling rates.
+
+Method
+
+TVAL3
+BM3D-AMP
+LDIT
+LDAMP
+NLR-CS
+
+m
+n = 0.10
+PSNR Time
+
+21.5
+23.1
+20.1
+23.7
+23.2
+
+2.2
+4.8
+0.3
+0.4
+85.9
+
+m
+n = 0.15
+
+m
+n = 0.20
+
+m
+n = 0.25
+
+PSNR
+
+Time
+
+PSNR
+
+Time
+
+PSNR
+
+Time
+
+22.8
+25.1
+20.7
+25.7
+25.2
+
+2.9
+4.4
+0.4
+0.5
+104.0
+
+24.0
+26.6
+21.1
+27.2
+26.8
+
+3.6
+4.2
+0.4
+0.5
+124.4
+
+25.0
+27.9
+21.7
+28.5
+28.2
+
+4.3
+4.1
+0.5
+0.6
+146.3
+
+Table 2: PSNRs and run times (sec) of 128×128 reconstructions with coded diffraction measurements
+and no measurement noise at various sampling rates.
+
+Method
+
+m
+n = 0.10
+
+m
+n = 0.15
+
+m
+n = 0.20
+
+m
+n = 0.25
+
+PSNR
+
+Time
+
+PSNR
+
+Time
+
+PSNR
+
+Time
+
+PSNR
+
+Time
+
+TVAL3
+BM3D-AMP
+LDIT
+LDAMP
+NLR-CS
+
+24.0
+23.8
+22.9
+25.3
+21.6
+
+0.52
+4.55
+0.14
+0.26
+87.82
+
+26.0
+25.7
+25.6
+27.4
+22.8
+
+0.46
+4.29
+0.14
+0.26
+87.43
+
+27.9
+27.5
+27.4
+28.9
+25.1
+
+0.43
+3.67
+0.14
+0.27
+87.18
+
+29.7
+29.1
+28.9
+30.5
+26.4
+
+0.41
+3.40
+0.14
+0.26
+86.87
+
+in Figure 7. At high resolutions, the LDAMP reconstructions are incrementally better than those of
+BM3D-AMP yet computed over 60× faster.
+
+(a) Original Image
+
+(b) TVAL3 (26.4 dB, 6.85
+
+(c) BM3D-AMP (27.2 dB,
+
+(d) LDAMP (28.1
+
+dB,
+
+sec)
+
+75.04 sec)
+
+1.22 sec)
+
+Figure 7: Reconstructions of 512 × 512 Boat test image sampled at a rate of m
+n = 0.05 using
+coded diffraction pattern measurements and no measurement noise. LDAMP’s reconstructions are
+noticeably cleaner and far faster than the competing methods.
+
+6 Conclusions
+
+In this paper, we have developed, analyzed, and validated a novel neural network architecture that
+mimics the behavior of the powerful D-AMP signal recovery algorithm. The LDAMP network is
+easy to train, can be applied to a variety of different measurement matrices, and comes with a state-
+evolution heuristic that accurately predicts its performance. Most importantly, LDAMP outperforms
+the state-of-the-art BM3D-AMP and NLR-CS algorithms in terms of both accuracy and run time.
+
+LDAMP represents the latest example in a trend towards using training data (and lots of ofﬂine
+computations) to improve the performance of iterative algorithms. The key idea behind this paper
+is that, rather than training a fairly arbitrary black box to learn to recover signals, we can unroll
+a conventional iterative algorithm and treat the result as a NN, which produces a network with
+well-understood behavior, performance guarantees, and predictable shortcomings. It is our hope this
+paper highlights the beneﬁts of this approach and encourages future research in this direction.
+
+9
+
+References
+
+[1] E. J. Candes, J. Romberg, and T. Tao, “Robust uncertainty principles: Exact signal reconstruction from
+highly incomplete frequency information,” IEEE Trans. Inform. Theory, vol. 52, no. 2, pp. 489–509, Feb.
+2006.
+
+[2] R. G. Baraniuk, “Compressive sensing [lecture notes],” IEEE Signal Processing Mag., vol. 24, no. 4, pp.
+
+118–121, 2007.
+
+[3] D. Needell and J. A. Tropp, “CoSaMP: Iterative signal recovery from incomplete and inaccurate samples,”
+
+Appl. Comput. Harmon. Anal., vol. 26, no. 3, pp. 301–321, 2009.
+
+[4] I. Daubechies, M. Defrise, and C. D. Mol, “An iterative thresholding algorithm for linear inverse problems
+
+with a sparsity constraint,” Comm. on Pure and Applied Math., vol. 75, pp. 1412–1457, 2004.
+
+[5] D. L. Donoho, A. Maleki, and A. Montanari, “Message passing algorithms for compressed sensing,” Proc.
+
+Natl. Acad. Sci., vol. 106, no. 45, pp. 18 914–18 919, 2009.
+
+[6] S. Rangan, P. Schniter, and A. Fletcher, “Vector approximate message passing,” arXiv preprint
+
+arXiv:1610.03082, 2016.
+
+[7] C. Li, W. Yin, and Y. Zhang, “User’s guide for TVAL3: TV minimization by augmented Lagrangian and
+
+alternating direction algorithms,” Rice CAAM Department report, vol. 20, pp. 46–47, 2009.
+
+[8] R. G. Baraniuk, V. Cevher, M. F. Duarte, and C. Hegde, “Model-based compressive sensing,” IEEE Trans.
+
+Inform. Theory, vol. 56, no. 4, pp. 1982 –2001, Apr. 2010.
+
+[9] W. Dong, G. Shi, X. Li, Y. Ma, and F. Huang, “Compressive sensing via nonlocal low-rank regularization,”
+
+IEEE Trans. Image Processing, vol. 23, no. 8, pp. 3618–3632, 2014.
+
+[10] C. A. Metzler, A. Maleki, and R. G. Baraniuk, “From denoising to compressed sensing,” IEEE Trans.
+
+Inform. Theory, vol. 62, no. 9, pp. 5117–5144, 2016.
+
+[11] P. Schniter, S. Rangan, and A. Fletcher, “Denoising based vector approximate message passing,” arXiv
+
+preprint arXiv:1611.01376, 2016.
+
+[12] S. Beygi, S. Jalali, A. Maleki, and U. Mitra, “An efﬁcient algorithm for compression-based compressed
+
+sensing,” arXiv preprint arXiv:1704.01992, 2017.
+
+[13] A. Mousavi, A. B. Patel, and R. G. Baraniuk, “A deep learning approach to structured signal recovery,”
+
+Proc. Allerton Conf. Communication, Control, and Computing, pp. 1336–1343, 2015.
+
+[14] K. Kulkarni, S. Lohit, P. Turaga, R. Kerviche, and A. Ashok, “Reconnet: Non-iterative reconstruction of
+images from compressively sensed measurements,” Proceedings of the IEEE Conference on Computer
+Vision and Pattern Recognition, pp. 449–458, 2016.
+
+[15] A. Mousavi and R. G. Baraniuk, “Learning to invert: Signal recovery via deep convolutional networks,”
+
+Proc. IEEE Int. Conf. Acoust., Speech, and Signal Processing (ICASSP), pp. 2272–2276, 2017.
+
+[16] H. Yao, F. Dai, D. Zhang, Y. Ma, S. Zhang, and Y. Zhang, “DR2-net: Deep residual reconstruction network
+
+for image compressive sensing,” arXiv preprint arXiv:1702.05743, 2017.
+
+[17] P. Vincent, H. Larochelle, I. Lajoie, Y. Bengio, and P.-A. Manzagol, “Stacked denoising autoencoders:
+Learning useful representations in a deep network with a local denoising criterion,” J. Machine Learning
+Research, vol. 11, pp. 3371–3408, 2010.
+
+[18] E. W. Tramel, A. Drémeau, and F. Krzakala, “Approximate message passing with restricted Boltzmann
+machine priors,” Journal of Statistical Mechanics: Theory and Experiment, vol. 2016, no. 7, p. 073401,
+2016.
+
+[19] E. W. Tramel, A. Manoel, F. Caltagirone, M. Gabrié, and F. Krzakala, “Inferring sparsity: Compressed
+sensing using generalized restricted Boltzmann machines,” Proc. IEEE Information Theory Workshop
+(ITW), pp. 265–269, 2016.
+
+[20] E. W. Tramel, M. Gabrié, A. Manoel, F. Caltagirone, and F. Krzakala, “A deterministic and gen-
+eralized framework for unsupervised learning with restricted Boltzmann machines,” arXiv preprint
+arXiv:1702.03260, 2017.
+
+[21] A. Dave, A. K. Vadathya, and K. Mitra, “Compressive image recovery using recurrent generative model,”
+
+arXiv preprint arXiv:1612.04229, 2016.
+
+10
+
+[22] L. Theis and M. Bethge, “Generative image modeling using spatial LSTMs,” Proc. Adv. in Neural
+
+Processing Systems (NIPS), pp. 1927–1935, 2015.
+
+[23] J. Rick Chang, C.-L. Li, B. Poczos, B. Vijaya Kumar, and A. C. Sankaranarayanan, “One network to solve
+them all–Solving linear inverse problems using deep projection models,” Proc. IEEE Int. Conf. Comp.
+Vision, and Pattern Recognition, pp. 5888–5897, 2017.
+
+[24] K. Gregor and Y. LeCun, “Learning fast approximations of sparse coding,” Proc. Int. Conf. Machine
+
+Learning, pp. 399–406, 2010.
+
+[25] U. S. Kamilov and H. Mansour, “Learning optimal nonlinearities for iterative thresholding algorithms,”
+
+IEEE Signal Process. Lett., vol. 23, no. 5, pp. 747–751, 2016.
+
+[26] M. Borgerding and P. Schniter, “Onsager-corrected deep networks for sparse linear inverse problems,”
+
+arXiv preprint arXiv:1612.01183, 2016.
+
+[27] Y. Yang, J. Sun, H. Li, and Z. Xu, “Deep ADMM-net for compressive sensing MRI,” Proc. Adv. in Neural
+
+Processing Systems (NIPS), vol. 29, pp. 10–18, 2016.
+
+[28] J. R. Hershey, J. L. Roux, and F. Weninger, “Deep unfolding: Model-based inspiration of novel deep
+
+architectures,” arXiv preprint arXiv:1409.2574, 2014.
+
+[29] T. B. Yakar, P. Sprechmann, R. Litman, A. M. Bronstein, and G. Sapiro, “Bilevel sparse models for
+
+polyphonic music transcription.” ISMIR, pp. 65–70, 2013.
+
+[30] K. Dabov, A. Foi, V. Katkovnik, and K. Egiazarian, “Image denoising by sparse 3-d transform-domain
+collaborative ﬁltering,” IEEE Trans. Image Processing, vol. 16, no. 8, pp. 2080–2095, Aug. 2007.
+
+[31] S. V. Venkatakrishnan, C. A. Bouman, and B. Wohlberg, “Plug-and-play priors for model based reconstruc-
+
+tion,” Proc. Global Conf. on Signal and Inform. Processing (GlobalSIP), pp. 945–948, 2013.
+
+[32] G. Alain and Y. Bengio, “What regularized auto-encoders learn from the data-generating distribution,” J.
+
+Machine Learning Research, vol. 15, no. 1, pp. 3563–3593, 2014.
+
+[33] C. K. Sønderby, J. Caballero, L. Theis, W. Shi, and F. Huszár, “Amortised map inference for image
+
+super-resolution,” Proc. Int. Conf. on Learning Representations (ICLR), 2017.
+
+[34] D. J. Thouless, P. W. Anderson, and R. G. Palmer, “Solution of ‘Solvable model of a spin glass’,” Philos.
+
+Mag., vol. 35, no. 3, pp. 593–601, 1977.
+
+[35] M. Mézard and A. Montanari, Information, Physics, Computation: Probabilistic Approaches. Cambridge
+
+[36] A. Maleki, “Approximate message passing algorithm for compressed sensing,” Stanford University PhD
+
+University Press, 2008.
+
+Thesis, Nov. 2010.
+
+[37] S. Ramani, T. Blu, and M. Unser, “Monte-Carlo sure: A black-box optimization of regularization parameters
+
+for general denoising algorithms,” IEEE Trans. Image Processing, pp. 1540–1554, 2008.
+
+[38] H. C. Burger, C. J. Schuler, and S. Harmeling, “Image denoising: Can plain neural networks compete with
+
+BM3D?” Proc. IEEE Int. Conf. Comp. Vision, and Pattern Recognition, pp. 2392–2399, 2012.
+
+[39] K. Zhang, W. Zuo, Y. Chen, D. Meng, and L. Zhang, “Beyond a Gaussian denoiser: Residual learning of
+
+deep CNN for image denoising,” IEEE Trans. Image Processing, 2017.
+
+[40] A. Krizhevsky, I. Sutskever, and G. E. Hinton, “Imagenet classiﬁcation with deep convolutional neural
+
+networks,” Proc. Adv. in Neural Processing Systems (NIPS), pp. 1097–1105, 2012.
+
+[41] S. Ioffe and C. Szegedy, “Batch normalization: Accelerating deep network training by reducing internal
+
+covariate shift,” arXiv preprint arXiv:1502.03167, 2015.
+
+[42] K. He, X. Zhang, S. Ren, and J. Sun, “Deep residual learning for image recognition,” Proc. IEEE Int. Conf.
+
+Comp. Vision, and Pattern Recognition, pp. 770–778, 2016.
+
+[43] F. J. ´Smieja, “Neural network constructive algorithms: Trading generalization for learning efﬁciency?”
+
+Circuits, Systems, and Signal Processing, vol. 12, no. 2, pp. 331–374, 1993.
+
+[44] M. Bayati and A. Montanari, “The dynamics of message passing on dense graphs, with applications to
+
+compressed sensing,” IEEE Trans. Inform. Theory, vol. 57, no. 2, pp. 764–785, 2011.
+
+11
+
+[45] I. Gulrajani, F. Ahmed, M. Arjovsky, V. Dumoulin, and A. Courville, “Improved training of Wasserstein
+
+GANs,” arXiv preprint arXiv:1704.00028, 2017.
+
+[46] D. Martin, C. Fowlkes, D. Tal, and J. Malik, “A database of human segmented natural images and its
+application to evaluating segmentation algorithms and measuring ecological statistics,” Proc. Int. Conf.
+Computer Vision, vol. 2, pp. 416–423, July 2001.
+
+[47] A. Vedaldi and K. Lenc, “Matconvnet – Convolutional neural networks for MATLAB,” Proc. ACM Int.
+
+[48] D. Kingma and J. Ba, “Adam: A method for stochastic optimization,” arXiv preprint arXiv:1412.6980,
+
+[49] E. J. Candes, X. Li, and M. Soltanolkotabi, “Phase retrieval from coded diffraction patterns,” Appl. Comput.
+
+Harmon. Anal., vol. 39, no. 2, pp. 277–299, 2015.
+
+Conf. on Multimedia, 2015.
+
+2014.
+
+Supplementary Results
+
+Table 3: PSNR of 128 × 128 reconstructions with i.i.d. Gaussian measurements and no measurement
+noise.
+
+m
+n = .05 Barbara
+19.32
+TVAL3
+18.04
+BM3D-AMP
+17.20
+LDIT
+21.26
+LDAMP
+NLR-CS
+20.31
+m
+n = .10 Barbara
+21.75
+TVAL3
+24.36
+BM3D-AMP
+19.39
+LDIT
+25.80
+LDAMP
+25.17
+NLR-CS
+m
+n = .15 Barbara
+23.47
+TVAL3
+27.35
+BM3D-AMP
+20.53
+LDIT
+28.78
+LDAMP
+NLR-CS
+28.10
+m
+n = .20 Barbara
+25.20
+TVAL3
+29.57
+BM3D-AMP
+20.42
+LDIT
+31.10
+LDAMP
+30.42
+NLR-CS
+m
+n = .25 Barbara
+26.57
+TVAL3
+31.39
+BM3D-AMP
+21.59
+LDIT
+32.68
+LDAMP
+32.42
+NLR-CS
+
+Boat Fingerprint Mandrill Peppers Couple Bridge
+
+19.22
+21.05
+16.77
+18.92
+18.08
+19.37
+20.17
+22.44
+21.51
+19.22
+Boat Fingerprint Mandrill Peppers Couple Bridge
+
+19.36
+18.28
+17.49
+21.30
+19.69
+
+21.98
+20.79
+20.43
+22.84
+22.05
+
+16.49
+12.25
+16.94
+17.04
+14.96
+
+21.09
+20.38
+19.51
+22.74
+21.55
+
+22.95
+20.86
+24.04
+22.05
+21.49
+19.82
+24.67
+22.52
+21.80
+23.84
+Boat Fingerprint Mandrill Peppers Couple Bridge
+
+16.77
+18.07
+17.23
+17.36
+17.84
+
+21.98
+24.44
+19.13
+26.00
+25.18
+
+23.07
+24.79
+21.24
+25.43
+24.91
+
+23.21
+24.12
+22.17
+24.37
+23.56
+
+22.00
+24.25
+23.35
+25.67
+19.50
+22.54
+23.97
+26.79
+25.57
+23.10
+Boat Fingerprint Mandrill Peppers Couple Bridge
+
+24.74
+26.96
+21.89
+27.65
+26.82
+
+24.09
+25.02
+23.17
+25.40
+24.45
+
+24.18
+27.37
+19.74
+29.38
+28.06
+
+16.97
+19.94
+17.29
+17.65
+20.11
+
+25.47
+23.08
+27.40
+24.45
+22.50
+20.95
+28.58
+25.21
+24.18
+27.34
+Boat Fingerprint Mandrill Peppers Couple Bridge
+
+24.84
+25.80
+22.66
+26.31
+25.56
+
+25.90
+29.55
+21.45
+31.88
+30.47
+
+26.17
+28.55
+22.29
+29.57
+28.54
+
+17.32
+21.19
+17.34
+18.07
+21.29
+
+26.53
+28.89
+23.02
+30.17
+28.78
+
+17.62
+21.97
+17.57
+18.13
+22.04
+
+25.46
+26.50
+23.61
+27.06
+26.52
+
+27.49
+31.27
+21.65
+33.87
+32.47
+
+27.44
+30.01
+23.22
+31.06
+30.13
+
+23.98
+25.37
+21.04
+26.20
+25.26
+
+12
+
+Table 4: PSNR of 128×128 reconstructions with coded diffraction measurements and no measurement
+noise.
+
+m
+n = .05
+TVAL3
+BM3D-AMP
+LDIT
+LDAMP
+NLR-CS
+m
+n = .10
+TVAL3
+BM3D-AMP
+LDIT
+LDAMP
+NLR-CS
+m
+n = .15
+TVAL3
+BM3D-AMP
+LDIT
+LDAMP
+NLR-CS
+m
+n = .20
+TVAL3
+BM3D-AMP
+LDIT
+LDAMP
+NLR-CS
+m
+n = .25
+TVAL3
+BM3D-AMP
+LDIT
+LDAMP
+NLR-CS
+
+Barbara Boat
+
+Fingerprint Mandrill Peppers Couple Bridge
+
+21.66
+18.37
+20.20
+22.10
+15.14
+
+22.70
+17.89
+21.09
+23.45
+13.44
+Barbara Boat
+
+25.08
+25.40
+24.02
+27.90
+24.12
+
+25.39
+24.48
+24.77
+26.50
+21.56
+Barbara Boat
+
+27.78
+28.96
+28.44
+30.85
+27.35
+
+27.71
+25.98
+26.59
+28.79
+24.16
+Barbara Boat
+
+30.05
+32.08
+31.60
+33.10
+26.41
+
+29.93
+28.07
+28.61
+30.20
+25.26
+Barbara Boat
+
+32.37
+34.69
+34.00
+34.58
+31.74
+
+32.13
+29.59
+30.43
+32.62
+28.16
+
+16.79
+13.46
+16.69
+17.33
+11.73
+
+20.92
+20.83
+19.98
+20.94
+16.04
+Fingerprint Mandrill Peppers Couple Bridge
+
+23.20
+13.32
+22.31
+23.54
+18.43
+
+21.94
+17.80
+19.07
+22.32
+17.23
+
+22.98
+16.91
+20.85
+23.50
+17.70
+
+17.34
+18.68
+17.31
+17.56
+17.11
+
+23.13
+22.56
+20.21
+23.87
+21.04
+Fingerprint Mandrill Peppers Couple Bridge
+
+26.13
+25.53
+25.24
+27.24
+22.27
+
+24.79
+24.48
+24.74
+25.57
+21.15
+
+25.83
+25.52
+24.36
+28.18
+24.05
+
+17.96
+20.39
+17.31
+17.86
+18.99
+
+24.90
+23.63
+24.28
+25.69
+20.58
+Fingerprint Mandrill Peppers Couple Bridge
+
+28.54
+27.11
+26.92
+29.54
+24.23
+
+26.05
+25.12
+25.73
+26.68
+23.28
+
+28.90
+28.67
+30.21
+32.07
+21.24
+
+18.73
+21.41
+17.30
+17.94
+21.04
+
+26.55
+24.57
+25.57
+27.24
+23.47
+Fingerprint Mandrill Peppers Couple Bridge
+
+27.32
+25.89
+26.06
+27.59
+23.48
+
+31.62
+31.47
+32.15
+34.06
+28.18
+
+30.77
+28.99
+30.49
+32.17
+27.67
+
+19.63
+22.26
+17.65
+18.60
+20.64
+
+28.63
+26.36
+26.24
+29.01
+25.79
+
+34.20
+34.74
+35.37
+36.07
+28.60
+
+33.05
+30.51
+31.02
+33.86
+28.89
+
+28.12
+25.69
+27.63
+28.60
+21.04
+
+13
+
+Table 5: PSNR of reconstruction of 128 × 128 Boat test image with additive white Gaussian
+measurement noise (AWGN) with various standard deviations (s.d.).
+
+Sampling rate
+
+TVAL3
+BM3D-AMP
+LDAMP
+
+m
+
+n = .05 m
+21.08
+16.99
+22.41
+
+n = .05 m
+24.06
+25.40
+26.36
+
+n = .05 m
+24.97
+26.79
+27.62
+
+n = .05
+25.75
+27.64
+28.56
+
+AWGN with s.d. 10
+n = .05 m
+22.84
+23.98
+24.56
+AWGN with s.d. 20
+n = .05 m
+22.60
+23.67
+24.24
+AWGN with s.d. 30
+n = .05 m
+22.23
+23.34
+23.80
+AWGN with s.d. 40
+n = .05 m
+21.80
+23.02
+23.41
+AWGN with s.d. 50
+n = .05 m
+21.33
+22.69
+22.96
+
+n = .05 m
+21.00
+21.03
+22.33
+
+n = .05 m
+20.90
+18.43
+22.11
+
+n = .05 m
+20.77
+19.24
+21.85
+
+n = .05 m
+20.58
+19.45
+21.58
+
+n = .05 m
+23.50
+24.63
+25.35
+
+n = .05 m
+23.94
+25.45
+26.33
+
+n = .05
+24.16
+26.03
+26.75
+
+n = .05 m
+22.74
+24.09
+24.55
+
+n = .05 m
+22.74
+24.46
+25.10
+
+n = .05
+22.57
+24.80
+25.34
+
+n = .05 m
+21.93
+23.55
+23.90
+
+n = .05 m
+21.60
+23.77
+24.33
+
+n = .05
+21.12
+23.94
+24.50
+
+n = .05 m
+21.17
+23.13
+23.44
+
+n = .05 m
+20.53
+23.28
+23.65
+
+n = .05
+19.84
+23.38
+23.76
+
+Sampling Rate m
+
+TVAL3
+BM3D-AMP
+LDAMP
+
+Sampling Rate m
+
+TVAL3
+BM3D-AMP
+LDAMP
+
+Sampling Rate m
+
+TVAL3
+BM3D-AMP
+LDAMP
+
+Sampling Rate m
+
+TVAL3
+BM3D-AMP
+LDAMP
+
+14
+

@@ -1,0 +1,1680 @@
+8
+1
+0
+2
+ 
+n
+u
+J
+ 
+2
+2
+ 
+ 
+]
+I
+
+A
+.
+s
+c
+[
+ 
+ 
+2
+v
+9
+5
+4
+6
+0
+.
+4
+0
+8
+1
+:
+v
+i
+X
+r
+a
+
+On Learning Intrinsic Rewards for
+Policy Gradient Methods
+
+Zeyu Zheng
+
+Satinder Singh
+
+Junhyuk Oh
+Computer Science & Engineering
+University of Michigan
+{zeyu,junhyuk,baveja}@umich.edu
+
+Abstract
+
+In many sequential decision making tasks, it is challenging to design reward
+functions that help an RL agent efﬁciently learn behavior that is considered good
+by the agent designer. A number of different formulations of the reward-design
+problem, or close variants thereof, have been proposed in the literature. In this
+paper we build on the Optimal Rewards Framework of Singh et al. [2010] that
+deﬁnes the optimal intrinsic reward function as one that when used by an RL
+agent achieves behavior that optimizes the task-specifying or extrinsic reward
+function. Previous work in this framework has shown how good intrinsic reward
+functions can be learned for lookahead search based planning agents. Whether it
+is possible to learn intrinsic reward functions for learning agents remains an open
+problem. In this paper we derive a novel algorithm for learning intrinsic rewards
+for policy-gradient based learning agents. We compare the performance of an
+augmented agent that uses our algorithm to provide additive intrinsic rewards to an
+A2C-based policy learner (for Atari games) and a PPO-based policy learner (for
+Mujoco domains) with a baseline agent that uses the same policy learners but with
+only extrinsic rewards. Our results show improved performance on most but not all
+of the domains.
+
+1
+
+Introduction
+
+One of the challenges facing an agent-designer in formulating a sequential decision making task
+as a Reinforcement Learning (RL) problem is that of deﬁning a reward function. In some cases a
+choice of reward function is clear from the designer’s understanding of the task. For example, in
+board games such as Chess or Go the notion of win/loss/draw comes with the game deﬁnition, and in
+Atari games there is a game score that is part of the game. In other cases there may not be any clear
+choice of reward function. For example, in domains in which the agent is interacting with humans in
+the environment and the objective is to maximize human-satisfaction it can be hard to deﬁne a reward
+function. Similarly, when the task objective contains multiple criteria such as minimizing energy
+consumption and maximizing throughput and minimizing latency, it is not clear how to combine
+these into a single scalar-valued reward function.
+
+Even when a reward function can be deﬁned, it is not unique in the sense that certain transformations
+of the reward function, e.g., adding a potential-based reward [Ng et al., 1999], will not change
+the resulting ordering over agent behaviors. While the choice of potential-based or other (policy)
+order-preserving reward function used to transform the original reward function does not change what
+the optimal policy is, it can change for better or for worse the sample (and computational) complexity
+of the RL agent learning from experience in its environment using the transformed reward function.
+
+Yet another aspect to the challenge of reward-design stems from the observation that in many complex
+real-world tasks an RL agent is simply not going to learn an optimal policy because of various bounds
+
+Preprint. Work in progress.
+
+(or limitations) on the agent-environment interaction (e.g., inadequate memory, representational
+capacity, computation, training data, etc.). Thus, in addressing the reward-design problem one may
+want to consider transformations of the task-specifying reward function that change the optimal
+policy. This is because it could result in the bounded-agent achieving a more desirable (to the agent
+designer) policy than otherwise. This is often done in the form of shaping reward functions that are
+less sparse than an original reward function and so lead to faster learning of a good policy even if it
+in principle changes what the theoretically optimal policy might be [Rajeswaran et al., 2017]. Other
+examples of transforming the reward function to aid learning in RL agents is the use of exploration
+bonuses, e.g., count-based reward bonuses for agents that encourage experiencing infrequently visited
+states [Bellemare et al., 2016, Ostrovski et al., 2017, Tang et al., 2017].
+
+The above challenges make reward-design difﬁcult, error-prone, and typically an iterative process.
+Reward functions that seem to capture the designer’s objective can sometimes lead to unexpected
+and undesired behaviors. Phenomena such as reward-hacking [Amodei et al., 2016] illustrate this
+vividly. There are many formulations and resulting approaches to the problem of reward-design
+including preference elicitation, inverse RL, intrinsically motivated RL, optimal rewards, potential-
+based shaping rewards, more general reward shaping, and mechanism design; often the details of
+the formulation depends on the class of RL domains being addressed. In this paper we build on
+the optimal rewards problem formulation of Singh et al. [2010]. We discuss the optimal rewards
+framework as well as some other approaches for learning intrinsic rewards in Section 2.
+
+Our main contribution in this paper is the derivation of a new stochastic-gradient-based method for
+learning parametric intrinsic rewards that when added to the task-specifying (hereafter extrinsic)
+rewards can improve the performance of policy-gradient based learning methods for solving RL
+problems. The policy-gradient updates the policy parameters to optimize the sum of the extrinsic
+and intrinsic rewards, while simultaneously our method updates the intrinsic reward parameters to
+optimize the extrinsic rewards achieved by the policy. We evaluate our method on several Atari games
+with a state of the art A2C (Advantage Actor-Critic) [Mnih et al., 2016] agent as well as on a few
+Mujoco domains with a similarly state of the art PPO agent and show that learning intrinsic rewards
+can outperform using just extrinsic reward as well as using a combination of extrinsic reward and a
+constant “live bonus” [Duan et al., 2016].
+
+2 Background and Related Work
+
+Optimal rewards and reward design. Our work builds on the Optimal Reward Framework.
+Formally, the optimal intrinsic reward for a speciﬁc combination of RL agent and environment is
+deﬁned as the reward which when used by the agent for its learning in its environment maximizes the
+extrinsic reward. The main intuition is that in practice all RL agents are bounded (computationally,
+representationally, in terms of data availability, etc.) and the optimal intrinsic reward can help
+mitigate these bounds. Computing the optimal reward remains a big challenge, of course. The paper
+introducing the framework used exhaustive search over a space of intrinsic reward functions and
+thus does not scale. Sorg et al. [2010] introduced PGRD (Policy Gradient for Reward Design), a
+scalable algorithm that only works with lookahead-search (UCT) based planning agents (and hence
+the agent itself is not a learning-based agent; only the reward to use with the ﬁxed planner is learned).
+Its insight was that the intrinsic reward can be treated as a parameter that inﬂuences the outcome of
+the planning process and thus can be trained via gradient ascent as long as the planning process is
+differentiable (which UCT and related algorithms are). Guo et al. [2016] extended the scalability
+of PGRD to high-dimensional image inputs in Atari 2600 games and used the intrinsic reward as a
+reward bonus to improve the performance of the Monte Carlo Tree Search algorithm using the Atari
+emulator as a model for the planning. A big open challenge is deriving a sound algorithm for learning
+intrinsic rewards for learning-based RL agents and showing that it can learn intrinsic rewards fast
+enough to beneﬁcially inﬂuence the online performance of the learning based RL agent. Our main
+contribution in this paper is to answer this challenge.
+
+Reward shaping and Auxiliary rewards. Reward shaping [Ng et al., 1999] provides a general
+answer to what space of reward function modiﬁcations do not change the optimal policy, speciﬁcally
+potential-based rewards. Other attempts have been made to design auxiliary rewards to derive
+policies with desired properties. For example, the UNREAL agent [Jaderberg et al., 2016] used
+pseudo-reward computed from unsupervised auxiliary tasks to reﬁne its internal representations. In
+
+2
+
+some other works [Bellemare et al., 2016, Ostrovski et al., 2017, Tang et al., 2017], a pseudo-count
+based reward bonus was given to the agent to encourage exploration. Pathak et al. [2017] used
+self-supervised prediction errors as intrinsic rewards to help the agent explore. In these and other
+similar examples [Schmidhuber, 2010, Stadie et al., 2015, Oudeyer and Kaplan, 2009], the agent’s
+learning performance improves through the reward transformations, but the reward transformations
+are expert-designed and not learned. The main departure point in this paper is that we learn the
+parameters of an intrinsic reward function that maps high-dimensional observations and actions to
+rewards.
+
+Hierarchical RL. Another approach to a form of intrinsic reward is in the work on hierarchical
+RL. For example, the recent FeUdal Networks (FuNs) [Vezhnevets et al., 2017] is a hierarchical
+architecture which contains a Manager and a Worker learning at different time scales. The Manager
+conveys abstract goals to the Worker and the Worker optimizes its policy to maximize the extrinsic
+reward and the cosine distance to the goal. The Manager optimizes its proposed goals to guide the
+Worker to learn a better policy in terms of the cumulative extrinsic reward. A large body of work on
+hierarchical RL also generally involves a higher level module choosing goals for lower level modules.
+All of this work can be viewed as a special case of creating intrinsic rewards within a multi-module
+agent architecture. One special aspect of hierarchical-RL work is that these intrinsic rewards are
+usually associated with goals of achievement, i.e., achieving a speciﬁc goal state while in our setting
+the intrinsic reward functions are general mappings from observation-action pairs to rewards. Another
+special aspect is that most evaluations of hierarchical RL show a beneﬁt in the transfer setting with
+typically worse performance on early tasks while the manager is learning and better performance
+on later tasks once the manager has learned. In our setting we take on the challenge of showing that
+learning and using intrinsic rewards can help the RL agent perform better while it is learning on a
+single task. Finally, another difference is that hierarchical RL typically treats the lower-level learner
+as a black box while we train the intrinsic reward using gradients through the policy module in our
+architecture.
+
+3 Gradient-Based Learning of Intrinsic Rewards: A Derivation
+
+As noted earlier, the most practical previous work in learning intrinsic rewards using the Optimal
+Rewards framework was limited to settings where the underlying RL agent was a planning (i.e., needs
+a model of the environment) agent using lookahead search in some form (e.g, UCT). In these settings
+the only quantity being learned was the intrinsic reward function. By contrast, in this section we
+derive our algorithm for learning intrinsic rewards for the setting where the underlying RL agent is
+itself a learning agent, speciﬁcally a policy gradient based learning agent.
+
+3.1 Policy Gradient based RL
+
+Here we brieﬂy describe how policy gradient based RL works, and then we will present our method
+that incorporates it. We assume an episodic, discrete-actions, reinforcement learning setting. Within
+an episode, the state of the environment at time step t is denoted by st ∈ S and the action the agent
+takes from action space A at time step t as at, and the reward at time step t as rt. The agent’s policy,
+parameterized by θ (for example the weights of a neural network), maps a representation of states to
+a probability distribution over actions. The value of a policy πθ, denoted J(πθ) or equivalently J(θ),
+is the expected discounted sum of rewards obtained by the agent when executing actions according to
+policy πθ, i.e.,
+
+J(θ) = Est∼T (·|st−1,at−1),at∼πθ(·|st)[
+
+∞
+(cid:88)
+
+t=0
+
+γtrt],
+
+where T denotes the transition dynamics, and the initial state s0 ∼ µ is chosen from some dis-
+tribution µ over states. Henceforth, for ease of notation we will write the above quantity as
+J(θ) = Eθ[(cid:80)∞
+The policy gradient theorem of Sutton et al. [2000] shows that the gradient of the value J with
+respect to the policy parameters θ can be computed as follows: from all time steps t within an episode
+
+t=0 γtrt].
+
+(1)
+
+(2)
+
+∇θJ(θ) = Eθ[G(st, at)∇θ log πθ(at|st)],
+
+3
+
+where G(st, at) = (cid:80)∞
+i=t γi−tri is the return until termination. Note that recent advances such as
+advantage actor-critic (A2C) learn a critic (Vθ(st)) and use it to reduce the variance of the gradient and
+bootstrap the value after every n steps. However, we present this simple policy gradient formulation
+(Eq 2) in order to simplify the derivation of our proposed algorithm and aid understanding.
+
+3.2 LIRPG: Learning Intrinsic Rewards for Policy Gradient
+
+Notation. We use the following notation through-
+out.
+
+η (s, a): intrinsic reward estimated by η
+
+η = rin
+
+• θ: policy parameters
+• η: intrinsic reward parameters
+• rex: extrinsic reward from the environment
+• rin
+• Gex(st, at) = (cid:80)∞
+• Gin(st, at) = (cid:80)∞
+• Gex+in(st, at) = (cid:80)∞
+• J ex = Eθ[(cid:80)∞
+t=0 γtrex
+t
+• J in = Eθ[(cid:80)∞
+t=0 γtrin
+η (st, at)]
+• J ex+in = Eθ[(cid:80)∞
+• λ: relative weight of intrinsic reward.
+
+i=t γi−trex
+i
+i=t γt−irin
+η (si, ai)
+
+i=t γi−t(rex
+
+t=0 γt(rex
+
+i + λrin
+
+t + λrin
+
+η (st, at)]
+
+]
+
+η (si, ai))
+
+Figure 1: Inside the agent are two modules,
+a policy function parameterized by θ and an
+intrinsic reward function parameterized by η.
+In our experiments the policy function (A2C /
+PPO) has an associated value function as does
+the intrinsic reward function (see supplemen-
+tary materials for details). As shown by the
+dashed lines, the policy module is trained to
+optimize the weighted sum of intrinsic and
+extrinsic rewards while the intrinsic reward
+module is trained to optimize just the extrinsic
+rewards.
+
+The departure point of our approach to reward opti-
+mization for policy gradient is to distinguish between
+the extrinsic reward, rex, that deﬁnes the task, and
+a separate intrinsic reward rin that additively trans-
+forms the extrinsic reward and inﬂuences learning via
+policy gradients. It is crucial to note that the ultimate
+measure of performance we care about improving is
+the value of the extrinsic rewards achieved by the agent; the intrinsic rewards serve only to inﬂuence
+the change in policy parameters. Figure 1 shows an abstract representation of our intrinsic reward
+augmented policy gradient based learning agent.
+
+Algorithm Overview. An overview of our algorithm, LIRPG, is presented in Algorithm 1. At
+each iteration of LIRPG, we simultaneously update the policy parameters θ and the intrinsic reward
+parameters η. More speciﬁcally, we ﬁrst update θ in the direction of the gradient of J ex+in which is
+the weighted sum of intrinsic and extrinsic rewards. After updating policy parameters, we update
+η in the direction of the gradient of J ex which is just the extrinsic rewards. Intuitively, the policy
+is updated to maximize both extrinsic and intrinsic reward, while the intrinsic reward function is
+updated to maximize only the extrinsic reward. We describe more details of each step below.
+
+Updating Policy Parameters (θ). Given an episode where the behavior is generated according
+to policy πθ(·|·), we update the policy parameters using regular policy gradient using the sum of
+intrinsic and extrinsic rewards as the reward:
+
+θ(cid:48) = θ + α∇θJ ex+in(θ)
+
+≈ θ + αGex+in(st, at)∇θ log πθ(at|st),
+
+where Equation 4 is a stochastic gradient update.
+
+Updating Intrinsic Reward Parameters (η). Given an episode and the updated policy parameters
+θ(cid:48), we update intrinsic reward parameters. Intuitively, updating η requires estimating the effect such a
+change would have on the extrinsic value through the change in the policy parameters. Our key idea
+is to use the chain rule to compute the gradient as follows:
+
+(3)
+
+(4)
+
+(5)
+
+∇ηJ ex = ∇θ(cid:48)J ex∇ηθ(cid:48),
+
+4
+
+Algorithm 1 LIRPG: Learning Intrinsic Reward for Policy Gradient
+
+1: Input: step-size parameters α and β
+2: Init: initialize θ and η with random values
+3: repeat
+4:
+5:
+6:
+7:
+8:
+9:
+10:
+11: until done
+
+Sample a trajectory D = {s0, a0, s1, a1, · · · } by interacting with the environment using πθ
+Approximate ∇θJ ex+in(θ; D) by Equation 4
+Update θ(cid:48) ← θ + α∇θJ ex+in(θ; D)
+Approximate ∇θ(cid:48)J ex(θ(cid:48); D) on D by Equation 11
+Approximate ∇ηθ(cid:48) by Equation 10
+Compute ∇ηJ ex = ∇θ(cid:48)J ex(θ(cid:48); D)∇ηθ(cid:48)
+Update η(cid:48) ← η + β∇ηJ ex
+
+where the ﬁrst term (∇θ(cid:48)J ex) sampled as
+
+∇θ(cid:48)J ex ≈ Gex(st, at)∇θ(cid:48) log πθ(cid:48)(at|st)
+
+is an approximate stochastic gradient of the extrinsic value with respect to the updated policy
+parameters θ(cid:48) when the behavior is generated by πθ(cid:48), and the second term can be computed as
+follows:
+
+∇ηθ(cid:48) = ∇η
+= ∇η
+= ∇η
+
+(cid:0)θ + αGex+in(st, at)∇θ log πθ(at|st)(cid:1)
+(cid:0)αGex+in(st, at)∇θ log πθ(at|st)(cid:1)
+(cid:0)αλGin(st, at)∇θ log πθ(at|st)(cid:1)
+
+= αλ
+
+γi−t∇ηrin
+
+η (si, ai)∇θ log πθ(at|st).
+
+∞
+(cid:88)
+
+i=t
+
+Note that to compute the gradient of the extrinsic value J ex with respect to the intrinsic reward
+parameters η, we needed a new episode with the updated policy parameters θ(cid:48) (cf. Equation 6),
+thus requiring two episodes per iteration. To improve data efﬁciency we instead reuse the episode
+generated by the policy parameters θ at the start of the iteration and correct for the resulting mismatch
+by replacing the on-policy update in Equation 6 with the following off-policy update using importance
+sampling:
+
+∇θ(cid:48)J ex = Gex(st, at)
+
+∇θ(cid:48)πθ(cid:48)(at|st)
+πθ(at|st)
+
+.
+
+The parameters η are updated using the product of Equations 10 and 11 with a step-size parameter β;
+this approximates a stochastic gradient update (cf. Equation 5).
+
+Implementation on A2C and PPO. We described LIRPG using the most basic policy gradient
+formulation for simplicity. There have been many advances in policy gradient methods that reduce
+the variance of the gradient and improve the data-efﬁciency. Our LIRPG algorithm is also compatible
+with such actor-critic architectures. Speciﬁcally, for our experiments on Atari games we used a
+reasonably state of the art advantage action-critic (A2C) architecture, and for our experiments on
+Mujoco domains we used a similarly reasonably state of the art proximal policy optimization (PPO)
+architecture. We provide all implementation details in supplementary material. 1
+
+4 Experiments on Atari Games
+
+Our overall objective in the following ﬁrst set of experiments is to evaluate whether augmenting a
+policy gradient based RL agent with intrinsic rewards learned using our LIRPG algorithm (henceforth,
+augmented agent in short) improves performance relative to the baseline policy gradient based RL
+agent that uses just the extrinsic reward (henceforth, A2C baseline agent in short). To this end, we
+ﬁrst perform this evaluation on multiple Atari games from the Arcade Learning Environment (ALE)
+platform [Bellemare et al., 2013] using the same open-source implementation with exactly the same
+
+1Our implementation is available at: https://github.com/Hwhitetooth/lirpg
+
+5
+
+(6)
+
+(7)
+
+(8)
+
+(9)
+
+(10)
+
+(11)
+
+(a)
+
+(b)
+
+Figure 2: (a) Improvements of LIRPG augmented agents over A2C baseline agents. (b) Improvements
+of LIRPG augmented agents over live-bonus augmented A2C baseline agents. In both ﬁgures, the
+columns correspond to different games labeled on the x-axes and the y-axes show human score
+normalized improvements.
+
+hyper-parameters of the A2C algorithm [Mnih et al., 2016] from OpenAI [Dhariwal et al., 2017]
+for both our augmented agent as well as the baseline agent. The extrinsic reward used is the game
+score change as is standard for the work on Atari games. The LIRPG algorithm has two additional
+parameters relative to the baseline algorithm, the parameter λ that controls how the intrinsic reward is
+scaled before adding it to the extrinsic reward and the step-size β; we describe how we choose these
+parameters below in our results.
+
+We also conducted experiments against another baseline which simply gave a constant positive value
+as a live bonus to the agent at each time step (henceforth, A2C-bonus baseline agent in short). The
+live bonus heuristic encourages the agent to live longer so that it will potentially have a better chance
+of getting extrinsic rewards.
+
+Note that the policy module inside the agent is really two networks, a policy network and a value
+function network (that helps estimate Gex+in as required in Equation 4). Similarly the intrinsic
+reward module in the agent is also two networks, a reward function network and a value function
+network (that helps estimate Gex as required in Equation 6).
+
+4.1 Overall Performance
+
+Figure 2 shows the improvements of the augmented agents over baseline agents on 15 Atari games:
+Alien, Amidar, Asterix, Atlantis, BeamRider, Breakout, DemonAttack, DoubleDunk, MsPacman,
+Qbert, Riverraid, RoadRunner, SpaceInvaders, Tennis, and UpNDown. We picked as many games
+as our computational resources allowed in which the published performance of the underlying A2C
+baseline agents was good but where the learning was not so fast in terms of sample complexity
+so as to leave little room for improvement. We ran each agent for 5 separate runs each for 50
+million time steps on each game for both the baseline agents and augmented agents. For the
+augmented agents, we explored the following values for the intrinsic reward weighting coefﬁcient λ,
+{0.003, 0.005, 0.01, 0.02, 0.03, 0.05} and the following values for the term ξ, {0.001, 0.01, 0.1, 1},
+that weights the loss from the value function estimates with the loss from the intrinsic reward function
+(the policy component of the intrinsic reward module). The learning rate of the intrinsic reward
+module, i.e., β, was set to 0.0007 for all experiments. We plotted the best results from the hyper-
+parameter search in Figure 2. For the A2C-bonus baseline agents, we explored the value of live
+bonus over the set {0.001, 0.01, 0.1, 1} on two games, Amidar and MsPacman, and chose the best
+performing value of 0.01 for all 15 games. The learning curves of all agents are provided in the
+supplementary material.
+
+The blue bars in Figure 2 show the human score normalized improvements of the augmented agents
+over the A2C baseline agents and the A2C-bonus baseline agents. We see that the augmented agent
+outperforms the A2C baseline agent on all 15 games and has an improvement of more than ten
+percent on 9 out of 15 games. As for the comparison to the A2C-bonus baseline agent, the augmented
+agent still performed better on all games except for SpaceInvaders and Asterix. Note that most Atari
+games are shooting games so the A2C-bonus baseline agent is expected to be a stronger baseline.
+
+6
+
+Figure 3: Intrinsic reward variation and frequency of action selection. For each game/plot the x-axis
+shows the index of the actions that are available in that game. The red bars show the means and
+standard deviations of the intrinsic rewards associated with each action. The blue bars show the
+frequency of each action being selected.
+
+4.2 Analysis of the Learned Intrinsic Reward
+
+An interesting question is whether the learned intrinsic reward function learns a general state-
+independent bias over actions or whether it is an interesting function of state. To explore this question
+we used the learned intrinsic reward module and the policy module from the end of a good run (cf.
+Figure 2) for each game with no further learning to collect new data for each game. Figure 3 shows
+the variation in intrinsic rewards obtained and the actions selected by the agent over 100 thousand
+steps, i.e. 400 thousand frames, on 5 games. The analysis for all 15 games is in the supplementary
+material. The red bars show the average intrinsic reward per-step for each action. The black segments
+show the standard deviation of the intrinsic rewards. The blue bars show the frequency of each action
+being selected. Figure 3 shows that the intrinsic rewards for most actions vary through the episode as
+shown by large black segments, indirectly conﬁrming that the intrinsic reward module learns more
+than a state-independent constant bias over actions. By comparing the red bars and the blue bars,
+we see the expected correlation between aggregate intrinsic reward over actions and their selection
+(through the policy module that trains on the weighted sum of extrinsic and intrinsic rewards).
+
+5 Mujoco Experiments
+
+Our main objective in the following experiments is to demonstrate that our LIRPG-based algorithm
+can extend to a different class of domains and a different choice of baseline actor-critic architecture
+(namely, PPO instead of A2C). Speciﬁcally, we explore domains from the Mujoco continuous control
+benchmark [Duan et al., 2016], and used the open-source implementation of the PPO [Schulman
+et al., 2017] algorithm from OpenAI [Dhariwal et al., 2017] as our baseline agent. We also compared
+LIRPG to the simple heuristic of giving a live bonus as intrinsic reward (PPO-bonus baseline agents
+for short). As for the Atari game results above, we kept all hyper-parameters unchanged to default
+values for the policy module of both baseline and augmented agents. Finally, we also conduct a
+preliminary exploration into the question of how robust the learning of intrinsic rewards is to the
+sparsity of extrinsic rewards. Speciﬁcally, we used the delayed versions of the Mujoco domains,
+where the extrinsic reward is made sparse by accumulating the reward for N = 10, 20, 40 time steps
+before providing it to the agent. Note that the live bonus is not delayed when we delay the extrinsic
+reward for the PPO-bonus baseline agent. We expect that the problem becomes more challenging
+with increasing N but expect that the learning of intrinsic rewards (that are available at every time
+step) can help mitigate some of that increasing hardness.
+
+Delayed Mujoco benchmark. We evaluated 5 environments from the Mujoco benchmark, i.e.
+Hopper, HalfCheetah, Walker2d, Ant, and Humanoid. As noted above, to create a more-challenging
+sparse-reward setting we accumulated rewards for 10, 20 and 40 steps (or until the end of the episode,
+whichever comes earlier) before giving it to the agent. We trained the baseline and augmented agents
+for 1 million steps on each environment.
+
+5.1 Overall Performance
+
+Our results comparing the use of learning intrinsic reward with using just extrinsic reward on top of
+a PPO architecture are shown in Figure 4. We only show the results of a delay of 20 here; the full
+
+7
+
+Figure 4: The x-axis is time steps during learning. The y-axis is the average reward over the last 100
+training episodes. The deep blue curves are for the baseline PPO architecture. The light blue curves
+are for the PPO-bonus baseline. The red curves are for our LIRPG based augmented architecture.
+The green curves are for our LIRPG architecture in which the policy module was trained with only
+intrinsic rewards. The dark curves are the average of 10 runs with different random seeds. The shaded
+area shows the standard errors of 10 runs.
+
+results can be found in the supplementary material. The dark blue curves are for PPO baseline agents.
+The light blue curves are PPO-bonus baseline agents, where we explored the value of live bonus over
+the set {0.001, 0.01, 0.1, 1} and plotted the curves for the domain-speciﬁc best performing choice.
+The red and curves are for the augmented LIRPG agents.
+
+We see that in 4 out of 5 domains learning intrinsic rewards signiﬁcantly improves the performance
+of PPO, while in one game (Ant) we got a degradation of performance. Although a live bonus did
+help on 2 domains, i.e. Hopper and Walker2d, LIRPG still outperformed it on 4 out of 5 domains
+except for HalfCheetah on which LIRPG got comparable performance. We note that there was no
+domain-speciﬁc hyper-parameter optimization for the results in this ﬁgure; with such optimization
+there might be an opportunity to get improved performance for our method in all the domains.
+
+Training with Only Intrinsic Rewards. We also conducted a more challenging experiment on
+Mujoco domains in which we used only intrinsic rewards to train the policy module. Recall that
+the intrinsic reward module is trained to optimize the extrinsic reward. In 3 out of 5 domains, as
+shown by the green curves denoted by ‘PPO+LIRPG(Rin)’ in Figure 4, using only intrinsic rewards
+achieved similar performance to the red curves where we used a mixture of extrinsic rewards and
+intrinsic rewards. Using only intrinsic rewards to train the policy performed worse than using the
+mixture on Hopper but performed even better on HalfCheetah. It is important to note that training
+the policy using only live-bonus reward without the extrinsic reward would completely fail, because
+there would be no learning signal that encourages the agent to move forward. In contrast, our result
+shows that the agent can learn complex behaviors solely from the learned intrinsic reward on MuJoCo
+environment, and thus the intrinsic reward captures far more than a live bonus does; this is because
+the intrinsic reward module takes into account the extrinsic reward structure through its training.
+
+6 Discussion and Conclusion
+
+Our experiments on using LIRPG with A2C on multiple Atari games showed that it helped improve
+learning performance in all of the 15 games we tried. Similarly using LIRPG with PPO on multiple
+Mujoco domains showed that it helped improve learning performance in 4 out 5 domains (for the
+version with a delay of 20). Note that we used the same A2C / PPO architecture and hyper-parameters
+in both our augmented and baseline agents. While more empirical work needs to be done to either
+make intrinsic reward learning more robust or to understand when it helps and when it does not, we
+believe our results show promise for the central idea of learning intrinsic rewards in complex RL
+domains.
+
+In summary, we derived a novel practical algorithm, LIRPG, for learning intrinsic reward functions
+in problems with high-dimensional observations for use with policy gradient based RL agents. This
+is the ﬁrst such algorithm to the best of our knowledge. Our empirical results show promise in using
+intrinsic reward function learning as a kind of meta-learning to improve the performance of modern
+policy gradient architectures like A2C and PPO.
+
+8
+
+We thank Richard Lewis for conversations on optimal rewards. This work was supported by NSF
+grant IIS-1526059, by a grant from Toyota Research Institute (TRI), and by a grant from DARPA’s
+L2M program. Any opinions, ﬁndings, conclusions, or recommendations expressed here are those of
+the authors and do not necessarily reﬂect the views of the sponsor.
+
+Acknowledgments.
+
+References
+
+Satinder Singh, Richard L Lewis, Andrew G Barto, and Jonathan Sorg. Intrinsically motivated
+reinforcement learning: An evolutionary perspective. IEEE Transactions on Autonomous Mental
+Development, 2(2):70–82, 2010.
+
+Andrew Y Ng, Daishi Harada, and Stuart J Russell. Policy invariance under reward transformations:
+Theory and application to reward shaping. In Proceedings of the Sixteenth International Conference
+on Machine Learning, pages 278–287. Morgan Kaufmann Publishers Inc., 1999.
+
+Aravind Rajeswaran, Kendall Lowrey, Emanuel V Todorov, and Sham M Kakade. Towards gen-
+eralization and simplicity in continuous control. In Advances in Neural Information Processing
+Systems, pages 6553–6564, 2017.
+
+Marc Bellemare, Sriram Srinivasan, Georg Ostrovski, Tom Schaul, David Saxton, and Remi Munos.
+Unifying count-based exploration and intrinsic motivation. In Advances in Neural Information
+Processing Systems, pages 1471–1479, 2016.
+
+Georg Ostrovski, Marc G Bellemare, Aäron Oord, and Rémi Munos. Count-based exploration with
+neural density models. In International Conference on Machine Learning, pages 2721–2730, 2017.
+
+Haoran Tang, Rein Houthooft, Davis Foote, Adam Stooke, OpenAI Xi Chen, Yan Duan, John
+Schulman, Filip DeTurck, and Pieter Abbeel. # exploration: A study of count-based exploration
+for deep reinforcement learning. In Advances in Neural Information Processing Systems, pages
+2750–2759, 2017.
+
+Dario Amodei, Chris Olah, Jacob Steinhardt, Paul Christiano, John Schulman, and Dan Mané.
+
+Concrete problems in ai safety. arXiv preprint arXiv:1606.06565, 2016.
+
+Volodymyr Mnih, Adria Puigdomenech Badia, Mehdi Mirza, Alex Graves, Timothy Lillicrap, Tim
+Harley, David Silver, and Koray Kavukcuoglu. Asynchronous methods for deep reinforcement
+learning. In International Conference on Machine Learning, pages 1928–1937, 2016.
+
+Yan Duan, Xi Chen, Rein Houthooft, John Schulman, and Pieter Abbeel. Benchmarking deep
+reinforcement learning for continuous control. In International Conference on Machine Learning,
+pages 1329–1338, 2016.
+
+Jonathan Sorg, Richard L Lewis, and Satinder Singh. Reward design via online gradient ascent. In
+
+Advances in Neural Information Processing Systems, pages 2190–2198, 2010.
+
+Xiaoxiao Guo, Satinder Singh, Richard Lewis, and Honglak Lee. Deep learning for reward design to
+
+improve monte carlo tree search in atari games. arXiv preprint arXiv:1604.07095, 2016.
+
+Max Jaderberg, Volodymyr Mnih, Wojciech Marian Czarnecki, Tom Schaul, Joel Z Leibo, David
+Silver, and Koray Kavukcuoglu. Reinforcement learning with unsupervised auxiliary tasks. arXiv
+preprint arXiv:1611.05397, 2016.
+
+Deepak Pathak, Pulkit Agrawal, Alexei A Efros, and Trevor Darrell. Curiosity-driven exploration by
+self-supervised prediction. In International Conference on Machine Learning (ICML), volume
+2017, 2017.
+
+Jürgen Schmidhuber. Formal theory of creativity, fun, and intrinsic motivation (1990–2010). IEEE
+
+Transactions on Autonomous Mental Development, 2(3):230–247, 2010.
+
+Bradly C Stadie, Sergey Levine, and Pieter Abbeel. Incentivizing exploration in reinforcement
+
+learning with deep predictive models. arXiv preprint arXiv:1507.00814, 2015.
+
+9
+
+Pierre-Yves Oudeyer and Frederic Kaplan. What is intrinsic motivation? a typology of computational
+
+approaches. Frontiers in Neurorobotics, 1:6, 2009.
+
+Alexander Sasha Vezhnevets, Simon Osindero, Tom Schaul, Nicolas Heess, Max Jaderberg, David
+Silver, and Koray Kavukcuoglu. Feudal networks for hierarchical reinforcement learning. In
+International Conference on Machine Learning, pages 3540–3549, 2017.
+
+Richard S Sutton, David A McAllester, Satinder Singh, and Yishay Mansour. Policy gradient methods
+In Advances in neural information
+
+for reinforcement learning with function approximation.
+processing systems, pages 1057–1063, 2000.
+
+Marc G Bellemare, Yavar Naddaf, Joel Veness, and Michael Bowling. The arcade learning envi-
+ronment: An evaluation platform for general agents. J. Artif. Intell. Res.(JAIR), 47:253–279,
+2013.
+
+Prafulla Dhariwal, Christopher Hesse, Oleg Klimov, Alex Nichol, Matthias Plappert, Alec Radford,
+John Schulman, Szymon Sidor, and Yuhuai Wu. Openai baselines. https://github.com/
+openai/baselines, 2017.
+
+John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov. Proximal policy
+
+optimization algorithms. arXiv preprint arXiv:1707.06347, 2017.
+
+Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Andrei A Rusu, Joel Veness, Marc G Bellemare,
+Alex Graves, Martin Riedmiller, Andreas K Fidjeland, Georg Ostrovski, et al. Human-level control
+through deep reinforcement learning. Nature, 518(7540):529, 2015.
+
+Diederik P Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint
+
+arXiv:1412.6980, 2014.
+
+John Schulman, Philipp Moritz, Sergey Levine, Michael Jordan, and Pieter Abbeel. High-dimensional
+continuous control using generalized advantage estimation. arXiv preprint arXiv:1506.02438,
+2015.
+
+10
+
+A Implementation Details
+
+A.1 Atari Experiments
+
+Episode Generation. As in Mnih et al. [2015], each episode starts by doing a no-op action for a
+random number of steps after restarting the game. The number of no-op steps is sampled from 0 to
+30 uniformly. Within an episode, each action chosen is repeated for 4 frames, before selecting the
+next action. An episode ends when the game is over or the agent loses a life.
+
+Input State Representation. As in Mnih et al. [2015], we take the maximum value at each pixel
+from 4 consecutive frames to compress them into one frame which is then rescaled to a 84 × 84 gray
+scale image. The input to all four neural networks is the stack of the last 4 gray scale images (thus
+capturing frame-observations over 16 frames). The extrinsic rewards from the game are clipped to
+[−1, 1].
+
+Details of the Two Networks in the Policy Module. Note that the policy module is unchanged
+from the OpenAI implementation. Speciﬁcally, the two networks are convolutional neural networks
+(CNN) with 3 convolutional layers and 1 fully connected layer. The ﬁrst convolutional layer has
+thirty-two 8 × 8 ﬁlters with stride 4. The second convolutional layer has sixty-four 4 × 4 ﬁlters with
+stride 2. The third convolutional layer has sixty-four 3 × 3 ﬁlters with stride 1. The fourth layer is a
+fully connected layer with 512 hidden units. Each hidden layer is followed by a rectiﬁer non-linearity.
+The value network (that estimates Gex+in) shares parameters for the ﬁrst four layers with the policy
+network. The policy network has a separate output layer with an output for every action through a
+softmax nonlinearity, while the value network separately outputs a single scalar for the value.
+
+Details of the Two Networks in the Intrinsic Reward Module.
+The intrinsic reward module has
+two very similar neural network architectures as the policy module described above. It again has
+two networks, a “policy” network that instead of a softmax over actions produces a scalar reward for
+every action through a tanh nonlinearity to keep the scalar in [−1, 1]; we will refer to it as the intrinsic
+reward function. The value network to estimate Gex has the same architecture as the intrinsic reward
+network except for the output layer that has a single scalar output without a non-linear activation.
+These two networks share the parameters of the ﬁrst four layers.
+
+Hyper-Parameters for Policy module. We keep the default values of all hyper-parameters in the
+original OpenAI implementation of the A2C-based policy module unchanged for both the augmented
+and baseline agents2.
+
+Hyper-Parameters for Intrinsic Reward module in Augmented Agent. We use RMSProp to
+optimize the two networks of the intrinsic reward module. The decay factor used for RMSProp is
+0.99, and the (cid:15) is 0.00001. We do not use momentum. Recall that there are two parameters special
+to LIRPG. Of these, the step size β was initialized to 0.0007 and annealed linearly to zero over 50
+million time steps for all the experiments reported below. We did a small hyper-parameter search for
+λ for each game (this is described below in the caption of Figure 5). As for the A2C implementation
+for the policy module we clipped the gradient by norm to 0.5 in the intrinsic reward module.
+
+A.2 Mujoco Experiments
+
+Details of the Two Networks in the Policy Module. Note that the policy module is unchanged
+from the OpenAI implementation; we provide details for completeness. The policy network is a MLP
+with 2 hidden layers, too. The input to the policy network is the observation. The ﬁrst two layer are
+fully connected layers with 64 hidden units. Each hidden layer is followed by a tanh non-linearity.
+The output layer outputs a vector with the size of the dimension of the action space with no non-
+linearity applied to the output units. Gaussian noise is added to the output of the policy network to
+
+2We use 16 actor threads to generate episodes. For each training iteration, each actor acts for 5 time steps.
+For training the policy, the weighting coefﬁcients of policy-gradient term, value network loss term, and the
+entropy regularization term in the objective function are 1.0, 0.5, and 0.01. The learning rate α for training the
+policy is set to 0.0007 at the beginning and anneals to 0 linearly over 50 million steps. The discount factor γ is
+0.99 for all experiments.
+
+11
+
+encourage exploration. The variance of the Gaussian noise was a input-independent parameter which
+was also trained by gradient descent. The corresponding value network (that estimates Gex+in) has a
+similar architecture with the policy network. The only difference is that that output layer outputs a
+single scalar without any non-linear activation. These two networks do not share any parameters.
+
+Details of the Two Networks in the Intrinsic Reward Module.
+The intrinsic reward function
+networks are quite similar to the two networks in the policy module. Each network is a multi-layer
+perceptron (MLP) with 2 hidden layers. We concatenated the observation vector and the action vector
+as the input to the intrinsic reward network. The ﬁrst two layer are fully connected layers with 64
+hidden units. Each hidden layer is followed by a tanh non-linearity. The output layer has one scalar
+output. We apply tanh on the output to bound the intrinsic reward to [−1, 1]. The value network to
+estimate Gex has the same architecture as the intrinsic reward network except for the output layer
+that has a single scalar output without a non-linear activation. These two networks do not share any
+parameters.
+
+Hyper-Parameters for Policy Module We keep the default values of all hyper-parameters in the
+original OpenAI implementation of PPO unchanged for both the augmented and baseline agents3.
+
+Hyper-Parameters for Intrinsic Reward Module We use Adam [Kingma and Ba, 2014] to
+optimize the two networks of the intrinsic reward module. The step size β was initialized to 0.0001
+and was ﬁxed over 1 million time steps for all the experiments reported below. The mixing coefﬁcient
+λ was ﬁxed to 1.0 and instead we multiplied the extrinsic reward by 0.01 cross all 5 environments.
+The PPO implementation clips the gradient by norm to 0.5. We keep this part unchanged for the
+policy network and clip the gradients by the same norm for the reward network. We used generalized
+advantage estimate (GAE) [Schulman et al., 2015] for both training the reward network and the policy
+network. The weighting factor for GAE was 0.95.
+
+B More Experimental Results
+
+3For each training iteration, the agent interacts with the environment for 2048 steps. The learning rate α for
+training the policy is set to 0.0003 at the beginning and was ﬁxed over training. We used a batch size of 32 and
+swept over the 2048 data points for 10 epochs before the next sequence of interaction. The discount factor γ is
+0.99 for all experiments.
+
+12
+
+Figure 5: The x-axis is time steps during learning. The y-axis is the average game score over
+the last 100 training episodes. The blue curves are for the baseline architecture. The red curves
+are for our LIRPG based augmented architecture. The dark curves are the average of four runs
+with different random seeds. The shaded areas show the standard errors of 5 individual runs.
+Hyper-parameter Search: We explored the following values for the intrinsic reward weighting
+coefﬁcient λ, {0.003, 0.005, 0.01, 0.02, 0.03, 0.05}. We explored the following values for the term ξ,
+{0.001, 0.01, 0.1, 1}, that weights the loss from the value function estimates with the loss from the
+intrinsic reward function (the policy component of the intrinsic reward module).
+
+13
+
+Figure 6: Intrinsic reward variation and frequency of action selection. We selected a good run for
+each game from the runs shown in Figure 5, and used the learned intrinsic reward module and the
+associated policy module for the selected run without any further learning to play the game for 100
+thousand steps, i.e. 400 thousand frames, to collect data. For each game/plot the x-axis shows the
+index of the actions that are available in that game. The red bars show the means and standard
+deviations of the intrinsic rewards associated with each action. The blue bars show the frequency of
+each action being selected.
+
+14
+
+Figure 7: The x-axis is time steps during learning. The y-axis is the average reward over the last 100
+training episodes. Each column corresponds to a domain labeled at the top. Each row corresponds
+to the delay labeled on the left hand side (for 10, 20, and 40 steps from the top row to the bottom
+row). The blue curves are for the baseline PPO architecture. The red curves are for our LIRPG based
+augmented architecture. The dark curves are the average of 10 runs with different random seeds. The
+shaded area shows the standard errors of 10 runs.
+
+15
+
+8
+1
+0
+2
+ 
+n
+u
+J
+ 
+2
+2
+ 
+ 
+]
+I
+
+A
+.
+s
+c
+[
+ 
+ 
+2
+v
+9
+5
+4
+6
+0
+.
+4
+0
+8
+1
+:
+v
+i
+X
+r
+a
+
+On Learning Intrinsic Rewards for
+Policy Gradient Methods
+
+Zeyu Zheng
+
+Satinder Singh
+
+Junhyuk Oh
+Computer Science & Engineering
+University of Michigan
+{zeyu,junhyuk,baveja}@umich.edu
+
+Abstract
+
+In many sequential decision making tasks, it is challenging to design reward
+functions that help an RL agent efﬁciently learn behavior that is considered good
+by the agent designer. A number of different formulations of the reward-design
+problem, or close variants thereof, have been proposed in the literature. In this
+paper we build on the Optimal Rewards Framework of Singh et al. [2010] that
+deﬁnes the optimal intrinsic reward function as one that when used by an RL
+agent achieves behavior that optimizes the task-specifying or extrinsic reward
+function. Previous work in this framework has shown how good intrinsic reward
+functions can be learned for lookahead search based planning agents. Whether it
+is possible to learn intrinsic reward functions for learning agents remains an open
+problem. In this paper we derive a novel algorithm for learning intrinsic rewards
+for policy-gradient based learning agents. We compare the performance of an
+augmented agent that uses our algorithm to provide additive intrinsic rewards to an
+A2C-based policy learner (for Atari games) and a PPO-based policy learner (for
+Mujoco domains) with a baseline agent that uses the same policy learners but with
+only extrinsic rewards. Our results show improved performance on most but not all
+of the domains.
+
+1
+
+Introduction
+
+One of the challenges facing an agent-designer in formulating a sequential decision making task
+as a Reinforcement Learning (RL) problem is that of deﬁning a reward function. In some cases a
+choice of reward function is clear from the designer’s understanding of the task. For example, in
+board games such as Chess or Go the notion of win/loss/draw comes with the game deﬁnition, and in
+Atari games there is a game score that is part of the game. In other cases there may not be any clear
+choice of reward function. For example, in domains in which the agent is interacting with humans in
+the environment and the objective is to maximize human-satisfaction it can be hard to deﬁne a reward
+function. Similarly, when the task objective contains multiple criteria such as minimizing energy
+consumption and maximizing throughput and minimizing latency, it is not clear how to combine
+these into a single scalar-valued reward function.
+
+Even when a reward function can be deﬁned, it is not unique in the sense that certain transformations
+of the reward function, e.g., adding a potential-based reward [Ng et al., 1999], will not change
+the resulting ordering over agent behaviors. While the choice of potential-based or other (policy)
+order-preserving reward function used to transform the original reward function does not change what
+the optimal policy is, it can change for better or for worse the sample (and computational) complexity
+of the RL agent learning from experience in its environment using the transformed reward function.
+
+Yet another aspect to the challenge of reward-design stems from the observation that in many complex
+real-world tasks an RL agent is simply not going to learn an optimal policy because of various bounds
+
+Preprint. Work in progress.
+
+(or limitations) on the agent-environment interaction (e.g., inadequate memory, representational
+capacity, computation, training data, etc.). Thus, in addressing the reward-design problem one may
+want to consider transformations of the task-specifying reward function that change the optimal
+policy. This is because it could result in the bounded-agent achieving a more desirable (to the agent
+designer) policy than otherwise. This is often done in the form of shaping reward functions that are
+less sparse than an original reward function and so lead to faster learning of a good policy even if it
+in principle changes what the theoretically optimal policy might be [Rajeswaran et al., 2017]. Other
+examples of transforming the reward function to aid learning in RL agents is the use of exploration
+bonuses, e.g., count-based reward bonuses for agents that encourage experiencing infrequently visited
+states [Bellemare et al., 2016, Ostrovski et al., 2017, Tang et al., 2017].
+
+The above challenges make reward-design difﬁcult, error-prone, and typically an iterative process.
+Reward functions that seem to capture the designer’s objective can sometimes lead to unexpected
+and undesired behaviors. Phenomena such as reward-hacking [Amodei et al., 2016] illustrate this
+vividly. There are many formulations and resulting approaches to the problem of reward-design
+including preference elicitation, inverse RL, intrinsically motivated RL, optimal rewards, potential-
+based shaping rewards, more general reward shaping, and mechanism design; often the details of
+the formulation depends on the class of RL domains being addressed. In this paper we build on
+the optimal rewards problem formulation of Singh et al. [2010]. We discuss the optimal rewards
+framework as well as some other approaches for learning intrinsic rewards in Section 2.
+
+Our main contribution in this paper is the derivation of a new stochastic-gradient-based method for
+learning parametric intrinsic rewards that when added to the task-specifying (hereafter extrinsic)
+rewards can improve the performance of policy-gradient based learning methods for solving RL
+problems. The policy-gradient updates the policy parameters to optimize the sum of the extrinsic
+and intrinsic rewards, while simultaneously our method updates the intrinsic reward parameters to
+optimize the extrinsic rewards achieved by the policy. We evaluate our method on several Atari games
+with a state of the art A2C (Advantage Actor-Critic) [Mnih et al., 2016] agent as well as on a few
+Mujoco domains with a similarly state of the art PPO agent and show that learning intrinsic rewards
+can outperform using just extrinsic reward as well as using a combination of extrinsic reward and a
+constant “live bonus” [Duan et al., 2016].
+
+2 Background and Related Work
+
+Optimal rewards and reward design. Our work builds on the Optimal Reward Framework.
+Formally, the optimal intrinsic reward for a speciﬁc combination of RL agent and environment is
+deﬁned as the reward which when used by the agent for its learning in its environment maximizes the
+extrinsic reward. The main intuition is that in practice all RL agents are bounded (computationally,
+representationally, in terms of data availability, etc.) and the optimal intrinsic reward can help
+mitigate these bounds. Computing the optimal reward remains a big challenge, of course. The paper
+introducing the framework used exhaustive search over a space of intrinsic reward functions and
+thus does not scale. Sorg et al. [2010] introduced PGRD (Policy Gradient for Reward Design), a
+scalable algorithm that only works with lookahead-search (UCT) based planning agents (and hence
+the agent itself is not a learning-based agent; only the reward to use with the ﬁxed planner is learned).
+Its insight was that the intrinsic reward can be treated as a parameter that inﬂuences the outcome of
+the planning process and thus can be trained via gradient ascent as long as the planning process is
+differentiable (which UCT and related algorithms are). Guo et al. [2016] extended the scalability
+of PGRD to high-dimensional image inputs in Atari 2600 games and used the intrinsic reward as a
+reward bonus to improve the performance of the Monte Carlo Tree Search algorithm using the Atari
+emulator as a model for the planning. A big open challenge is deriving a sound algorithm for learning
+intrinsic rewards for learning-based RL agents and showing that it can learn intrinsic rewards fast
+enough to beneﬁcially inﬂuence the online performance of the learning based RL agent. Our main
+contribution in this paper is to answer this challenge.
+
+Reward shaping and Auxiliary rewards. Reward shaping [Ng et al., 1999] provides a general
+answer to what space of reward function modiﬁcations do not change the optimal policy, speciﬁcally
+potential-based rewards. Other attempts have been made to design auxiliary rewards to derive
+policies with desired properties. For example, the UNREAL agent [Jaderberg et al., 2016] used
+pseudo-reward computed from unsupervised auxiliary tasks to reﬁne its internal representations. In
+
+2
+
+some other works [Bellemare et al., 2016, Ostrovski et al., 2017, Tang et al., 2017], a pseudo-count
+based reward bonus was given to the agent to encourage exploration. Pathak et al. [2017] used
+self-supervised prediction errors as intrinsic rewards to help the agent explore. In these and other
+similar examples [Schmidhuber, 2010, Stadie et al., 2015, Oudeyer and Kaplan, 2009], the agent’s
+learning performance improves through the reward transformations, but the reward transformations
+are expert-designed and not learned. The main departure point in this paper is that we learn the
+parameters of an intrinsic reward function that maps high-dimensional observations and actions to
+rewards.
+
+Hierarchical RL. Another approach to a form of intrinsic reward is in the work on hierarchical
+RL. For example, the recent FeUdal Networks (FuNs) [Vezhnevets et al., 2017] is a hierarchical
+architecture which contains a Manager and a Worker learning at different time scales. The Manager
+conveys abstract goals to the Worker and the Worker optimizes its policy to maximize the extrinsic
+reward and the cosine distance to the goal. The Manager optimizes its proposed goals to guide the
+Worker to learn a better policy in terms of the cumulative extrinsic reward. A large body of work on
+hierarchical RL also generally involves a higher level module choosing goals for lower level modules.
+All of this work can be viewed as a special case of creating intrinsic rewards within a multi-module
+agent architecture. One special aspect of hierarchical-RL work is that these intrinsic rewards are
+usually associated with goals of achievement, i.e., achieving a speciﬁc goal state while in our setting
+the intrinsic reward functions are general mappings from observation-action pairs to rewards. Another
+special aspect is that most evaluations of hierarchical RL show a beneﬁt in the transfer setting with
+typically worse performance on early tasks while the manager is learning and better performance
+on later tasks once the manager has learned. In our setting we take on the challenge of showing that
+learning and using intrinsic rewards can help the RL agent perform better while it is learning on a
+single task. Finally, another difference is that hierarchical RL typically treats the lower-level learner
+as a black box while we train the intrinsic reward using gradients through the policy module in our
+architecture.
+
+3 Gradient-Based Learning of Intrinsic Rewards: A Derivation
+
+As noted earlier, the most practical previous work in learning intrinsic rewards using the Optimal
+Rewards framework was limited to settings where the underlying RL agent was a planning (i.e., needs
+a model of the environment) agent using lookahead search in some form (e.g, UCT). In these settings
+the only quantity being learned was the intrinsic reward function. By contrast, in this section we
+derive our algorithm for learning intrinsic rewards for the setting where the underlying RL agent is
+itself a learning agent, speciﬁcally a policy gradient based learning agent.
+
+3.1 Policy Gradient based RL
+
+Here we brieﬂy describe how policy gradient based RL works, and then we will present our method
+that incorporates it. We assume an episodic, discrete-actions, reinforcement learning setting. Within
+an episode, the state of the environment at time step t is denoted by st ∈ S and the action the agent
+takes from action space A at time step t as at, and the reward at time step t as rt. The agent’s policy,
+parameterized by θ (for example the weights of a neural network), maps a representation of states to
+a probability distribution over actions. The value of a policy πθ, denoted J(πθ) or equivalently J(θ),
+is the expected discounted sum of rewards obtained by the agent when executing actions according to
+policy πθ, i.e.,
+
+J(θ) = Est∼T (·|st−1,at−1),at∼πθ(·|st)[
+
+∞
+(cid:88)
+
+t=0
+
+γtrt],
+
+where T denotes the transition dynamics, and the initial state s0 ∼ µ is chosen from some dis-
+tribution µ over states. Henceforth, for ease of notation we will write the above quantity as
+J(θ) = Eθ[(cid:80)∞
+The policy gradient theorem of Sutton et al. [2000] shows that the gradient of the value J with
+respect to the policy parameters θ can be computed as follows: from all time steps t within an episode
+
+t=0 γtrt].
+
+(1)
+
+(2)
+
+∇θJ(θ) = Eθ[G(st, at)∇θ log πθ(at|st)],
+
+3
+
+where G(st, at) = (cid:80)∞
+i=t γi−tri is the return until termination. Note that recent advances such as
+advantage actor-critic (A2C) learn a critic (Vθ(st)) and use it to reduce the variance of the gradient and
+bootstrap the value after every n steps. However, we present this simple policy gradient formulation
+(Eq 2) in order to simplify the derivation of our proposed algorithm and aid understanding.
+
+3.2 LIRPG: Learning Intrinsic Rewards for Policy Gradient
+
+Notation. We use the following notation through-
+out.
+
+η (s, a): intrinsic reward estimated by η
+
+η = rin
+
+• θ: policy parameters
+• η: intrinsic reward parameters
+• rex: extrinsic reward from the environment
+• rin
+• Gex(st, at) = (cid:80)∞
+• Gin(st, at) = (cid:80)∞
+• Gex+in(st, at) = (cid:80)∞
+• J ex = Eθ[(cid:80)∞
+t=0 γtrex
+t
+• J in = Eθ[(cid:80)∞
+t=0 γtrin
+η (st, at)]
+• J ex+in = Eθ[(cid:80)∞
+• λ: relative weight of intrinsic reward.
+
+i=t γi−trex
+i
+i=t γt−irin
+η (si, ai)
+
+i=t γi−t(rex
+
+t=0 γt(rex
+
+i + λrin
+
+t + λrin
+
+η (st, at)]
+
+]
+
+η (si, ai))
+
+Figure 1: Inside the agent are two modules,
+a policy function parameterized by θ and an
+intrinsic reward function parameterized by η.
+In our experiments the policy function (A2C /
+PPO) has an associated value function as does
+the intrinsic reward function (see supplemen-
+tary materials for details). As shown by the
+dashed lines, the policy module is trained to
+optimize the weighted sum of intrinsic and
+extrinsic rewards while the intrinsic reward
+module is trained to optimize just the extrinsic
+rewards.
+
+The departure point of our approach to reward opti-
+mization for policy gradient is to distinguish between
+the extrinsic reward, rex, that deﬁnes the task, and
+a separate intrinsic reward rin that additively trans-
+forms the extrinsic reward and inﬂuences learning via
+policy gradients. It is crucial to note that the ultimate
+measure of performance we care about improving is
+the value of the extrinsic rewards achieved by the agent; the intrinsic rewards serve only to inﬂuence
+the change in policy parameters. Figure 1 shows an abstract representation of our intrinsic reward
+augmented policy gradient based learning agent.
+
+Algorithm Overview. An overview of our algorithm, LIRPG, is presented in Algorithm 1. At
+each iteration of LIRPG, we simultaneously update the policy parameters θ and the intrinsic reward
+parameters η. More speciﬁcally, we ﬁrst update θ in the direction of the gradient of J ex+in which is
+the weighted sum of intrinsic and extrinsic rewards. After updating policy parameters, we update
+η in the direction of the gradient of J ex which is just the extrinsic rewards. Intuitively, the policy
+is updated to maximize both extrinsic and intrinsic reward, while the intrinsic reward function is
+updated to maximize only the extrinsic reward. We describe more details of each step below.
+
+Updating Policy Parameters (θ). Given an episode where the behavior is generated according
+to policy πθ(·|·), we update the policy parameters using regular policy gradient using the sum of
+intrinsic and extrinsic rewards as the reward:
+
+θ(cid:48) = θ + α∇θJ ex+in(θ)
+
+≈ θ + αGex+in(st, at)∇θ log πθ(at|st),
+
+where Equation 4 is a stochastic gradient update.
+
+Updating Intrinsic Reward Parameters (η). Given an episode and the updated policy parameters
+θ(cid:48), we update intrinsic reward parameters. Intuitively, updating η requires estimating the effect such a
+change would have on the extrinsic value through the change in the policy parameters. Our key idea
+is to use the chain rule to compute the gradient as follows:
+
+(3)
+
+(4)
+
+(5)
+
+∇ηJ ex = ∇θ(cid:48)J ex∇ηθ(cid:48),
+
+4
+
+Algorithm 1 LIRPG: Learning Intrinsic Reward for Policy Gradient
+
+1: Input: step-size parameters α and β
+2: Init: initialize θ and η with random values
+3: repeat
+4:
+5:
+6:
+7:
+8:
+9:
+10:
+11: until done
+
+Sample a trajectory D = {s0, a0, s1, a1, · · · } by interacting with the environment using πθ
+Approximate ∇θJ ex+in(θ; D) by Equation 4
+Update θ(cid:48) ← θ + α∇θJ ex+in(θ; D)
+Approximate ∇θ(cid:48)J ex(θ(cid:48); D) on D by Equation 11
+Approximate ∇ηθ(cid:48) by Equation 10
+Compute ∇ηJ ex = ∇θ(cid:48)J ex(θ(cid:48); D)∇ηθ(cid:48)
+Update η(cid:48) ← η + β∇ηJ ex
+
+where the ﬁrst term (∇θ(cid:48)J ex) sampled as
+
+∇θ(cid:48)J ex ≈ Gex(st, at)∇θ(cid:48) log πθ(cid:48)(at|st)
+
+is an approximate stochastic gradient of the extrinsic value with respect to the updated policy
+parameters θ(cid:48) when the behavior is generated by πθ(cid:48), and the second term can be computed as
+follows:
+
+∇ηθ(cid:48) = ∇η
+= ∇η
+= ∇η
+
+(cid:0)θ + αGex+in(st, at)∇θ log πθ(at|st)(cid:1)
+(cid:0)αGex+in(st, at)∇θ log πθ(at|st)(cid:1)
+(cid:0)αλGin(st, at)∇θ log πθ(at|st)(cid:1)
+
+= αλ
+
+γi−t∇ηrin
+
+η (si, ai)∇θ log πθ(at|st).
+
+∞
+(cid:88)
+
+i=t
+
+Note that to compute the gradient of the extrinsic value J ex with respect to the intrinsic reward
+parameters η, we needed a new episode with the updated policy parameters θ(cid:48) (cf. Equation 6),
+thus requiring two episodes per iteration. To improve data efﬁciency we instead reuse the episode
+generated by the policy parameters θ at the start of the iteration and correct for the resulting mismatch
+by replacing the on-policy update in Equation 6 with the following off-policy update using importance
+sampling:
+
+∇θ(cid:48)J ex = Gex(st, at)
+
+∇θ(cid:48)πθ(cid:48)(at|st)
+πθ(at|st)
+
+.
+
+The parameters η are updated using the product of Equations 10 and 11 with a step-size parameter β;
+this approximates a stochastic gradient update (cf. Equation 5).
+
+Implementation on A2C and PPO. We described LIRPG using the most basic policy gradient
+formulation for simplicity. There have been many advances in policy gradient methods that reduce
+the variance of the gradient and improve the data-efﬁciency. Our LIRPG algorithm is also compatible
+with such actor-critic architectures. Speciﬁcally, for our experiments on Atari games we used a
+reasonably state of the art advantage action-critic (A2C) architecture, and for our experiments on
+Mujoco domains we used a similarly reasonably state of the art proximal policy optimization (PPO)
+architecture. We provide all implementation details in supplementary material. 1
+
+4 Experiments on Atari Games
+
+Our overall objective in the following ﬁrst set of experiments is to evaluate whether augmenting a
+policy gradient based RL agent with intrinsic rewards learned using our LIRPG algorithm (henceforth,
+augmented agent in short) improves performance relative to the baseline policy gradient based RL
+agent that uses just the extrinsic reward (henceforth, A2C baseline agent in short). To this end, we
+ﬁrst perform this evaluation on multiple Atari games from the Arcade Learning Environment (ALE)
+platform [Bellemare et al., 2013] using the same open-source implementation with exactly the same
+
+1Our implementation is available at: https://github.com/Hwhitetooth/lirpg
+
+5
+
+(6)
+
+(7)
+
+(8)
+
+(9)
+
+(10)
+
+(11)
+
+(a)
+
+(b)
+
+Figure 2: (a) Improvements of LIRPG augmented agents over A2C baseline agents. (b) Improvements
+of LIRPG augmented agents over live-bonus augmented A2C baseline agents. In both ﬁgures, the
+columns correspond to different games labeled on the x-axes and the y-axes show human score
+normalized improvements.
+
+hyper-parameters of the A2C algorithm [Mnih et al., 2016] from OpenAI [Dhariwal et al., 2017]
+for both our augmented agent as well as the baseline agent. The extrinsic reward used is the game
+score change as is standard for the work on Atari games. The LIRPG algorithm has two additional
+parameters relative to the baseline algorithm, the parameter λ that controls how the intrinsic reward is
+scaled before adding it to the extrinsic reward and the step-size β; we describe how we choose these
+parameters below in our results.
+
+We also conducted experiments against another baseline which simply gave a constant positive value
+as a live bonus to the agent at each time step (henceforth, A2C-bonus baseline agent in short). The
+live bonus heuristic encourages the agent to live longer so that it will potentially have a better chance
+of getting extrinsic rewards.
+
+Note that the policy module inside the agent is really two networks, a policy network and a value
+function network (that helps estimate Gex+in as required in Equation 4). Similarly the intrinsic
+reward module in the agent is also two networks, a reward function network and a value function
+network (that helps estimate Gex as required in Equation 6).
+
+4.1 Overall Performance
+
+Figure 2 shows the improvements of the augmented agents over baseline agents on 15 Atari games:
+Alien, Amidar, Asterix, Atlantis, BeamRider, Breakout, DemonAttack, DoubleDunk, MsPacman,
+Qbert, Riverraid, RoadRunner, SpaceInvaders, Tennis, and UpNDown. We picked as many games
+as our computational resources allowed in which the published performance of the underlying A2C
+baseline agents was good but where the learning was not so fast in terms of sample complexity
+so as to leave little room for improvement. We ran each agent for 5 separate runs each for 50
+million time steps on each game for both the baseline agents and augmented agents. For the
+augmented agents, we explored the following values for the intrinsic reward weighting coefﬁcient λ,
+{0.003, 0.005, 0.01, 0.02, 0.03, 0.05} and the following values for the term ξ, {0.001, 0.01, 0.1, 1},
+that weights the loss from the value function estimates with the loss from the intrinsic reward function
+(the policy component of the intrinsic reward module). The learning rate of the intrinsic reward
+module, i.e., β, was set to 0.0007 for all experiments. We plotted the best results from the hyper-
+parameter search in Figure 2. For the A2C-bonus baseline agents, we explored the value of live
+bonus over the set {0.001, 0.01, 0.1, 1} on two games, Amidar and MsPacman, and chose the best
+performing value of 0.01 for all 15 games. The learning curves of all agents are provided in the
+supplementary material.
+
+The blue bars in Figure 2 show the human score normalized improvements of the augmented agents
+over the A2C baseline agents and the A2C-bonus baseline agents. We see that the augmented agent
+outperforms the A2C baseline agent on all 15 games and has an improvement of more than ten
+percent on 9 out of 15 games. As for the comparison to the A2C-bonus baseline agent, the augmented
+agent still performed better on all games except for SpaceInvaders and Asterix. Note that most Atari
+games are shooting games so the A2C-bonus baseline agent is expected to be a stronger baseline.
+
+6
+
+Figure 3: Intrinsic reward variation and frequency of action selection. For each game/plot the x-axis
+shows the index of the actions that are available in that game. The red bars show the means and
+standard deviations of the intrinsic rewards associated with each action. The blue bars show the
+frequency of each action being selected.
+
+4.2 Analysis of the Learned Intrinsic Reward
+
+An interesting question is whether the learned intrinsic reward function learns a general state-
+independent bias over actions or whether it is an interesting function of state. To explore this question
+we used the learned intrinsic reward module and the policy module from the end of a good run (cf.
+Figure 2) for each game with no further learning to collect new data for each game. Figure 3 shows
+the variation in intrinsic rewards obtained and the actions selected by the agent over 100 thousand
+steps, i.e. 400 thousand frames, on 5 games. The analysis for all 15 games is in the supplementary
+material. The red bars show the average intrinsic reward per-step for each action. The black segments
+show the standard deviation of the intrinsic rewards. The blue bars show the frequency of each action
+being selected. Figure 3 shows that the intrinsic rewards for most actions vary through the episode as
+shown by large black segments, indirectly conﬁrming that the intrinsic reward module learns more
+than a state-independent constant bias over actions. By comparing the red bars and the blue bars,
+we see the expected correlation between aggregate intrinsic reward over actions and their selection
+(through the policy module that trains on the weighted sum of extrinsic and intrinsic rewards).
+
+5 Mujoco Experiments
+
+Our main objective in the following experiments is to demonstrate that our LIRPG-based algorithm
+can extend to a different class of domains and a different choice of baseline actor-critic architecture
+(namely, PPO instead of A2C). Speciﬁcally, we explore domains from the Mujoco continuous control
+benchmark [Duan et al., 2016], and used the open-source implementation of the PPO [Schulman
+et al., 2017] algorithm from OpenAI [Dhariwal et al., 2017] as our baseline agent. We also compared
+LIRPG to the simple heuristic of giving a live bonus as intrinsic reward (PPO-bonus baseline agents
+for short). As for the Atari game results above, we kept all hyper-parameters unchanged to default
+values for the policy module of both baseline and augmented agents. Finally, we also conduct a
+preliminary exploration into the question of how robust the learning of intrinsic rewards is to the
+sparsity of extrinsic rewards. Speciﬁcally, we used the delayed versions of the Mujoco domains,
+where the extrinsic reward is made sparse by accumulating the reward for N = 10, 20, 40 time steps
+before providing it to the agent. Note that the live bonus is not delayed when we delay the extrinsic
+reward for the PPO-bonus baseline agent. We expect that the problem becomes more challenging
+with increasing N but expect that the learning of intrinsic rewards (that are available at every time
+step) can help mitigate some of that increasing hardness.
+
+Delayed Mujoco benchmark. We evaluated 5 environments from the Mujoco benchmark, i.e.
+Hopper, HalfCheetah, Walker2d, Ant, and Humanoid. As noted above, to create a more-challenging
+sparse-reward setting we accumulated rewards for 10, 20 and 40 steps (or until the end of the episode,
+whichever comes earlier) before giving it to the agent. We trained the baseline and augmented agents
+for 1 million steps on each environment.
+
+5.1 Overall Performance
+
+Our results comparing the use of learning intrinsic reward with using just extrinsic reward on top of
+a PPO architecture are shown in Figure 4. We only show the results of a delay of 20 here; the full
+
+7
+
+Figure 4: The x-axis is time steps during learning. The y-axis is the average reward over the last 100
+training episodes. The deep blue curves are for the baseline PPO architecture. The light blue curves
+are for the PPO-bonus baseline. The red curves are for our LIRPG based augmented architecture.
+The green curves are for our LIRPG architecture in which the policy module was trained with only
+intrinsic rewards. The dark curves are the average of 10 runs with different random seeds. The shaded
+area shows the standard errors of 10 runs.
+
+results can be found in the supplementary material. The dark blue curves are for PPO baseline agents.
+The light blue curves are PPO-bonus baseline agents, where we explored the value of live bonus over
+the set {0.001, 0.01, 0.1, 1} and plotted the curves for the domain-speciﬁc best performing choice.
+The red and curves are for the augmented LIRPG agents.
+
+We see that in 4 out of 5 domains learning intrinsic rewards signiﬁcantly improves the performance
+of PPO, while in one game (Ant) we got a degradation of performance. Although a live bonus did
+help on 2 domains, i.e. Hopper and Walker2d, LIRPG still outperformed it on 4 out of 5 domains
+except for HalfCheetah on which LIRPG got comparable performance. We note that there was no
+domain-speciﬁc hyper-parameter optimization for the results in this ﬁgure; with such optimization
+there might be an opportunity to get improved performance for our method in all the domains.
+
+Training with Only Intrinsic Rewards. We also conducted a more challenging experiment on
+Mujoco domains in which we used only intrinsic rewards to train the policy module. Recall that
+the intrinsic reward module is trained to optimize the extrinsic reward. In 3 out of 5 domains, as
+shown by the green curves denoted by ‘PPO+LIRPG(Rin)’ in Figure 4, using only intrinsic rewards
+achieved similar performance to the red curves where we used a mixture of extrinsic rewards and
+intrinsic rewards. Using only intrinsic rewards to train the policy performed worse than using the
+mixture on Hopper but performed even better on HalfCheetah. It is important to note that training
+the policy using only live-bonus reward without the extrinsic reward would completely fail, because
+there would be no learning signal that encourages the agent to move forward. In contrast, our result
+shows that the agent can learn complex behaviors solely from the learned intrinsic reward on MuJoCo
+environment, and thus the intrinsic reward captures far more than a live bonus does; this is because
+the intrinsic reward module takes into account the extrinsic reward structure through its training.
+
+6 Discussion and Conclusion
+
+Our experiments on using LIRPG with A2C on multiple Atari games showed that it helped improve
+learning performance in all of the 15 games we tried. Similarly using LIRPG with PPO on multiple
+Mujoco domains showed that it helped improve learning performance in 4 out 5 domains (for the
+version with a delay of 20). Note that we used the same A2C / PPO architecture and hyper-parameters
+in both our augmented and baseline agents. While more empirical work needs to be done to either
+make intrinsic reward learning more robust or to understand when it helps and when it does not, we
+believe our results show promise for the central idea of learning intrinsic rewards in complex RL
+domains.
+
+In summary, we derived a novel practical algorithm, LIRPG, for learning intrinsic reward functions
+in problems with high-dimensional observations for use with policy gradient based RL agents. This
+is the ﬁrst such algorithm to the best of our knowledge. Our empirical results show promise in using
+intrinsic reward function learning as a kind of meta-learning to improve the performance of modern
+policy gradient architectures like A2C and PPO.
+
+8
+
+We thank Richard Lewis for conversations on optimal rewards. This work was supported by NSF
+grant IIS-1526059, by a grant from Toyota Research Institute (TRI), and by a grant from DARPA’s
+L2M program. Any opinions, ﬁndings, conclusions, or recommendations expressed here are those of
+the authors and do not necessarily reﬂect the views of the sponsor.
+
+Acknowledgments.
+
+References
+
+Satinder Singh, Richard L Lewis, Andrew G Barto, and Jonathan Sorg. Intrinsically motivated
+reinforcement learning: An evolutionary perspective. IEEE Transactions on Autonomous Mental
+Development, 2(2):70–82, 2010.
+
+Andrew Y Ng, Daishi Harada, and Stuart J Russell. Policy invariance under reward transformations:
+Theory and application to reward shaping. In Proceedings of the Sixteenth International Conference
+on Machine Learning, pages 278–287. Morgan Kaufmann Publishers Inc., 1999.
+
+Aravind Rajeswaran, Kendall Lowrey, Emanuel V Todorov, and Sham M Kakade. Towards gen-
+eralization and simplicity in continuous control. In Advances in Neural Information Processing
+Systems, pages 6553–6564, 2017.
+
+Marc Bellemare, Sriram Srinivasan, Georg Ostrovski, Tom Schaul, David Saxton, and Remi Munos.
+Unifying count-based exploration and intrinsic motivation. In Advances in Neural Information
+Processing Systems, pages 1471–1479, 2016.
+
+Georg Ostrovski, Marc G Bellemare, Aäron Oord, and Rémi Munos. Count-based exploration with
+neural density models. In International Conference on Machine Learning, pages 2721–2730, 2017.
+
+Haoran Tang, Rein Houthooft, Davis Foote, Adam Stooke, OpenAI Xi Chen, Yan Duan, John
+Schulman, Filip DeTurck, and Pieter Abbeel. # exploration: A study of count-based exploration
+for deep reinforcement learning. In Advances in Neural Information Processing Systems, pages
+2750–2759, 2017.
+
+Dario Amodei, Chris Olah, Jacob Steinhardt, Paul Christiano, John Schulman, and Dan Mané.
+
+Concrete problems in ai safety. arXiv preprint arXiv:1606.06565, 2016.
+
+Volodymyr Mnih, Adria Puigdomenech Badia, Mehdi Mirza, Alex Graves, Timothy Lillicrap, Tim
+Harley, David Silver, and Koray Kavukcuoglu. Asynchronous methods for deep reinforcement
+learning. In International Conference on Machine Learning, pages 1928–1937, 2016.
+
+Yan Duan, Xi Chen, Rein Houthooft, John Schulman, and Pieter Abbeel. Benchmarking deep
+reinforcement learning for continuous control. In International Conference on Machine Learning,
+pages 1329–1338, 2016.
+
+Jonathan Sorg, Richard L Lewis, and Satinder Singh. Reward design via online gradient ascent. In
+
+Advances in Neural Information Processing Systems, pages 2190–2198, 2010.
+
+Xiaoxiao Guo, Satinder Singh, Richard Lewis, and Honglak Lee. Deep learning for reward design to
+
+improve monte carlo tree search in atari games. arXiv preprint arXiv:1604.07095, 2016.
+
+Max Jaderberg, Volodymyr Mnih, Wojciech Marian Czarnecki, Tom Schaul, Joel Z Leibo, David
+Silver, and Koray Kavukcuoglu. Reinforcement learning with unsupervised auxiliary tasks. arXiv
+preprint arXiv:1611.05397, 2016.
+
+Deepak Pathak, Pulkit Agrawal, Alexei A Efros, and Trevor Darrell. Curiosity-driven exploration by
+self-supervised prediction. In International Conference on Machine Learning (ICML), volume
+2017, 2017.
+
+Jürgen Schmidhuber. Formal theory of creativity, fun, and intrinsic motivation (1990–2010). IEEE
+
+Transactions on Autonomous Mental Development, 2(3):230–247, 2010.
+
+Bradly C Stadie, Sergey Levine, and Pieter Abbeel. Incentivizing exploration in reinforcement
+
+learning with deep predictive models. arXiv preprint arXiv:1507.00814, 2015.
+
+9
+
+Pierre-Yves Oudeyer and Frederic Kaplan. What is intrinsic motivation? a typology of computational
+
+approaches. Frontiers in Neurorobotics, 1:6, 2009.
+
+Alexander Sasha Vezhnevets, Simon Osindero, Tom Schaul, Nicolas Heess, Max Jaderberg, David
+Silver, and Koray Kavukcuoglu. Feudal networks for hierarchical reinforcement learning. In
+International Conference on Machine Learning, pages 3540–3549, 2017.
+
+Richard S Sutton, David A McAllester, Satinder Singh, and Yishay Mansour. Policy gradient methods
+In Advances in neural information
+
+for reinforcement learning with function approximation.
+processing systems, pages 1057–1063, 2000.
+
+Marc G Bellemare, Yavar Naddaf, Joel Veness, and Michael Bowling. The arcade learning envi-
+ronment: An evaluation platform for general agents. J. Artif. Intell. Res.(JAIR), 47:253–279,
+2013.
+
+Prafulla Dhariwal, Christopher Hesse, Oleg Klimov, Alex Nichol, Matthias Plappert, Alec Radford,
+John Schulman, Szymon Sidor, and Yuhuai Wu. Openai baselines. https://github.com/
+openai/baselines, 2017.
+
+John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov. Proximal policy
+
+optimization algorithms. arXiv preprint arXiv:1707.06347, 2017.
+
+Volodymyr Mnih, Koray Kavukcuoglu, David Silver, Andrei A Rusu, Joel Veness, Marc G Bellemare,
+Alex Graves, Martin Riedmiller, Andreas K Fidjeland, Georg Ostrovski, et al. Human-level control
+through deep reinforcement learning. Nature, 518(7540):529, 2015.
+
+Diederik P Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint
+
+arXiv:1412.6980, 2014.
+
+John Schulman, Philipp Moritz, Sergey Levine, Michael Jordan, and Pieter Abbeel. High-dimensional
+continuous control using generalized advantage estimation. arXiv preprint arXiv:1506.02438,
+2015.
+
+10
+
+A Implementation Details
+
+A.1 Atari Experiments
+
+Episode Generation. As in Mnih et al. [2015], each episode starts by doing a no-op action for a
+random number of steps after restarting the game. The number of no-op steps is sampled from 0 to
+30 uniformly. Within an episode, each action chosen is repeated for 4 frames, before selecting the
+next action. An episode ends when the game is over or the agent loses a life.
+
+Input State Representation. As in Mnih et al. [2015], we take the maximum value at each pixel
+from 4 consecutive frames to compress them into one frame which is then rescaled to a 84 × 84 gray
+scale image. The input to all four neural networks is the stack of the last 4 gray scale images (thus
+capturing frame-observations over 16 frames). The extrinsic rewards from the game are clipped to
+[−1, 1].
+
+Details of the Two Networks in the Policy Module. Note that the policy module is unchanged
+from the OpenAI implementation. Speciﬁcally, the two networks are convolutional neural networks
+(CNN) with 3 convolutional layers and 1 fully connected layer. The ﬁrst convolutional layer has
+thirty-two 8 × 8 ﬁlters with stride 4. The second convolutional layer has sixty-four 4 × 4 ﬁlters with
+stride 2. The third convolutional layer has sixty-four 3 × 3 ﬁlters with stride 1. The fourth layer is a
+fully connected layer with 512 hidden units. Each hidden layer is followed by a rectiﬁer non-linearity.
+The value network (that estimates Gex+in) shares parameters for the ﬁrst four layers with the policy
+network. The policy network has a separate output layer with an output for every action through a
+softmax nonlinearity, while the value network separately outputs a single scalar for the value.
+
+Details of the Two Networks in the Intrinsic Reward Module.
+The intrinsic reward module has
+two very similar neural network architectures as the policy module described above. It again has
+two networks, a “policy” network that instead of a softmax over actions produces a scalar reward for
+every action through a tanh nonlinearity to keep the scalar in [−1, 1]; we will refer to it as the intrinsic
+reward function. The value network to estimate Gex has the same architecture as the intrinsic reward
+network except for the output layer that has a single scalar output without a non-linear activation.
+These two networks share the parameters of the ﬁrst four layers.
+
+Hyper-Parameters for Policy module. We keep the default values of all hyper-parameters in the
+original OpenAI implementation of the A2C-based policy module unchanged for both the augmented
+and baseline agents2.
+
+Hyper-Parameters for Intrinsic Reward module in Augmented Agent. We use RMSProp to
+optimize the two networks of the intrinsic reward module. The decay factor used for RMSProp is
+0.99, and the (cid:15) is 0.00001. We do not use momentum. Recall that there are two parameters special
+to LIRPG. Of these, the step size β was initialized to 0.0007 and annealed linearly to zero over 50
+million time steps for all the experiments reported below. We did a small hyper-parameter search for
+λ for each game (this is described below in the caption of Figure 5). As for the A2C implementation
+for the policy module we clipped the gradient by norm to 0.5 in the intrinsic reward module.
+
+A.2 Mujoco Experiments
+
+Details of the Two Networks in the Policy Module. Note that the policy module is unchanged
+from the OpenAI implementation; we provide details for completeness. The policy network is a MLP
+with 2 hidden layers, too. The input to the policy network is the observation. The ﬁrst two layer are
+fully connected layers with 64 hidden units. Each hidden layer is followed by a tanh non-linearity.
+The output layer outputs a vector with the size of the dimension of the action space with no non-
+linearity applied to the output units. Gaussian noise is added to the output of the policy network to
+
+2We use 16 actor threads to generate episodes. For each training iteration, each actor acts for 5 time steps.
+For training the policy, the weighting coefﬁcients of policy-gradient term, value network loss term, and the
+entropy regularization term in the objective function are 1.0, 0.5, and 0.01. The learning rate α for training the
+policy is set to 0.0007 at the beginning and anneals to 0 linearly over 50 million steps. The discount factor γ is
+0.99 for all experiments.
+
+11
+
+encourage exploration. The variance of the Gaussian noise was a input-independent parameter which
+was also trained by gradient descent. The corresponding value network (that estimates Gex+in) has a
+similar architecture with the policy network. The only difference is that that output layer outputs a
+single scalar without any non-linear activation. These two networks do not share any parameters.
+
+Details of the Two Networks in the Intrinsic Reward Module.
+The intrinsic reward function
+networks are quite similar to the two networks in the policy module. Each network is a multi-layer
+perceptron (MLP) with 2 hidden layers. We concatenated the observation vector and the action vector
+as the input to the intrinsic reward network. The ﬁrst two layer are fully connected layers with 64
+hidden units. Each hidden layer is followed by a tanh non-linearity. The output layer has one scalar
+output. We apply tanh on the output to bound the intrinsic reward to [−1, 1]. The value network to
+estimate Gex has the same architecture as the intrinsic reward network except for the output layer
+that has a single scalar output without a non-linear activation. These two networks do not share any
+parameters.
+
+Hyper-Parameters for Policy Module We keep the default values of all hyper-parameters in the
+original OpenAI implementation of PPO unchanged for both the augmented and baseline agents3.
+
+Hyper-Parameters for Intrinsic Reward Module We use Adam [Kingma and Ba, 2014] to
+optimize the two networks of the intrinsic reward module. The step size β was initialized to 0.0001
+and was ﬁxed over 1 million time steps for all the experiments reported below. The mixing coefﬁcient
+λ was ﬁxed to 1.0 and instead we multiplied the extrinsic reward by 0.01 cross all 5 environments.
+The PPO implementation clips the gradient by norm to 0.5. We keep this part unchanged for the
+policy network and clip the gradients by the same norm for the reward network. We used generalized
+advantage estimate (GAE) [Schulman et al., 2015] for both training the reward network and the policy
+network. The weighting factor for GAE was 0.95.
+
+B More Experimental Results
+
+3For each training iteration, the agent interacts with the environment for 2048 steps. The learning rate α for
+training the policy is set to 0.0003 at the beginning and was ﬁxed over training. We used a batch size of 32 and
+swept over the 2048 data points for 10 epochs before the next sequence of interaction. The discount factor γ is
+0.99 for all experiments.
+
+12
+
+Figure 5: The x-axis is time steps during learning. The y-axis is the average game score over
+the last 100 training episodes. The blue curves are for the baseline architecture. The red curves
+are for our LIRPG based augmented architecture. The dark curves are the average of four runs
+with different random seeds. The shaded areas show the standard errors of 5 individual runs.
+Hyper-parameter Search: We explored the following values for the intrinsic reward weighting
+coefﬁcient λ, {0.003, 0.005, 0.01, 0.02, 0.03, 0.05}. We explored the following values for the term ξ,
+{0.001, 0.01, 0.1, 1}, that weights the loss from the value function estimates with the loss from the
+intrinsic reward function (the policy component of the intrinsic reward module).
+
+13
+
+Figure 6: Intrinsic reward variation and frequency of action selection. We selected a good run for
+each game from the runs shown in Figure 5, and used the learned intrinsic reward module and the
+associated policy module for the selected run without any further learning to play the game for 100
+thousand steps, i.e. 400 thousand frames, to collect data. For each game/plot the x-axis shows the
+index of the actions that are available in that game. The red bars show the means and standard
+deviations of the intrinsic rewards associated with each action. The blue bars show the frequency of
+each action being selected.
+
+14
+
+Figure 7: The x-axis is time steps during learning. The y-axis is the average reward over the last 100
+training episodes. Each column corresponds to a domain labeled at the top. Each row corresponds
+to the delay labeled on the left hand side (for 10, 20, and 40 steps from the top row to the bottom
+row). The blue curves are for the baseline PPO architecture. The red curves are for our LIRPG based
+augmented architecture. The dark curves are the average of 10 runs with different random seeds. The
+shaded area shows the standard errors of 10 runs.
+
+15
+

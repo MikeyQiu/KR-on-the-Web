@@ -1,0 +1,2554 @@
+Recurrent Scale Approximation for Object Detection in CNN
+
+Yu Liu1,2, Hongyang Li2, Junjie Yan1, Fangyin Wei1, Xiaogang Wang2, Xiaoou Tang2
+1SenseTime Group Limited
+2Multimedia Laboratory at The Chinese University of Hong Kong
+liuyuisanai@gmail.com,{yangli,xgwang}@ee.cuhk.edu.hk,
+{yanjunjie,weifangyin}@sensetime.com, xtang@ie.cuhk.edu.hk
+
+8
+1
+0
+2
+ 
+b
+e
+F
+ 
+8
+ 
+ 
+]
+
+V
+C
+.
+s
+c
+[
+ 
+ 
+2
+v
+1
+3
+5
+9
+0
+.
+7
+0
+7
+1
+:
+v
+i
+X
+r
+a
+
+Abstract
+
+Since convolutional neural network (CNN) lacks an in-
+herent mechanism to handle large scale variations, we al-
+ways need to compute feature maps multiple times for multi-
+scale object detection, which has the bottleneck of compu-
+tational cost in practice. To address this, we devise a re-
+current scale approximation (RSA) to compute feature map
+once only, and only through this map can we approximate
+the rest maps on other levels. At the core of RSA is the
+recursive rolling out mechanism: given an initial map at
+a particular scale, it generates the prediction at a smaller
+scale that is half the size of input. To further increase ef-
+ﬁciency and accuracy, we (a): design a scale-forecast net-
+work to globally predict potential scales in the image since
+there is no need to compute maps on all levels of the pyra-
+mid. (b): propose a landmark retracing network (LRN) to
+trace back locations of the regressed landmarks and gener-
+ate a conﬁdence score for each landmark; LRN can effec-
+tively alleviate false positives caused by the accumulated
+error in RSA. The whole system can be trained end-to-end
+in a uniﬁed CNN framework. Experiments demonstrate that
+our proposed algorithm is superior against state-of-the-art
+methods on face detection benchmarks and achieves com-
+parable results for generic proposal generation. The source
+code of our system is available.1.
+
+1. Introduction
+
+Object detection is one of the most important tasks
+in computer vision. The convolutional neural network
+(CNN) based approaches have been widely applied in ob-
+ject detection and recognition with promising performance
+[10, 13, 15, 18, 22, 23, 27, 34, 36]. To localize objects at
+arbitrary scales and locations in an image, we need to han-
+
+1Our codes and annotations mentioned in Sec.4.1 can be accessed at
+
+github.com/sciencefans/RSA-for-object-detection
+
+Figure 1. Different detection pipelines. (a) Image pyramid is gen-
+erated for multi-scale test. The detector only handles a speciﬁc
+range of scales.
+(b) Image is forwarded once at one scale and
+the detector generates all results. (c) Our proposed RSA frame-
+work. Image is forwarded once only and feature maps for different
+scales are approximated by a recurrent unit. Blue plates indicate
+images of different scales and orange plates with red boarder indi-
+cate CNN feature maps at different levels.
+
+dle the variations caused by appearance, location and scale.
+Most of the appearance variations can now be handled in
+CNN, beneﬁting from the invariance property of convolu-
+tion and pooling operations. The location variations can
+be naturally solved via sliding windows, which can be efﬁ-
+ciently incorporated into CNN in a fully convolutional man-
+ner. However, CNN itself does not have an inherent mecha-
+nism to handle the scale variations.
+
+The scale problem is often addressed via two ways,
+namely, multi-shot by single-scale detector and single-shot
+by multi-scale detector. The ﬁrst way, as shown in Fig. 1(a),
+handles objects of different scales independently by resizing
+the input into different scales and then forwarding the re-
+sized images multiple times for detection [2, 16, 28]. Mod-
+els in such a philosophy probably have the highest recall
+as long as the sampling of scales is dense enough, but they
+suffer from high computation cost and more false positives.
+The second way, as depicted in Fig. 1(b), forwards the im-
+age only once and then directly regresses objects at multiple
+
+1
+
+scales [21, 26, 27]. Such a scheme takes the scale variation
+as a black box. Although more parameters and complex
+structures would improve the performance, the spirit of di-
+rect regression still has limitations in real-time applications,
+for example in face detection, the size of faces can vary
+from 20 × 20 to 1920 × 1080.
+
+To handle the scale variation in a CNN-based detection
+system in terms of both efﬁciency and accuracy, we are in-
+spired by the fast feature pyramid work proposed by Doll´ar
+et al.
+[7], where a detection system using hand-crafted
+features is designed for pedestrian detection.
+It is found
+that image gradients across scales can be predicted based
+on natural image statistics. They showed that dense feature
+pyramids can be efﬁciently constructed on top of coarsely
+sampled feature pyramids. In this paper, we extend the spirit
+of fast feature pyramid to CNN and go a few steps further.
+Our solution to the feature pyramid in CNN descends from
+the observations of modern CNN-based detectors, includ-
+ing Faster-RCNN [27], R-FCN [4], SSD [21], YOLO [26]
+and STN [2], where feature maps are ﬁrst computed and
+the detection results are decoded from the maps afterwards.
+However, the computation cost of generating feature maps
+becomes a bottleneck for methods [2, 28] using multi-scale
+testing and it seems not to be a neat solution to the scale
+variation problem.
+
+To this end, our philosophy of designing an elegant de-
+tection system is that we calculate the feature pyramid once
+only, and only through that pyramid can we approximate
+the rest feature pyramids at other scales. The intuition is
+illustrated in Fig. 1(c). In this work, we propose a recur-
+rent scale approximation (RSA, see Fig. 3) unit to achieve
+the goal aforementioned. The RSA unit is designed to be
+plugged at some speciﬁc depths in a network and to be fed
+with an initial feature map at the largest scale. The unit
+convolves the input in a recurrent manner to generate the
+prediction of the feature map that is half the size of the in-
+put. Such a scheme could feed the network with input at
+one scale only and approximate the rest features at smaller
+scales through a learnable RSA unit - a balance considering
+both efﬁciency and accuracy.
+
+We propose two more schemes to further save the com-
+putational budget and improve the detection performance
+under the RSA framework. The ﬁrst is a scale-forecast net-
+work to globally predict potential scales for a novel image
+and we compute feature pyramids for just a certain set of
+scales based on the prediction. There are only a few scales
+of objects appearing in the image and hence most of the
+feature pyramids correspond to the background, indicating
+a redundancy if maps on all levels are computed. The sec-
+ond is a landmark retracing network that retraces the loca-
+tion of the regressed landmarks in the preceding layers and
+generates a conﬁdence score for each landmark based on
+the landmark feature set. The ﬁnal score of identifying a
+
+face within an anchor is thereby revised by the LRN net-
+work. Such a design alleviates false positives caused by the
+accumulated error in the RSA unit.
+
+The pipeline of our proposed algorithm is shown in
+Fig. 2. The three components can be incorporated into a
+uniﬁed CNN framework and trained end-to-end. Experi-
+ments show that our approach is superior to other state-of-
+the-art methods in face detection and achieves reasonable
+results for object detection.
+
+To sum up, our contributions in this work are as follows:
+1) We prove that deep CNN features for an image can be
+approximated from different scales using a portable recur-
+rent unit (RSA), which fully leverages efﬁciency and ac-
+curacy. 2) We propose a scale-forecast network to predict
+valid scales of the input, which further accelerates the de-
+tection pipeline. 3) We devise a landmark retracing network
+to enhance the accuracy in face detection by utilizing land-
+mark information.
+
+2. Related work
+
+Multi-shot by single-scale detector. A single-scale de-
+tector detects the target at a typical scale and cannot handle
+features at other scales. An image pyramid is thus formu-
+lated and each level in the pyramid is fed into the detector.
+Such a framework appeared in pre-deep-learning era [3, 9]
+and usually involves hand-crafted features, e.g., HOG [5] or
+SIFT [24], and some classiﬁer like Adaboost [30], to verify
+whether the context at each scale contains a target object.
+Recently, some CNN-based methods [16, 28] also employ
+such a spirit to predict the objectness and class within a slid-
+ing window at each scale. In this way, the detector only han-
+dles features in a certain range of scales and the variance
+is taken over by the image pyramid, which could reduce
+the ﬁtting difﬁculty for detector but potentially increase the
+computational cost.
+
+Single-shot by multi-scale detector. A multi-scale de-
+tector takes one shot for the image and generates detection
+results aross all scales. RPN [27] and YOLO [26] have ﬁxed
+size of the input scale, and proposals for all scales are gen-
+erated in the ﬁnal layer by using multiple classiﬁers. How-
+ever, it is not easy to detect objects in various scales based
+on the ﬁnal feature map. Liu et al. [21] resolved the prob-
+lem via a multi-level combination of predictions from fea-
+ture maps on different scales. And yet it still needs a large
+model for large receptive ﬁeld for detection. Other works
+[17, 20] proposed to merge deep and shallow features in a
+conv/deconv structure and to merge boxes for objects from
+different scales. These methods are usually faster than the
+single-scale detector since it only takes one shot for image,
+but the large-scale invariance has to be learned by an expen-
+sive feature classiﬁer, which is unstable and heavy.
+
+Face detection. Recent years have witnessed a perfor-
+mance boost in face detection, which takes advantage of the
+
+Figure 2. Pipeline of our proposed algorithm. (a) Given an image, we predict potential scales from the scale-forecast network and group the
+results in six main bins (m = 0, · · · , 5). (b) RSA unit. The input is resized based on the smallest scale (corresponding to the largest feature
+map) and the feature maps at other scales are predicted directly from the unit. (c) Given predicted maps, LRN performs landmark detection
+in an RPN manner. The landmarks can trace back locations via regression to generate individual conﬁdence regarding the existence of the
+landmark. (d) Due to the retracing mechanism, the ﬁnal score of detecting a face is revised by the conﬁdence of landmarks, which can
+effectively dispose of false positives.
+
+development in fully convolutional network [8, 19, 31, 35].
+Multi-task RPN is applied [2, 12, 25, 29] to generate face
+conﬁdence and landmarks together. Both single-scale and
+multi-scale strategies are introduced in these methods. For
+example, Chen et. al [2] propose a supervised spatial trans-
+form layer to utilize landmark information and thus enhance
+the quality of detector by a large margin.
+
+3. Our Algorithm
+
+In this section, we depict each component of our pipeline
+(Fig. 2) in detail. We ﬁrst devise a scale-forecast network
+to predict potential scales of the input; the RSA unit is pro-
+posed to learn and predict features at smaller scales based
+on the output of the scale-forecast network; the image is
+fed into the landmark retracing network to detect faces of
+various sizes, using the scale prediction in Section 3.1 and
+approximation in Section 3.2. The landmark retracing net-
+work stated in Section 3.3 can trace back features of re-
+gressed landmarks and generate individual conﬁdence of
+each landmark to revise the ﬁnal score of detecting a face.
+At last, we discuss the superiority of our algorithm’s design
+over other alternatives in Section 3.4.
+
+3.1. Scale-forecast Network
+
+We propose a scale-forecast network (see Fig. 2(a)) to
+predict the possible scales of faces given an input image
+of ﬁxed size. The network is a half-channel version of
+ResNet-18 with a global pooling at the end. The output
+of this network is a probability vector of B dimensions,
+where B = 60 is the predeﬁned number of scales. Let
+B = {0, 1, · · · , B} denote the scale set, we deﬁne the map-
+ping from a face size x, in the context of an image being
+
+resized to a higher dimension 2048, to the index b in B as:
+
+b = 10(log2 x − 5).
+For example, if the face has size of 64, its corresponding
+bin index b = 102. Prior to being fed into the network,
+an image is ﬁrst resized with the higher dimension equal to
+224. During training, the loss of our scale-forecast network
+is a binary multi-class cross entropy loss:
+
+(1)
+
+LSF = −
+
+pb log ˆpb + (1 − pb) log(1 − ˆpb),
+
+(2)
+
+1
+B
+
+(cid:88)
+
+b
+
+where pb, ˆpb are the ground truth label and prediction of the
+b-th scale, respectively. Note that the ground truth label for
+the neighbouring scales bi of an occurring scale b∗ (pb∗ =
+1) is not zero and is deﬁned as the Gaussian sampling score:
+pbi = Gaussian(bi, µ, σ), bi ∈ N(b∗)
+where µ, σ are hyperparameters in the Gaussian distribu-
+tion and N(·) denotes the neighbour set. Here we use ±2 as
+2π, respectively.
+the neighbour size and set µ, σ to b∗, 1/
+Such a practice could alleviate the difﬁculty of feature learn-
+ing in the discrete distribution between occurring scales (1)
+and non-occurring scales (0).
+
+(3)
+
+√
+
+For inference, we use the Gaussian mixture model to de-
+termine the local maximum and hence the potential occur-
+ring scales. Given observations x, the distribution, param-
+eterized by θ, can be decomposed into K mixture compo-
+nents:
+
+p(θ|x) =
+
+φiN (µi, Σi),
+
+(4)
+
+K
+(cid:88)
+
+i=1
+
+2Here we assume the minimum and maximum face sizes are 32 and
+2048, respectively, if the higher dimension of an image is resized to 2048.
+In exponential expression, the face size is divided into six main bins from
+25 = 32 to 211 = 2048, the denotation of which will be used later.
+
+where the i-th component is characterized by Gaussian dis-
+tributions with weights φi, means µi and covariance matri-
+ces Σi. Here K = {1, ..., 6} denotes selected scale num-
+bers of six main scales from 25 to 211 and the scale selec-
+tion is determined by the threshold φi of each component.
+Finally the best ﬁtting model with a speciﬁc K is used.
+
+where x and y are spatial indeces in the feature map3.
+
+The essence behind our RSA unit is to derive a mapping
+RSA(·) (cid:55)→ f (·) to constantly predict smaller-scale features
+based on the current map instead of feeding the network
+with inputs of different scales for multiple times. In an in-
+formal mathematical expression, we have:
+
+3.2. Recurrent Scale Approximation (RSA) Unit
+
+The recurrent scale approximation (RSA) unit is devised
+to predict feature maps at smaller scales given a map at
+the largest scale. Fig. 2 depicts the RSA unit. The net-
+work architecture follows a build-up similar to the resid-
+ual network [13], where we reduce the number of channels
+in each convolutional layer to half of the original version
+for time efﬁciency. The structure details are shown in Sec-
+tion 4.1. Given an input image I, I m denotes the down-
+sampled result of the image with a ratio of 1/2m, where
+m ∈ {0, · · · , M } is the downsample level and M = 5.
+Note that I 0 is the original image. Therefore, there are
+six scales in total, corresponding to the six main scale
+ranges deﬁned in the scale-forecast network (see Section
+3.1). Given an input image I m, we deﬁne the output fea-
+ture map of layer res2b as:
+
+f (I m) = Gm,
+
+(5)
+
+where f (·) stands for a set of convolutions with a total stride
+of 8 from the input image to the output map. The set of
+feature maps Gm at different scales serves as the ground
+truth supervision of the recurrent unit.
+
+The RSA module RSA(·) takes as input the feature map
+of the largest scale G0 at ﬁrst, and repeatedly outputs a map
+with half the size of the input map:
+
+h(0) = F 0 = G0,
+h(m) = RSA(cid:0)h(m−1)|w(cid:1) = F m.
+
+where F m is the resultant map after being rolled out m
+times and w represents the weights in the RSA unit. The
+RSA module has four convolutions with a total stride of 2
+(1,2,1,1) and their kernal sizes are (1,3,3,1). The loss is
+therefore the l2 norm between prediction F m and supervi-
+sion Gm across all scales:
+
+LRSA =
+
+1
+2M
+
+M
+(cid:88)
+
+m=1
+
+(cid:13)
+(cid:13)F m − Gm(cid:13)
+2
+(cid:13)
+
+.
+
+(7)
+
+The gradients in the RSA unit are computed as:
+
+∂LRSA
+∂wxy
+
+∂LRSA
+∂h(m)
+
+·
+
+∂h(m)
+∂wxy
+
+,
+
+=
+
+=
+
+(cid:88)
+
+m
+1
+M
+
+(cid:88)
+
+m
+
+(cid:0)F m − Gm(cid:1) · F m−1
+
+,
+
+xy
+
+(8)
+
+RSA(cid:0)h(m−1)(cid:1) = f (I m) = Gm,
+
+lim
+0→m
+
+to indicate the functionality of RSA: an approximation to
+f (·) from the input at the largest scale 0 to its desired level
+m. The computation cost of generating feature map F m
+using RSA is much lower than that of resizing the image
+and feeding into the network (i.e., f (I m) through conv1
+to res2b; see quantitative results in Section 4.4).
+
+During inference, we ﬁrst obtain the possible scales of
+the input from the scale-forecast network. The image is
+then resized accordingly so that the smallest scale (corre-
+sponding to the largest feature map) is resized to the range
+of [64, 128]. The feature maps at other scales are thereby
+predicted by the output of RSA unit via Eqn (6). Fig. 3 de-
+picts a rolled-out version of RSA to predict feature maps of
+smaller scales compared with the ground truth. We can ob-
+serve from both the error rate and predicted feature maps in
+each level that RSA is capable of approximating the feature
+maps at smaller scales.
+
+(6)
+
+Figure 3. RSA by rolling out the learned feature map at smaller
+scales. The number in the orange box indicates the average mean
+squared error between ground truth and RSA’s prediction.
+
+3.3. Landmark Retracing Network
+
+In the task of face detection, as illustrated in Fig. 2, the
+landmark retracing network (LRN) is designed to adjust the
+conﬁdence of identifying a face and to dispose of false pos-
+itives by learning individual conﬁdence of each regressed
+landmark. Instead of directly using the ground truth loca-
+tion of landmarks, we formulate such a feature learning of
+landmarks based on the regression output of landmarks in
+the ﬁnal RPN layer.
+
+Speciﬁcally, given the feature map F at a speciﬁc scale
+from RSA (m is dropped for brevity), we ﬁrst feed it into
+the res3a layer. There are two branches at the output:
+
+3For brevity of discussion, we ignore the spatial weight sharing of con-
+volution here. Note that the weight update in wxy also includes the loss
+from the landmark retracing network.
+
+one is the landmark feature set P to predict the individual
+score of each landmark in a spatial context. The number of
+channels in the set equals to the number of landmarks. An-
+other branch is continuing the standard RPN [27] pipeline
+(res3b-3c) which generates a set of anchors in the ﬁnal
+RPN layer. Let pi = [pi0, pi1, · · · , pik, · · · ] denote the clas-
+siﬁcation probability in the ﬁnal RPN layer, where k is the
+class index and i is the spatial location index on the map;
+tij denotes the regression target (offset deﬁned in [10]) of
+the j-th landmark in the i-th anchor, where j = {1, · · · , 5}
+is the landmark index. Note that in face detection task, we
+only have one anchor so that pi contains one element. In
+the traditional detection-to-landmark formulation, the fol-
+lowing loss, which consists of two heads (i.e., classiﬁcation
+and regression), is optimized:
+
+− log pik∗ + δ(k∗)S(ti − t∗
+
+i ),
+
+(cid:88)
+
+i
+
+where δ(·) is the indicator function; k∗ denotes the correct
+label of anchor i and we have only two classes here (0 for
+background, 1 for positive); t∗
+i is the ground truth regression
+target and S(·) is the smoothing l1 loss deﬁned in [10].
+
+However, as illustrated in Fig. 2(c), using the conﬁdence
+of anchor pik∗ alone results in false positives in some cases,
+which inspires us to take advantage of the landmark features
+based on the regression output. The revised classiﬁcation
+output, ptrace
+(tij), now considers both the feature in the
+ﬁnal RPN layer as well as those in the landmark feature set:
+
+ik∗
+
+(cid:40)
+
+ptrace
+ik∗
+
+(tij) =
+
+pi0,
+max pool(pi1, pland
+
+ij
+
+k∗ = 0,
+), k∗ = 1,
+
+(9)
+
+ij
+
+where pland
+is the classiﬁcation output of point j from the
+landmark feature set P and it is determined by the regres-
+sion output:
+
+ij = P(cid:0)r(tij)(cid:1),
+pland
+where r(·) stands for a mapping from the regression target
+to the spatial location on map P. To this end, we have the
+revised loss for our landmark retracing network:
+
+(10)
+
+LLRN =
+
+− log ptrace
+
+ik∗
+
+(tij) + δ(k∗)
+
+S(tij − t∗
+
+ij)
+
+(cid:88)
+
+j
+
+(cid:21)
+.
+
+(cid:20)
+
+(cid:88)
+
+i
+
+(11)
+Apart from the detection-to-landmark design as previous
+work did, our retracing network also fully leverages the
+feature set of landmarks to help rectify the conﬁdence of
+identifying a face. This is achieved by utilizing the regres-
+sion output tij to ﬁnd the individual score of each landmark
+on the preceding feature map P. Such a scheme is in a
+landmark-to-detection spirit.
+
+Note that the landmark retracing network is trained end-
+to-end with the RSA unit stated previously. The anchor as-
+sociated with each location i is a square box of ﬁxed size
+
+√
+
+2. The landmark retracing operation is performed only
+64
+when the anchor is a positive sample. The base landmark lo-
+cation with respect to the anchor is determined by the aver-
+age location of all faces in the training set. During test, LRN
+is fed with feature maps at various scales and it treats each
+scale individually. The ﬁnal detection result is generated
+after performing NMS among results from multi-scales.
+
+3.4. Discussion
+
+Comparison to RPN. The region proposal network [27]
+takes a set of predeﬁned anchors of different sizes as input
+and conducts a similar detection pipeline. Anchors in RPN
+vary in size to meet the multi-scale training constraint. Dur-
+ing one iteration of update, it has to feed the whole image
+of different sizes (scales) from the start to the very end of
+the network. In our framework, we resize the image once
+to make sure at least one face falls into the size of [64, 128],
+thus enforcing the network to be trained within a certain
+range of scales. In this way, we are able to use only one
+anchor of ﬁxed size. The multi-scale spirit is embedded
+in an RSA unit, which directly predicts the feature maps
+at smaller scales. Such a scheme saves parameters signiﬁ-
+cantly and could be considered as a ‘semi’ multi-scale train-
+ing and ‘fully’ multi-scale test.
+
+Prediction-supervised or GT-supervised in landmark
+feature sets. Another comment on our framework is the su-
+pervision knowledge used in training the landmark features
+P. The features are learned using the prediction output of
+regression targets tij instead of the ground truth targets t∗
+ij.
+∼ t∗
+In our preliminary experiments, we ﬁnd that if pland
+i ,
+the activation in the landmark features would be heavily
+suppressed due to the misleading regression output by tij;
+however, if we relax the learning restriction and accept ac-
+tivations within a certain range of misleading locations, i.e.,
+pland
+∼ ti, the performance can be boosted further. Using
+i
+the prediction of regression as supervision in the landmark
+feature learning makes sense since: (a) we care about the ac-
+tivation (classiﬁcation probability) rather than the accurate
+location of each landmark; (b) ti and pland
+share similar
+learning workﬂow and thus the location of ti could better
+match the activation pland
+in P.
+
+i
+
+i
+
+i
+
+4. Experiments
+
+In this section we ﬁrst conduct the ablation study to ver-
+ify the effectiveness of each component in our method and
+compare exhaustively with the baseline RPN [27]; then we
+compare our algorithm with state-of-the-art methods in face
+detection and object detection on four popular benchmarks.
+
+4.1. Setup and Implementation Details
+
+Annotated Faces in the Wild (AFW) [37] contains 205
+images for evaluating face detectors’ performance. How-
+ever, some faces are missing in the annotations and could
+
+trigger the issue of false positives, we relabel those miss-
+ing faces and report the performance difference in both
+cases. Face Detection Data Set and Benchmark (FDDB)
+[14] has 5,171 annotated faces in 2,845 images. It is larger
+and more challenging than AFW. Multi-Attribute Labelled
+Faces (MALF) [32] includes 5,250 images with 11,931 an-
+notated faces collected from the Internet. The annotation set
+is cleaner than that of AFW and it is the largest benchmark
+for face detection.
+
+Our training set has 184K images, including 171K im-
+ages collected from the Internet and 12.9K images from the
+training split of Wider Face Dataset [33]. All faces are la-
+belled with bounding boxes and ﬁve landmarks. The struc-
+ture of our model is a shallow version of the ResNet [13]
+where the ﬁrst seven ResNet blocks are used, i.e., from
+conv1 to res3c. We use this model in scale-forecast net-
+work and LRN. All numbers of channels are set to half of
+the original ResNet model, for the consideration of time
+efﬁciency. We ﬁrst train the scale-forecast network and
+then use the output of predicted scales to launch the RSA
+unit and LRN. Note that the whole system (RSA+LRN) is
+trained end-to-end and the model is trained from scratch
+without resorting to a pretrained model since the number of
+channels is halved. The ratio of the positive and the negative
+is 1 : 1 in all experiments. The batch size is 4; base learning
+rate is set to 0.001 with a decrease of 6% every 10,000 it-
+erations. The maximum training iteration is 1,000,000. We
+use stochastic gradient descent as the optimizer.
+
+4.2. Performance of Scale-forecast Network
+
+(a) AFW
+
+(b) FDDB
+
+(c) MALF
+
+Figure 4. Recall v.s.
+the number of predicted scales per face on
+three benchmarks. Our scale-forecast network recalls almost all
+scales when the number of predicted scale per face is 1.
+
+The scale-forecast network is of vital importance to the
+computational cost and accuracy in the networks after-
+wards. Fig. 4 reports the overall recall with different num-
+bers of predicted scales on three benchmarks. Since the
+number of faces and the number of potential scales in the
+image vary across datasets, we use the number of predicted
+scales per face (x, total predicted scales over total number
+of faces) and a global recall (y, correct predicted scales over
+all ground truth scales) as the evaluation metric. We can
+observe from the results that our trained scale network re-
+calls almost 99% at x = 1, indicating that on average we
+only need to generate less than two predictions per image
+and that we can retrieve all face scales. Based on this prior
+
+Figure 5. Investigation on the source layer to branch out the RSA
+unit. For each case, we report the error rate v.s.
+the level of
+down-sampling ratio in the unit. We can conclude that the deeper
+the RSA is branched out, the worse the feature approximation at
+smaller scales will be.
+
+knowledge, during inference, we set the threshold for pre-
+dicting potential scales of the input so that it has approxi-
+mately two predictions.
+
+4.3. Ablative Evaluation on RSA Unit
+
+Fig. 5 investigates the effect of appending the RSA unit
+to different layers. For each case, the error rate between the
+ground truth and corresponding prediction is computed. We
+deﬁne the error rate (ER) on level m as:
+
+ERm =
+
+(cid:0)(F (m) − G(m))./G(m)(cid:1)2
+
+,
+
+(12)
+
+1
+N
+
+N
+(cid:88)
+
+i
+
+where ‘./’ implies an element-wise division between maps;
+N is the total number of samples. We use a separate val-
+idation set to conduct this experiment. The image is ﬁrst
+resized to higher dimension being 2048 and the RSA unit
+predicts six scales deﬁned in Section 3.1 (1024, 512, 256,
+128 and 64). Ground truth maps are generated accordingly
+as we iteratively resize the image (see Fig. 3). There are two
+remarks regarding the result:
+
+First, feature depth matters. Theoretically RSA can han-
+dle all scales of features in a deep CNN model and therefore
+can be branched out at any depth of the network. How-
+ever, results from the ﬁgure indicate that as we plug RSA
+at deeper layers, its performance decades. Since features
+at deeper layers are more sparse and abstract, they barely
+contain information for RSA to approximate the features
+at smaller scales. For example, in case final feature
+which means RSA is plugged at the ﬁnal convolution layer
+after res3c, the error rate is almost 100%, indicating
+RSA’s incapability of handling the insufﬁcient information
+in this layer. The error rate decreases in shallower cases.
+
+However, the computation cost of RSA at shallow layers
+is much higher than that at deeper layers, since the stride is
+
+Table 1. The proposed algorithm is more computationally efﬁcient and accurate by design than baseline RPN. Theoretical operations of
+each component are provided, denoted as ‘Opts. (VGA input)’ below. The minimum operation in each component means only the scale-
+forecast network is used where no face appears in the image; and the maximum operation indicates the amount when faces appear at all
+scales. The actual runtime comparison between ours and baseline RPN is reported in Table 2.
+
+Component
+
+Scale-forecast
+
+RSA
+
+LRN
+
+Total Pipeline
+
+Baseline RPN
+
+Structure
+Opts. (VGA input)
+
+tiny ResNet-18
+95.67M
+
+4-layer FCN
+0 to 182.42M
+
+tiny ResNet-18
+0 to 1.3G
+
+-
+95.67M to 1.5G
+
+single anchor multi anchors
+
+AP@AFW
+Recall@FDDB1%fpi
+Recall@MALF1%fpi
+
+-
+-
+-
+
+-
+-
+-
+
+-
+-
+-
+
+99.96%
+91.92%
+90.09%
+
+1.72G
+
+99.90%
+90.61%
+88.81%
+
+1.31G
+
+98.29%
+86.89%
+84.65%
+
+smaller and the input map of RSA is thus larger. The path
+during one-time forward from image to the input map right
+before RSA is shorter; and the rolling out time increases
+accordingly. Therefore, the trade-off is that we want to
+plug RSA at shallow layers to ensure a low error rate and
+at the same time, to save the computational cost. In prac-
+tice we choose case res2b to be the location where RSA
+is branched out. Most of the computation happens before
+layer res2b and it has an acceptable error rate of 3.44%.
+We use this setting throughout the following experiments.
+
+Second, butterﬂy effect exists. For a particular case, as
+the times of the recurrent operation increase, the error rate
+goes up due to the cumulative effect of rolling out the pre-
+dictions. For example, in case res2b, the error rate is
+3.44% at level m = 1 and drops to 5.9% after rolling out
+ﬁve times. Such an increase is within the tolerance of the
+system and still sufﬁces the task of face detection.
+
+4.4. Our Algorithm vs. Baseline RPN
+
+We compare our model (denoted as RSA+LRN), a com-
+bination of the RSA unit and a landmark retracing net-
+work, with the region proposal network (RPN) [27].
+In
+the ﬁrst setting, we use the original RPN with multiple an-
+chors (denoted as RPN m) to detect faces of various scales.
+In the second setting, we modify the number of anchors
+to one (denoted as RPN s); the anchor can only detect
+faces in the range from 64 to 128 pixels. To capture all
+faces, it needs to take multiple shots in an image pyra-
+mid spirit. The network structurse of both baseline RPN
+and our LRN descend from ResNet-18 [13]. Anchor sizes
+in the ﬁrst setting RPN m are 32
+2
+and they are responsible for detecting faces in the range
+of [32, 64), [64, 128), · · · , [1024, 2048], respectively. In the
+second setting RPN s, we ﬁrst resize the image length to
+64, 256, · · · , 2048, then test each scale individually and
+merge all results through NMS [1].
+
+2, · · · , 1024
+
+2, 64
+
+√
+
+√
+
+√
+
+Table 1 shows the theoretical computation cost and test
+performance of our algorithm compared with baseline RPN.
+We can observe that RPN s needs six shots for the same
+image during inference and thus the computation cost is
+much larger than ours or RPN m; Moreover, RPN m per-
+forms worse than the rest two for two reasons: First, the
+
+Table 2. Test runtime (ms per image) of RSA compared with RPN
+on three benchmarks. We conduct experiments of each case ﬁve
+times and report the average result to avoid system disturbance.
+
+Speed
+
+AFW
+FDDB
+MALF
+
+Average
+
+LRN+RSA
+
+LRN
+
+RPN s
+
+RPN m
+
+13.95
+11.24
+16.38
+
+14.50
+
+28.84
+27.10
+29.73
+
+26.85
+25.01
+27.37
+
+28.78
+
+26.52
+
+18.92
+18.34
+19.37
+
+18.99
+
+receptive ﬁeld is less than 500 and therefore it cannot see
+the context of faces larger than 500 pixels; second, it is hard
+for the network (its model capacity much less than the orig-
+inal ResNet [13]) to learn the features of faces in a wide
+scale range from 32 to 2048.
+
+Table 2 depicts the runtime comparison during test. The
+third column LRN means without using the RSA unit. Our
+method runs fast enough compared with its counterparts for
+two reasons. First, there are often one or two valid scales in
+the image, and the scale-forecast network can automatically
+select some particular scales, and ignore all the other invalid
+ones in the multi-scale test stage; second, the input of LRN
+descends from the output of RSA to predict feature maps at
+smaller scales; it is not necessary to compute feature maps
+of multiple scales in a multi-shot manner as RPN m does.
+
+4.5. Face Detection
+
+Fig. 7 shows the comparison against other approaches
+on three benchmarks. On AFW, our algorithm achieves
+an AP of 99.17% using the original annotation and an AP
+of 99.96% using the revised annotation 7(c). On FDDB,
+RSA+LRN recalls 93.0% faces with 50 false positives 7(a).
+On MALF, our method recalls 82.4% faces with zero false
+positive 7(d). It should be noticed that the shape and scale
+deﬁnition of bounding box on each benchmark varies. For
+instance, the annotation on FDDB is ellipse while others are
+rectangle. To address this, we learn a transformer to ﬁt each
+annotation from the landmarks. This strategy signiﬁcantly
+enhances performance in the continuous setting on FDDB.
+
+Figure 6. Our proposed model can detect faces at various scales, including the green annotations provided in AFW [37] as well as faces
+marked in red that are of small sizes and not labeled in the dataset.
+
+(a) FDDB discrete
+
+(b) FDDB continuous
+
+(c) AFW
+
+(d) MALF
+
+Figure 7. Comparison to state-of-the-art approaches on face detection benchmarks. The proposed algorithm (Scale-forecast network with
+RSA+LRN, tagged by LRN+RSA) outperforms other methods by a large margin. ‘revised gt.’ and ’original gt.’ in AFW stand for fully
+annotated faces by us and partially labeled annotations provided by the dataset, respectively.
+
+Table 3. Recall (%) vs.
+per image) breakdown on ILSVRC DET val2.
+
+the number of proposals and Speed (ms
+
+Recall
+
+300
+
+1000
+
+2000
+
+Speed
+
+Original RPN
+Single-scale RPN
+RSA+RPN
+
+93.5
+94.4
+94.4
+
+97.3
+97.2
+97.2
+
+97.7
+98.0
+98.0
+
+158 ms
+249 ms
+124 ms
+
+100
+
+88.7
+89.6
+89.1
+
+4.6. RSA on Generic Object Proposal
+
+We now verify that the scale approximation learning by
+RSA unit also generalizes comparably well on the generic
+region proposal task. Region proposal detection is a ba-
+sic stage for generic object detection task and is more difﬁ-
+cult than face detection. ILSVRC DET [6] is a challenging
+dataset for generic object detection. It contains more than
+300K images for training and 20K images for validation.
+We use a subset (around 170k images) of the original train-
+ing set for training, where each category has at most 1000
+samples; for test we use the val2 split [11] with 9917 im-
+ages. We choose the single anchor RPN with ResNet-101
+as the baseline. RSA unit is set after res3b3. The anchors
+2 squared, 128×256 and 256×128. During
+are of size 128
+training, we randomly select an object and resize the image
+so that the object is rescaled to [128, 256]. Scale-forecast
+network is also employed to predict the higher dimension
+of objects in the image.
+
+√
+
+Recalls with different number of proposals are shown in
+Table 3. The original RPN setting has 18 anchors with 3 as-
+
+pect ratios and 6 scales. Without loss of recall, RPN+RSA
+reduces around 61.05% computation cost compared with
+the single-scale RPN, when the number of boxes is over
+100. RPN+RSA is also more efﬁcient and recalls more ob-
+jects than original RPN. Our model and the single-anchor
+RPN both perform better than the original RPN. This ob-
+servation is in accordance with the conclusion in face de-
+tection. Overall, our scheme of using RSA plus LRN com-
+petes comparably with the standard RPN method in terms
+of computation efﬁciency and accuracy.
+
+5. Conclusion
+
+In this paper, we prove that deep CNN features of an im-
+age can be approximated from a large scale to smaller scales
+by the proposed RSA unit, which signiﬁcantly accelerates
+face detection while achieving comparable results in object
+detection.
+In order to make the detector faster and more
+accurate, we devise a scale-forecast network to predict the
+potential object scales. We further design a landmark retrac-
+ing network to fuse global and local scale information to en-
+hance the predictor. Experimental results show that our al-
+gorithm signiﬁcantly outperforms state-of-the-art methods.
+Future work includes exploring RSA on generic object de-
+tection task. Representation approximation between video
+frames is also an interesting research avenue.
+
+References
+
+[1] B. Alexe, T. Deselares, and V. Ferrari. Measuring the object-
+
+ness of image windows. IEEE Trans on PAMI, 2012.
+
+[2] D. Chen, G. Hua, F. Wen, and J. Sun. Supervised transformer
+network for efﬁcient face detection. In ECCV, pages 122–
+138. Springer, 2016.
+
+[3] D. Chen, S. Ren, Y. Wei, X. Cao, and J. Sun.
+
+Joint cas-
+cade face detection and alignment. In ECCV, pages 109–122.
+Springer, 2014.
+
+[4] J. Dai, Y. Li, K. He, and J. Sun. R-fcn: Object detection
+via region-based fully convolutional networks. In D. D. Lee,
+M. Sugiyama, U. V. Luxburg, I. Guyon, and R. Garnett, edi-
+tors, Advances in Neural Information Processing Systems 29,
+pages 379–387. Curran Associates, Inc., 2016.
+
+[5] N. Dalal and B. Triggs. Histograms of oriented gradients
+for human detection. In IEEE Computer Society Conference
+on Computer Vision & Pattern Recognition, pages 886–893,
+2005.
+
+[6] J. Deng, W. Dong, R. Socher, L.-J. Li, K. Li, and L. Fei-Fei.
+ImageNet: A Large-Scale Hierarchical Image Database. In
+CVPR, 2009.
+
+[7] P. Doll´ar, R. Appel, S. Belongie, and P. Perona. Fast feature
+pyramids for object detection. IEEE Transactions on Pattern
+Analysis and Machine Intelligence, 36(8):1532–1545, 2014.
+[8] S. S. Farfade, M. J. Saberian, and L.-J. Li. Multi-view face
+detection using deep convolutional neural networks. In Pro-
+ceedings of the 5th ACM on International Conference on
+Multimedia Retrieval, pages 643–650. ACM, 2015.
+
+[9] P. F. Felzenszwalb, R. B. Girshick, and D. Mcallester. Cas-
+cade object detection with deformable part models. In CVPR.
+IEEE, 2010.
+
+[10] R. Girshick. Fast R-CNN. In ICCV, 2015.
+[11] R. Girshick, J. Donahue, T. Darrell, and J. Malik. Rich fea-
+ture hierarchies for accurate object detection and semantic
+segmentation. In CVPR, pages 580–587, 2014.
+
+[12] Z. Hao, Y. Liu, H. Qin, and J. Yan. Scale-aware face detec-
+
+tion. In CVPR 2017, 2017.
+
+[13] K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learning
+
+for image recognition. In CVPR, 2016.
+
+[14] V. Jain and E. Learned-Miller. Fddb: A benchmark for face
+detection in unconstrained settings. Technical Report UM-
+CS-2010-009, University of Massachusetts, Amherst, 2010.
+[15] B. Leng, Y. Liu, K. Yu, X. Zhang, and Z. Xiong. 3d object
+understanding with 3d convolutional neural networks. Infor-
+mation Sciences, 366:188–201, 2016.
+
+[16] H. Li, Z. Lin, X. Shen, J. Brandt, and G. Hua. A convolu-
+tional neural network cascade for face detection. In CVPR,
+pages 5325–5334, 2015.
+
+[17] H. Li, Y. Liu, W. Ouyang, and X. Wang. Zoom out-and-in
+network with recursive training for object proposal. arXiv
+preprint arXiv:1702.05711, 2017.
+
+[18] H. Li, Y. Liu, X. Zhang, Z. An, J. Wang, Y. Chen, and
+J. Tong. Do we really need more training data for object lo-
+calization. In IEEE International Conference on Image Pro-
+cessing, 2017.
+
+[19] Y. Li, B. Sun, T. Wu, and Y. Wang. Face detection with end-
+to-end integration of a convnet and a 3d model. In ECCV,
+pages 420–436. Springer, 2016.
+
+[20] T.-Y. Lin, P. Doll´ar, R. Girshick, K. He, B. Hariharan, and
+
+S. Belongie. Feature pyramid networks for object detection.
+arXiv preprint arXiv:1612.03144, 2016.
+
+[21] W. Liu, D. Anguelov, D. Erhan, C. Szegedy, S. Reed, C.-Y.
+Fu, and A. C. Berg. Ssd: Single shot multibox detector. In
+ECCV, pages 21–37. Springer, 2016.
+
+[22] Y. Liu, H. Li, and X. Wang. Learning deep features via con-
+generous cosine loss for person recognition. arXiv preprint
+arXiv:1702.06890, 2017.
+
+[23] Y. Liu, J. Yan, and W. Ouyang. Quality aware network for
+
+set to set recognition. In CVPR, 2017.
+
+[24] D. G. Lowe.
+
+invariant keypoints.
+sion, 60(2):91–110, 2004.
+
+Distinctive image features from scale-
+International journal of computer vi-
+
+[25] R. Ranjan, V. M. Patel, and R. Chellappa. Hyperface: A deep
+multi-task learning framework for face detection, landmark
+localization, pose estimation, and gender recognition. arXiv
+preprint arXiv:1603.01249, 2016.
+
+[26] J. Redmon, S. Divvala, R. Girshick, and A. Farhadi. You
+only look once: Uniﬁed, real-time object detection. In Pro-
+ceedings of the CVPR, pages 779–788, 2016.
+
+[27] S. Ren, K. He, R. Girshick, and J. Sun. Faster R-CNN:
+Towards Real-Time Object Detection with Region Proposal
+Networks. In NIPS, 2015.
+
+[28] P. Sermanet, D. Eigen, X. Zhang, M. Mathieu, R. Fergus,
+and Y. LeCun. Overfeat: Integrated recognition, localization
+and detection using convolutional networks. In ICLR, 2014.
+[29] X. Sun, P. Wu, and S. C. Hoi. Face detection using deep
+learning: An improved faster rcnn approach. arXiv preprint
+arXiv:1701.08289, 2017.
+
+[30] P. Viola and M. J. Jones. Robust real-time face detection.
+International journal of computer vision, 57(2):137–154,
+2004.
+
+[31] B. Yang, J. Yan, Z. Lei, and S. Z. Li. Convolutional channel
+features. In Proceedings of the IEEE international confer-
+ence on computer vision, pages 82–90, 2015.
+
+[32] B. Yang, J. Yan, Z. Lei, and S. Z. Li. Fine-grained evaluation
+on face detection in the wild. In Automatic Face and Gesture
+Recognition (FG), 11th IEEE International Conference on.
+IEEE, 2015.
+
+[33] S. Yang, P. Luo, C. C. Loy, and X. Tang. Wider face: A face
+
+detection benchmark. In CVPR, 2016.
+
+[34] F. Yu, W. Li, Q. Li, Y. Liu, X. Shi, and J. Yan. Poi: Multiple
+object tracking with high performance detection and appear-
+ance feature. In ECCV, pages 36–42. Springer International
+Publishing, 2016.
+
+[35] J. Yu, Y. Jiang, Z. Wang, Z. Cao, and T. Huang. Unitbox:
+In Proceedings of
+An advanced object detection network.
+the 2016 ACM on Multimedia Conference, pages 516–520.
+ACM, 2016.
+
+[36] X. Zeng, W. Ouyang, J. Yan, H. Li, T. Xiao, K. Wang, Y. Liu,
+Y. Zhou, B. Yang, Z. Wang, et al. Crafting gbd-net for object
+detection. arXiv preprint arXiv:1610.02579, 2016.
+
+[37] X. Zhu and D. Ramanan. Face detection, pose estimation,
+and landmark localization in the wild. In CVPR, pages 2879–
+2886, 2012.
+
+Recurrent Scale Approximation for Object Detection in CNN
+
+Yu Liu1,2, Hongyang Li2, Junjie Yan1, Fangyin Wei1, Xiaogang Wang2, Xiaoou Tang2
+1SenseTime Group Limited
+2Multimedia Laboratory at The Chinese University of Hong Kong
+liuyuisanai@gmail.com,{yangli,xgwang}@ee.cuhk.edu.hk,
+{yanjunjie,weifangyin}@sensetime.com, xtang@ie.cuhk.edu.hk
+
+8
+1
+0
+2
+ 
+b
+e
+F
+ 
+8
+ 
+ 
+]
+
+V
+C
+.
+s
+c
+[
+ 
+ 
+2
+v
+1
+3
+5
+9
+0
+.
+7
+0
+7
+1
+:
+v
+i
+X
+r
+a
+
+Abstract
+
+Since convolutional neural network (CNN) lacks an in-
+herent mechanism to handle large scale variations, we al-
+ways need to compute feature maps multiple times for multi-
+scale object detection, which has the bottleneck of compu-
+tational cost in practice. To address this, we devise a re-
+current scale approximation (RSA) to compute feature map
+once only, and only through this map can we approximate
+the rest maps on other levels. At the core of RSA is the
+recursive rolling out mechanism: given an initial map at
+a particular scale, it generates the prediction at a smaller
+scale that is half the size of input. To further increase ef-
+ﬁciency and accuracy, we (a): design a scale-forecast net-
+work to globally predict potential scales in the image since
+there is no need to compute maps on all levels of the pyra-
+mid. (b): propose a landmark retracing network (LRN) to
+trace back locations of the regressed landmarks and gener-
+ate a conﬁdence score for each landmark; LRN can effec-
+tively alleviate false positives caused by the accumulated
+error in RSA. The whole system can be trained end-to-end
+in a uniﬁed CNN framework. Experiments demonstrate that
+our proposed algorithm is superior against state-of-the-art
+methods on face detection benchmarks and achieves com-
+parable results for generic proposal generation. The source
+code of our system is available.1.
+
+1. Introduction
+
+Object detection is one of the most important tasks
+in computer vision. The convolutional neural network
+(CNN) based approaches have been widely applied in ob-
+ject detection and recognition with promising performance
+[10, 13, 15, 18, 22, 23, 27, 34, 36]. To localize objects at
+arbitrary scales and locations in an image, we need to han-
+
+1Our codes and annotations mentioned in Sec.4.1 can be accessed at
+
+github.com/sciencefans/RSA-for-object-detection
+
+Figure 1. Different detection pipelines. (a) Image pyramid is gen-
+erated for multi-scale test. The detector only handles a speciﬁc
+range of scales.
+(b) Image is forwarded once at one scale and
+the detector generates all results. (c) Our proposed RSA frame-
+work. Image is forwarded once only and feature maps for different
+scales are approximated by a recurrent unit. Blue plates indicate
+images of different scales and orange plates with red boarder indi-
+cate CNN feature maps at different levels.
+
+dle the variations caused by appearance, location and scale.
+Most of the appearance variations can now be handled in
+CNN, beneﬁting from the invariance property of convolu-
+tion and pooling operations. The location variations can
+be naturally solved via sliding windows, which can be efﬁ-
+ciently incorporated into CNN in a fully convolutional man-
+ner. However, CNN itself does not have an inherent mecha-
+nism to handle the scale variations.
+
+The scale problem is often addressed via two ways,
+namely, multi-shot by single-scale detector and single-shot
+by multi-scale detector. The ﬁrst way, as shown in Fig. 1(a),
+handles objects of different scales independently by resizing
+the input into different scales and then forwarding the re-
+sized images multiple times for detection [2, 16, 28]. Mod-
+els in such a philosophy probably have the highest recall
+as long as the sampling of scales is dense enough, but they
+suffer from high computation cost and more false positives.
+The second way, as depicted in Fig. 1(b), forwards the im-
+age only once and then directly regresses objects at multiple
+
+1
+
+scales [21, 26, 27]. Such a scheme takes the scale variation
+as a black box. Although more parameters and complex
+structures would improve the performance, the spirit of di-
+rect regression still has limitations in real-time applications,
+for example in face detection, the size of faces can vary
+from 20 × 20 to 1920 × 1080.
+
+To handle the scale variation in a CNN-based detection
+system in terms of both efﬁciency and accuracy, we are in-
+spired by the fast feature pyramid work proposed by Doll´ar
+et al.
+[7], where a detection system using hand-crafted
+features is designed for pedestrian detection.
+It is found
+that image gradients across scales can be predicted based
+on natural image statistics. They showed that dense feature
+pyramids can be efﬁciently constructed on top of coarsely
+sampled feature pyramids. In this paper, we extend the spirit
+of fast feature pyramid to CNN and go a few steps further.
+Our solution to the feature pyramid in CNN descends from
+the observations of modern CNN-based detectors, includ-
+ing Faster-RCNN [27], R-FCN [4], SSD [21], YOLO [26]
+and STN [2], where feature maps are ﬁrst computed and
+the detection results are decoded from the maps afterwards.
+However, the computation cost of generating feature maps
+becomes a bottleneck for methods [2, 28] using multi-scale
+testing and it seems not to be a neat solution to the scale
+variation problem.
+
+To this end, our philosophy of designing an elegant de-
+tection system is that we calculate the feature pyramid once
+only, and only through that pyramid can we approximate
+the rest feature pyramids at other scales. The intuition is
+illustrated in Fig. 1(c). In this work, we propose a recur-
+rent scale approximation (RSA, see Fig. 3) unit to achieve
+the goal aforementioned. The RSA unit is designed to be
+plugged at some speciﬁc depths in a network and to be fed
+with an initial feature map at the largest scale. The unit
+convolves the input in a recurrent manner to generate the
+prediction of the feature map that is half the size of the in-
+put. Such a scheme could feed the network with input at
+one scale only and approximate the rest features at smaller
+scales through a learnable RSA unit - a balance considering
+both efﬁciency and accuracy.
+
+We propose two more schemes to further save the com-
+putational budget and improve the detection performance
+under the RSA framework. The ﬁrst is a scale-forecast net-
+work to globally predict potential scales for a novel image
+and we compute feature pyramids for just a certain set of
+scales based on the prediction. There are only a few scales
+of objects appearing in the image and hence most of the
+feature pyramids correspond to the background, indicating
+a redundancy if maps on all levels are computed. The sec-
+ond is a landmark retracing network that retraces the loca-
+tion of the regressed landmarks in the preceding layers and
+generates a conﬁdence score for each landmark based on
+the landmark feature set. The ﬁnal score of identifying a
+
+face within an anchor is thereby revised by the LRN net-
+work. Such a design alleviates false positives caused by the
+accumulated error in the RSA unit.
+
+The pipeline of our proposed algorithm is shown in
+Fig. 2. The three components can be incorporated into a
+uniﬁed CNN framework and trained end-to-end. Experi-
+ments show that our approach is superior to other state-of-
+the-art methods in face detection and achieves reasonable
+results for object detection.
+
+To sum up, our contributions in this work are as follows:
+1) We prove that deep CNN features for an image can be
+approximated from different scales using a portable recur-
+rent unit (RSA), which fully leverages efﬁciency and ac-
+curacy. 2) We propose a scale-forecast network to predict
+valid scales of the input, which further accelerates the de-
+tection pipeline. 3) We devise a landmark retracing network
+to enhance the accuracy in face detection by utilizing land-
+mark information.
+
+2. Related work
+
+Multi-shot by single-scale detector. A single-scale de-
+tector detects the target at a typical scale and cannot handle
+features at other scales. An image pyramid is thus formu-
+lated and each level in the pyramid is fed into the detector.
+Such a framework appeared in pre-deep-learning era [3, 9]
+and usually involves hand-crafted features, e.g., HOG [5] or
+SIFT [24], and some classiﬁer like Adaboost [30], to verify
+whether the context at each scale contains a target object.
+Recently, some CNN-based methods [16, 28] also employ
+such a spirit to predict the objectness and class within a slid-
+ing window at each scale. In this way, the detector only han-
+dles features in a certain range of scales and the variance
+is taken over by the image pyramid, which could reduce
+the ﬁtting difﬁculty for detector but potentially increase the
+computational cost.
+
+Single-shot by multi-scale detector. A multi-scale de-
+tector takes one shot for the image and generates detection
+results aross all scales. RPN [27] and YOLO [26] have ﬁxed
+size of the input scale, and proposals for all scales are gen-
+erated in the ﬁnal layer by using multiple classiﬁers. How-
+ever, it is not easy to detect objects in various scales based
+on the ﬁnal feature map. Liu et al. [21] resolved the prob-
+lem via a multi-level combination of predictions from fea-
+ture maps on different scales. And yet it still needs a large
+model for large receptive ﬁeld for detection. Other works
+[17, 20] proposed to merge deep and shallow features in a
+conv/deconv structure and to merge boxes for objects from
+different scales. These methods are usually faster than the
+single-scale detector since it only takes one shot for image,
+but the large-scale invariance has to be learned by an expen-
+sive feature classiﬁer, which is unstable and heavy.
+
+Face detection. Recent years have witnessed a perfor-
+mance boost in face detection, which takes advantage of the
+
+Figure 2. Pipeline of our proposed algorithm. (a) Given an image, we predict potential scales from the scale-forecast network and group the
+results in six main bins (m = 0, · · · , 5). (b) RSA unit. The input is resized based on the smallest scale (corresponding to the largest feature
+map) and the feature maps at other scales are predicted directly from the unit. (c) Given predicted maps, LRN performs landmark detection
+in an RPN manner. The landmarks can trace back locations via regression to generate individual conﬁdence regarding the existence of the
+landmark. (d) Due to the retracing mechanism, the ﬁnal score of detecting a face is revised by the conﬁdence of landmarks, which can
+effectively dispose of false positives.
+
+development in fully convolutional network [8, 19, 31, 35].
+Multi-task RPN is applied [2, 12, 25, 29] to generate face
+conﬁdence and landmarks together. Both single-scale and
+multi-scale strategies are introduced in these methods. For
+example, Chen et. al [2] propose a supervised spatial trans-
+form layer to utilize landmark information and thus enhance
+the quality of detector by a large margin.
+
+3. Our Algorithm
+
+In this section, we depict each component of our pipeline
+(Fig. 2) in detail. We ﬁrst devise a scale-forecast network
+to predict potential scales of the input; the RSA unit is pro-
+posed to learn and predict features at smaller scales based
+on the output of the scale-forecast network; the image is
+fed into the landmark retracing network to detect faces of
+various sizes, using the scale prediction in Section 3.1 and
+approximation in Section 3.2. The landmark retracing net-
+work stated in Section 3.3 can trace back features of re-
+gressed landmarks and generate individual conﬁdence of
+each landmark to revise the ﬁnal score of detecting a face.
+At last, we discuss the superiority of our algorithm’s design
+over other alternatives in Section 3.4.
+
+3.1. Scale-forecast Network
+
+We propose a scale-forecast network (see Fig. 2(a)) to
+predict the possible scales of faces given an input image
+of ﬁxed size. The network is a half-channel version of
+ResNet-18 with a global pooling at the end. The output
+of this network is a probability vector of B dimensions,
+where B = 60 is the predeﬁned number of scales. Let
+B = {0, 1, · · · , B} denote the scale set, we deﬁne the map-
+ping from a face size x, in the context of an image being
+
+resized to a higher dimension 2048, to the index b in B as:
+
+b = 10(log2 x − 5).
+For example, if the face has size of 64, its corresponding
+bin index b = 102. Prior to being fed into the network,
+an image is ﬁrst resized with the higher dimension equal to
+224. During training, the loss of our scale-forecast network
+is a binary multi-class cross entropy loss:
+
+(1)
+
+LSF = −
+
+pb log ˆpb + (1 − pb) log(1 − ˆpb),
+
+(2)
+
+1
+B
+
+(cid:88)
+
+b
+
+where pb, ˆpb are the ground truth label and prediction of the
+b-th scale, respectively. Note that the ground truth label for
+the neighbouring scales bi of an occurring scale b∗ (pb∗ =
+1) is not zero and is deﬁned as the Gaussian sampling score:
+pbi = Gaussian(bi, µ, σ), bi ∈ N(b∗)
+where µ, σ are hyperparameters in the Gaussian distribu-
+tion and N(·) denotes the neighbour set. Here we use ±2 as
+2π, respectively.
+the neighbour size and set µ, σ to b∗, 1/
+Such a practice could alleviate the difﬁculty of feature learn-
+ing in the discrete distribution between occurring scales (1)
+and non-occurring scales (0).
+
+(3)
+
+√
+
+For inference, we use the Gaussian mixture model to de-
+termine the local maximum and hence the potential occur-
+ring scales. Given observations x, the distribution, param-
+eterized by θ, can be decomposed into K mixture compo-
+nents:
+
+p(θ|x) =
+
+φiN (µi, Σi),
+
+(4)
+
+K
+(cid:88)
+
+i=1
+
+2Here we assume the minimum and maximum face sizes are 32 and
+2048, respectively, if the higher dimension of an image is resized to 2048.
+In exponential expression, the face size is divided into six main bins from
+25 = 32 to 211 = 2048, the denotation of which will be used later.
+
+where the i-th component is characterized by Gaussian dis-
+tributions with weights φi, means µi and covariance matri-
+ces Σi. Here K = {1, ..., 6} denotes selected scale num-
+bers of six main scales from 25 to 211 and the scale selec-
+tion is determined by the threshold φi of each component.
+Finally the best ﬁtting model with a speciﬁc K is used.
+
+where x and y are spatial indeces in the feature map3.
+
+The essence behind our RSA unit is to derive a mapping
+RSA(·) (cid:55)→ f (·) to constantly predict smaller-scale features
+based on the current map instead of feeding the network
+with inputs of different scales for multiple times. In an in-
+formal mathematical expression, we have:
+
+3.2. Recurrent Scale Approximation (RSA) Unit
+
+The recurrent scale approximation (RSA) unit is devised
+to predict feature maps at smaller scales given a map at
+the largest scale. Fig. 2 depicts the RSA unit. The net-
+work architecture follows a build-up similar to the resid-
+ual network [13], where we reduce the number of channels
+in each convolutional layer to half of the original version
+for time efﬁciency. The structure details are shown in Sec-
+tion 4.1. Given an input image I, I m denotes the down-
+sampled result of the image with a ratio of 1/2m, where
+m ∈ {0, · · · , M } is the downsample level and M = 5.
+Note that I 0 is the original image. Therefore, there are
+six scales in total, corresponding to the six main scale
+ranges deﬁned in the scale-forecast network (see Section
+3.1). Given an input image I m, we deﬁne the output fea-
+ture map of layer res2b as:
+
+f (I m) = Gm,
+
+(5)
+
+where f (·) stands for a set of convolutions with a total stride
+of 8 from the input image to the output map. The set of
+feature maps Gm at different scales serves as the ground
+truth supervision of the recurrent unit.
+
+The RSA module RSA(·) takes as input the feature map
+of the largest scale G0 at ﬁrst, and repeatedly outputs a map
+with half the size of the input map:
+
+h(0) = F 0 = G0,
+h(m) = RSA(cid:0)h(m−1)|w(cid:1) = F m.
+
+where F m is the resultant map after being rolled out m
+times and w represents the weights in the RSA unit. The
+RSA module has four convolutions with a total stride of 2
+(1,2,1,1) and their kernal sizes are (1,3,3,1). The loss is
+therefore the l2 norm between prediction F m and supervi-
+sion Gm across all scales:
+
+LRSA =
+
+1
+2M
+
+M
+(cid:88)
+
+m=1
+
+(cid:13)
+(cid:13)F m − Gm(cid:13)
+2
+(cid:13)
+
+.
+
+(7)
+
+The gradients in the RSA unit are computed as:
+
+∂LRSA
+∂wxy
+
+∂LRSA
+∂h(m)
+
+·
+
+∂h(m)
+∂wxy
+
+,
+
+=
+
+=
+
+(cid:88)
+
+m
+1
+M
+
+(cid:88)
+
+m
+
+(cid:0)F m − Gm(cid:1) · F m−1
+
+,
+
+xy
+
+(8)
+
+RSA(cid:0)h(m−1)(cid:1) = f (I m) = Gm,
+
+lim
+0→m
+
+to indicate the functionality of RSA: an approximation to
+f (·) from the input at the largest scale 0 to its desired level
+m. The computation cost of generating feature map F m
+using RSA is much lower than that of resizing the image
+and feeding into the network (i.e., f (I m) through conv1
+to res2b; see quantitative results in Section 4.4).
+
+During inference, we ﬁrst obtain the possible scales of
+the input from the scale-forecast network. The image is
+then resized accordingly so that the smallest scale (corre-
+sponding to the largest feature map) is resized to the range
+of [64, 128]. The feature maps at other scales are thereby
+predicted by the output of RSA unit via Eqn (6). Fig. 3 de-
+picts a rolled-out version of RSA to predict feature maps of
+smaller scales compared with the ground truth. We can ob-
+serve from both the error rate and predicted feature maps in
+each level that RSA is capable of approximating the feature
+maps at smaller scales.
+
+(6)
+
+Figure 3. RSA by rolling out the learned feature map at smaller
+scales. The number in the orange box indicates the average mean
+squared error between ground truth and RSA’s prediction.
+
+3.3. Landmark Retracing Network
+
+In the task of face detection, as illustrated in Fig. 2, the
+landmark retracing network (LRN) is designed to adjust the
+conﬁdence of identifying a face and to dispose of false pos-
+itives by learning individual conﬁdence of each regressed
+landmark. Instead of directly using the ground truth loca-
+tion of landmarks, we formulate such a feature learning of
+landmarks based on the regression output of landmarks in
+the ﬁnal RPN layer.
+
+Speciﬁcally, given the feature map F at a speciﬁc scale
+from RSA (m is dropped for brevity), we ﬁrst feed it into
+the res3a layer. There are two branches at the output:
+
+3For brevity of discussion, we ignore the spatial weight sharing of con-
+volution here. Note that the weight update in wxy also includes the loss
+from the landmark retracing network.
+
+one is the landmark feature set P to predict the individual
+score of each landmark in a spatial context. The number of
+channels in the set equals to the number of landmarks. An-
+other branch is continuing the standard RPN [27] pipeline
+(res3b-3c) which generates a set of anchors in the ﬁnal
+RPN layer. Let pi = [pi0, pi1, · · · , pik, · · · ] denote the clas-
+siﬁcation probability in the ﬁnal RPN layer, where k is the
+class index and i is the spatial location index on the map;
+tij denotes the regression target (offset deﬁned in [10]) of
+the j-th landmark in the i-th anchor, where j = {1, · · · , 5}
+is the landmark index. Note that in face detection task, we
+only have one anchor so that pi contains one element. In
+the traditional detection-to-landmark formulation, the fol-
+lowing loss, which consists of two heads (i.e., classiﬁcation
+and regression), is optimized:
+
+− log pik∗ + δ(k∗)S(ti − t∗
+
+i ),
+
+(cid:88)
+
+i
+
+where δ(·) is the indicator function; k∗ denotes the correct
+label of anchor i and we have only two classes here (0 for
+background, 1 for positive); t∗
+i is the ground truth regression
+target and S(·) is the smoothing l1 loss deﬁned in [10].
+
+However, as illustrated in Fig. 2(c), using the conﬁdence
+of anchor pik∗ alone results in false positives in some cases,
+which inspires us to take advantage of the landmark features
+based on the regression output. The revised classiﬁcation
+output, ptrace
+(tij), now considers both the feature in the
+ﬁnal RPN layer as well as those in the landmark feature set:
+
+ik∗
+
+(cid:40)
+
+ptrace
+ik∗
+
+(tij) =
+
+pi0,
+max pool(pi1, pland
+
+ij
+
+k∗ = 0,
+), k∗ = 1,
+
+(9)
+
+ij
+
+where pland
+is the classiﬁcation output of point j from the
+landmark feature set P and it is determined by the regres-
+sion output:
+
+ij = P(cid:0)r(tij)(cid:1),
+pland
+where r(·) stands for a mapping from the regression target
+to the spatial location on map P. To this end, we have the
+revised loss for our landmark retracing network:
+
+(10)
+
+LLRN =
+
+− log ptrace
+
+ik∗
+
+(tij) + δ(k∗)
+
+S(tij − t∗
+
+ij)
+
+(cid:88)
+
+j
+
+(cid:21)
+.
+
+(cid:20)
+
+(cid:88)
+
+i
+
+(11)
+Apart from the detection-to-landmark design as previous
+work did, our retracing network also fully leverages the
+feature set of landmarks to help rectify the conﬁdence of
+identifying a face. This is achieved by utilizing the regres-
+sion output tij to ﬁnd the individual score of each landmark
+on the preceding feature map P. Such a scheme is in a
+landmark-to-detection spirit.
+
+Note that the landmark retracing network is trained end-
+to-end with the RSA unit stated previously. The anchor as-
+sociated with each location i is a square box of ﬁxed size
+
+√
+
+2. The landmark retracing operation is performed only
+64
+when the anchor is a positive sample. The base landmark lo-
+cation with respect to the anchor is determined by the aver-
+age location of all faces in the training set. During test, LRN
+is fed with feature maps at various scales and it treats each
+scale individually. The ﬁnal detection result is generated
+after performing NMS among results from multi-scales.
+
+3.4. Discussion
+
+Comparison to RPN. The region proposal network [27]
+takes a set of predeﬁned anchors of different sizes as input
+and conducts a similar detection pipeline. Anchors in RPN
+vary in size to meet the multi-scale training constraint. Dur-
+ing one iteration of update, it has to feed the whole image
+of different sizes (scales) from the start to the very end of
+the network. In our framework, we resize the image once
+to make sure at least one face falls into the size of [64, 128],
+thus enforcing the network to be trained within a certain
+range of scales. In this way, we are able to use only one
+anchor of ﬁxed size. The multi-scale spirit is embedded
+in an RSA unit, which directly predicts the feature maps
+at smaller scales. Such a scheme saves parameters signiﬁ-
+cantly and could be considered as a ‘semi’ multi-scale train-
+ing and ‘fully’ multi-scale test.
+
+Prediction-supervised or GT-supervised in landmark
+feature sets. Another comment on our framework is the su-
+pervision knowledge used in training the landmark features
+P. The features are learned using the prediction output of
+regression targets tij instead of the ground truth targets t∗
+ij.
+∼ t∗
+In our preliminary experiments, we ﬁnd that if pland
+i ,
+the activation in the landmark features would be heavily
+suppressed due to the misleading regression output by tij;
+however, if we relax the learning restriction and accept ac-
+tivations within a certain range of misleading locations, i.e.,
+pland
+∼ ti, the performance can be boosted further. Using
+i
+the prediction of regression as supervision in the landmark
+feature learning makes sense since: (a) we care about the ac-
+tivation (classiﬁcation probability) rather than the accurate
+location of each landmark; (b) ti and pland
+share similar
+learning workﬂow and thus the location of ti could better
+match the activation pland
+in P.
+
+i
+
+i
+
+i
+
+4. Experiments
+
+In this section we ﬁrst conduct the ablation study to ver-
+ify the effectiveness of each component in our method and
+compare exhaustively with the baseline RPN [27]; then we
+compare our algorithm with state-of-the-art methods in face
+detection and object detection on four popular benchmarks.
+
+4.1. Setup and Implementation Details
+
+Annotated Faces in the Wild (AFW) [37] contains 205
+images for evaluating face detectors’ performance. How-
+ever, some faces are missing in the annotations and could
+
+trigger the issue of false positives, we relabel those miss-
+ing faces and report the performance difference in both
+cases. Face Detection Data Set and Benchmark (FDDB)
+[14] has 5,171 annotated faces in 2,845 images. It is larger
+and more challenging than AFW. Multi-Attribute Labelled
+Faces (MALF) [32] includes 5,250 images with 11,931 an-
+notated faces collected from the Internet. The annotation set
+is cleaner than that of AFW and it is the largest benchmark
+for face detection.
+
+Our training set has 184K images, including 171K im-
+ages collected from the Internet and 12.9K images from the
+training split of Wider Face Dataset [33]. All faces are la-
+belled with bounding boxes and ﬁve landmarks. The struc-
+ture of our model is a shallow version of the ResNet [13]
+where the ﬁrst seven ResNet blocks are used, i.e., from
+conv1 to res3c. We use this model in scale-forecast net-
+work and LRN. All numbers of channels are set to half of
+the original ResNet model, for the consideration of time
+efﬁciency. We ﬁrst train the scale-forecast network and
+then use the output of predicted scales to launch the RSA
+unit and LRN. Note that the whole system (RSA+LRN) is
+trained end-to-end and the model is trained from scratch
+without resorting to a pretrained model since the number of
+channels is halved. The ratio of the positive and the negative
+is 1 : 1 in all experiments. The batch size is 4; base learning
+rate is set to 0.001 with a decrease of 6% every 10,000 it-
+erations. The maximum training iteration is 1,000,000. We
+use stochastic gradient descent as the optimizer.
+
+4.2. Performance of Scale-forecast Network
+
+(a) AFW
+
+(b) FDDB
+
+(c) MALF
+
+Figure 4. Recall v.s.
+the number of predicted scales per face on
+three benchmarks. Our scale-forecast network recalls almost all
+scales when the number of predicted scale per face is 1.
+
+The scale-forecast network is of vital importance to the
+computational cost and accuracy in the networks after-
+wards. Fig. 4 reports the overall recall with different num-
+bers of predicted scales on three benchmarks. Since the
+number of faces and the number of potential scales in the
+image vary across datasets, we use the number of predicted
+scales per face (x, total predicted scales over total number
+of faces) and a global recall (y, correct predicted scales over
+all ground truth scales) as the evaluation metric. We can
+observe from the results that our trained scale network re-
+calls almost 99% at x = 1, indicating that on average we
+only need to generate less than two predictions per image
+and that we can retrieve all face scales. Based on this prior
+
+Figure 5. Investigation on the source layer to branch out the RSA
+unit. For each case, we report the error rate v.s.
+the level of
+down-sampling ratio in the unit. We can conclude that the deeper
+the RSA is branched out, the worse the feature approximation at
+smaller scales will be.
+
+knowledge, during inference, we set the threshold for pre-
+dicting potential scales of the input so that it has approxi-
+mately two predictions.
+
+4.3. Ablative Evaluation on RSA Unit
+
+Fig. 5 investigates the effect of appending the RSA unit
+to different layers. For each case, the error rate between the
+ground truth and corresponding prediction is computed. We
+deﬁne the error rate (ER) on level m as:
+
+ERm =
+
+(cid:0)(F (m) − G(m))./G(m)(cid:1)2
+
+,
+
+(12)
+
+1
+N
+
+N
+(cid:88)
+
+i
+
+where ‘./’ implies an element-wise division between maps;
+N is the total number of samples. We use a separate val-
+idation set to conduct this experiment. The image is ﬁrst
+resized to higher dimension being 2048 and the RSA unit
+predicts six scales deﬁned in Section 3.1 (1024, 512, 256,
+128 and 64). Ground truth maps are generated accordingly
+as we iteratively resize the image (see Fig. 3). There are two
+remarks regarding the result:
+
+First, feature depth matters. Theoretically RSA can han-
+dle all scales of features in a deep CNN model and therefore
+can be branched out at any depth of the network. How-
+ever, results from the ﬁgure indicate that as we plug RSA
+at deeper layers, its performance decades. Since features
+at deeper layers are more sparse and abstract, they barely
+contain information for RSA to approximate the features
+at smaller scales. For example, in case final feature
+which means RSA is plugged at the ﬁnal convolution layer
+after res3c, the error rate is almost 100%, indicating
+RSA’s incapability of handling the insufﬁcient information
+in this layer. The error rate decreases in shallower cases.
+
+However, the computation cost of RSA at shallow layers
+is much higher than that at deeper layers, since the stride is
+
+Table 1. The proposed algorithm is more computationally efﬁcient and accurate by design than baseline RPN. Theoretical operations of
+each component are provided, denoted as ‘Opts. (VGA input)’ below. The minimum operation in each component means only the scale-
+forecast network is used where no face appears in the image; and the maximum operation indicates the amount when faces appear at all
+scales. The actual runtime comparison between ours and baseline RPN is reported in Table 2.
+
+Component
+
+Scale-forecast
+
+RSA
+
+LRN
+
+Total Pipeline
+
+Baseline RPN
+
+Structure
+Opts. (VGA input)
+
+tiny ResNet-18
+95.67M
+
+4-layer FCN
+0 to 182.42M
+
+tiny ResNet-18
+0 to 1.3G
+
+-
+95.67M to 1.5G
+
+single anchor multi anchors
+
+AP@AFW
+Recall@FDDB1%fpi
+Recall@MALF1%fpi
+
+-
+-
+-
+
+-
+-
+-
+
+-
+-
+-
+
+99.96%
+91.92%
+90.09%
+
+1.72G
+
+99.90%
+90.61%
+88.81%
+
+1.31G
+
+98.29%
+86.89%
+84.65%
+
+smaller and the input map of RSA is thus larger. The path
+during one-time forward from image to the input map right
+before RSA is shorter; and the rolling out time increases
+accordingly. Therefore, the trade-off is that we want to
+plug RSA at shallow layers to ensure a low error rate and
+at the same time, to save the computational cost. In prac-
+tice we choose case res2b to be the location where RSA
+is branched out. Most of the computation happens before
+layer res2b and it has an acceptable error rate of 3.44%.
+We use this setting throughout the following experiments.
+
+Second, butterﬂy effect exists. For a particular case, as
+the times of the recurrent operation increase, the error rate
+goes up due to the cumulative effect of rolling out the pre-
+dictions. For example, in case res2b, the error rate is
+3.44% at level m = 1 and drops to 5.9% after rolling out
+ﬁve times. Such an increase is within the tolerance of the
+system and still sufﬁces the task of face detection.
+
+4.4. Our Algorithm vs. Baseline RPN
+
+We compare our model (denoted as RSA+LRN), a com-
+bination of the RSA unit and a landmark retracing net-
+work, with the region proposal network (RPN) [27].
+In
+the ﬁrst setting, we use the original RPN with multiple an-
+chors (denoted as RPN m) to detect faces of various scales.
+In the second setting, we modify the number of anchors
+to one (denoted as RPN s); the anchor can only detect
+faces in the range from 64 to 128 pixels. To capture all
+faces, it needs to take multiple shots in an image pyra-
+mid spirit. The network structurse of both baseline RPN
+and our LRN descend from ResNet-18 [13]. Anchor sizes
+in the ﬁrst setting RPN m are 32
+2
+and they are responsible for detecting faces in the range
+of [32, 64), [64, 128), · · · , [1024, 2048], respectively. In the
+second setting RPN s, we ﬁrst resize the image length to
+64, 256, · · · , 2048, then test each scale individually and
+merge all results through NMS [1].
+
+2, · · · , 1024
+
+2, 64
+
+√
+
+√
+
+√
+
+Table 1 shows the theoretical computation cost and test
+performance of our algorithm compared with baseline RPN.
+We can observe that RPN s needs six shots for the same
+image during inference and thus the computation cost is
+much larger than ours or RPN m; Moreover, RPN m per-
+forms worse than the rest two for two reasons: First, the
+
+Table 2. Test runtime (ms per image) of RSA compared with RPN
+on three benchmarks. We conduct experiments of each case ﬁve
+times and report the average result to avoid system disturbance.
+
+Speed
+
+AFW
+FDDB
+MALF
+
+Average
+
+LRN+RSA
+
+LRN
+
+RPN s
+
+RPN m
+
+13.95
+11.24
+16.38
+
+14.50
+
+28.84
+27.10
+29.73
+
+26.85
+25.01
+27.37
+
+28.78
+
+26.52
+
+18.92
+18.34
+19.37
+
+18.99
+
+receptive ﬁeld is less than 500 and therefore it cannot see
+the context of faces larger than 500 pixels; second, it is hard
+for the network (its model capacity much less than the orig-
+inal ResNet [13]) to learn the features of faces in a wide
+scale range from 32 to 2048.
+
+Table 2 depicts the runtime comparison during test. The
+third column LRN means without using the RSA unit. Our
+method runs fast enough compared with its counterparts for
+two reasons. First, there are often one or two valid scales in
+the image, and the scale-forecast network can automatically
+select some particular scales, and ignore all the other invalid
+ones in the multi-scale test stage; second, the input of LRN
+descends from the output of RSA to predict feature maps at
+smaller scales; it is not necessary to compute feature maps
+of multiple scales in a multi-shot manner as RPN m does.
+
+4.5. Face Detection
+
+Fig. 7 shows the comparison against other approaches
+on three benchmarks. On AFW, our algorithm achieves
+an AP of 99.17% using the original annotation and an AP
+of 99.96% using the revised annotation 7(c). On FDDB,
+RSA+LRN recalls 93.0% faces with 50 false positives 7(a).
+On MALF, our method recalls 82.4% faces with zero false
+positive 7(d). It should be noticed that the shape and scale
+deﬁnition of bounding box on each benchmark varies. For
+instance, the annotation on FDDB is ellipse while others are
+rectangle. To address this, we learn a transformer to ﬁt each
+annotation from the landmarks. This strategy signiﬁcantly
+enhances performance in the continuous setting on FDDB.
+
+Figure 6. Our proposed model can detect faces at various scales, including the green annotations provided in AFW [37] as well as faces
+marked in red that are of small sizes and not labeled in the dataset.
+
+(a) FDDB discrete
+
+(b) FDDB continuous
+
+(c) AFW
+
+(d) MALF
+
+Figure 7. Comparison to state-of-the-art approaches on face detection benchmarks. The proposed algorithm (Scale-forecast network with
+RSA+LRN, tagged by LRN+RSA) outperforms other methods by a large margin. ‘revised gt.’ and ’original gt.’ in AFW stand for fully
+annotated faces by us and partially labeled annotations provided by the dataset, respectively.
+
+Table 3. Recall (%) vs.
+per image) breakdown on ILSVRC DET val2.
+
+the number of proposals and Speed (ms
+
+Recall
+
+300
+
+1000
+
+2000
+
+Speed
+
+Original RPN
+Single-scale RPN
+RSA+RPN
+
+93.5
+94.4
+94.4
+
+97.3
+97.2
+97.2
+
+97.7
+98.0
+98.0
+
+158 ms
+249 ms
+124 ms
+
+100
+
+88.7
+89.6
+89.1
+
+4.6. RSA on Generic Object Proposal
+
+We now verify that the scale approximation learning by
+RSA unit also generalizes comparably well on the generic
+region proposal task. Region proposal detection is a ba-
+sic stage for generic object detection task and is more difﬁ-
+cult than face detection. ILSVRC DET [6] is a challenging
+dataset for generic object detection. It contains more than
+300K images for training and 20K images for validation.
+We use a subset (around 170k images) of the original train-
+ing set for training, where each category has at most 1000
+samples; for test we use the val2 split [11] with 9917 im-
+ages. We choose the single anchor RPN with ResNet-101
+as the baseline. RSA unit is set after res3b3. The anchors
+2 squared, 128×256 and 256×128. During
+are of size 128
+training, we randomly select an object and resize the image
+so that the object is rescaled to [128, 256]. Scale-forecast
+network is also employed to predict the higher dimension
+of objects in the image.
+
+√
+
+Recalls with different number of proposals are shown in
+Table 3. The original RPN setting has 18 anchors with 3 as-
+
+pect ratios and 6 scales. Without loss of recall, RPN+RSA
+reduces around 61.05% computation cost compared with
+the single-scale RPN, when the number of boxes is over
+100. RPN+RSA is also more efﬁcient and recalls more ob-
+jects than original RPN. Our model and the single-anchor
+RPN both perform better than the original RPN. This ob-
+servation is in accordance with the conclusion in face de-
+tection. Overall, our scheme of using RSA plus LRN com-
+petes comparably with the standard RPN method in terms
+of computation efﬁciency and accuracy.
+
+5. Conclusion
+
+In this paper, we prove that deep CNN features of an im-
+age can be approximated from a large scale to smaller scales
+by the proposed RSA unit, which signiﬁcantly accelerates
+face detection while achieving comparable results in object
+detection.
+In order to make the detector faster and more
+accurate, we devise a scale-forecast network to predict the
+potential object scales. We further design a landmark retrac-
+ing network to fuse global and local scale information to en-
+hance the predictor. Experimental results show that our al-
+gorithm signiﬁcantly outperforms state-of-the-art methods.
+Future work includes exploring RSA on generic object de-
+tection task. Representation approximation between video
+frames is also an interesting research avenue.
+
+References
+
+[1] B. Alexe, T. Deselares, and V. Ferrari. Measuring the object-
+
+ness of image windows. IEEE Trans on PAMI, 2012.
+
+[2] D. Chen, G. Hua, F. Wen, and J. Sun. Supervised transformer
+network for efﬁcient face detection. In ECCV, pages 122–
+138. Springer, 2016.
+
+[3] D. Chen, S. Ren, Y. Wei, X. Cao, and J. Sun.
+
+Joint cas-
+cade face detection and alignment. In ECCV, pages 109–122.
+Springer, 2014.
+
+[4] J. Dai, Y. Li, K. He, and J. Sun. R-fcn: Object detection
+via region-based fully convolutional networks. In D. D. Lee,
+M. Sugiyama, U. V. Luxburg, I. Guyon, and R. Garnett, edi-
+tors, Advances in Neural Information Processing Systems 29,
+pages 379–387. Curran Associates, Inc., 2016.
+
+[5] N. Dalal and B. Triggs. Histograms of oriented gradients
+for human detection. In IEEE Computer Society Conference
+on Computer Vision & Pattern Recognition, pages 886–893,
+2005.
+
+[6] J. Deng, W. Dong, R. Socher, L.-J. Li, K. Li, and L. Fei-Fei.
+ImageNet: A Large-Scale Hierarchical Image Database. In
+CVPR, 2009.
+
+[7] P. Doll´ar, R. Appel, S. Belongie, and P. Perona. Fast feature
+pyramids for object detection. IEEE Transactions on Pattern
+Analysis and Machine Intelligence, 36(8):1532–1545, 2014.
+[8] S. S. Farfade, M. J. Saberian, and L.-J. Li. Multi-view face
+detection using deep convolutional neural networks. In Pro-
+ceedings of the 5th ACM on International Conference on
+Multimedia Retrieval, pages 643–650. ACM, 2015.
+
+[9] P. F. Felzenszwalb, R. B. Girshick, and D. Mcallester. Cas-
+cade object detection with deformable part models. In CVPR.
+IEEE, 2010.
+
+[10] R. Girshick. Fast R-CNN. In ICCV, 2015.
+[11] R. Girshick, J. Donahue, T. Darrell, and J. Malik. Rich fea-
+ture hierarchies for accurate object detection and semantic
+segmentation. In CVPR, pages 580–587, 2014.
+
+[12] Z. Hao, Y. Liu, H. Qin, and J. Yan. Scale-aware face detec-
+
+tion. In CVPR 2017, 2017.
+
+[13] K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learning
+
+for image recognition. In CVPR, 2016.
+
+[14] V. Jain and E. Learned-Miller. Fddb: A benchmark for face
+detection in unconstrained settings. Technical Report UM-
+CS-2010-009, University of Massachusetts, Amherst, 2010.
+[15] B. Leng, Y. Liu, K. Yu, X. Zhang, and Z. Xiong. 3d object
+understanding with 3d convolutional neural networks. Infor-
+mation Sciences, 366:188–201, 2016.
+
+[16] H. Li, Z. Lin, X. Shen, J. Brandt, and G. Hua. A convolu-
+tional neural network cascade for face detection. In CVPR,
+pages 5325–5334, 2015.
+
+[17] H. Li, Y. Liu, W. Ouyang, and X. Wang. Zoom out-and-in
+network with recursive training for object proposal. arXiv
+preprint arXiv:1702.05711, 2017.
+
+[18] H. Li, Y. Liu, X. Zhang, Z. An, J. Wang, Y. Chen, and
+J. Tong. Do we really need more training data for object lo-
+calization. In IEEE International Conference on Image Pro-
+cessing, 2017.
+
+[19] Y. Li, B. Sun, T. Wu, and Y. Wang. Face detection with end-
+to-end integration of a convnet and a 3d model. In ECCV,
+pages 420–436. Springer, 2016.
+
+[20] T.-Y. Lin, P. Doll´ar, R. Girshick, K. He, B. Hariharan, and
+
+S. Belongie. Feature pyramid networks for object detection.
+arXiv preprint arXiv:1612.03144, 2016.
+
+[21] W. Liu, D. Anguelov, D. Erhan, C. Szegedy, S. Reed, C.-Y.
+Fu, and A. C. Berg. Ssd: Single shot multibox detector. In
+ECCV, pages 21–37. Springer, 2016.
+
+[22] Y. Liu, H. Li, and X. Wang. Learning deep features via con-
+generous cosine loss for person recognition. arXiv preprint
+arXiv:1702.06890, 2017.
+
+[23] Y. Liu, J. Yan, and W. Ouyang. Quality aware network for
+
+set to set recognition. In CVPR, 2017.
+
+[24] D. G. Lowe.
+
+invariant keypoints.
+sion, 60(2):91–110, 2004.
+
+Distinctive image features from scale-
+International journal of computer vi-
+
+[25] R. Ranjan, V. M. Patel, and R. Chellappa. Hyperface: A deep
+multi-task learning framework for face detection, landmark
+localization, pose estimation, and gender recognition. arXiv
+preprint arXiv:1603.01249, 2016.
+
+[26] J. Redmon, S. Divvala, R. Girshick, and A. Farhadi. You
+only look once: Uniﬁed, real-time object detection. In Pro-
+ceedings of the CVPR, pages 779–788, 2016.
+
+[27] S. Ren, K. He, R. Girshick, and J. Sun. Faster R-CNN:
+Towards Real-Time Object Detection with Region Proposal
+Networks. In NIPS, 2015.
+
+[28] P. Sermanet, D. Eigen, X. Zhang, M. Mathieu, R. Fergus,
+and Y. LeCun. Overfeat: Integrated recognition, localization
+and detection using convolutional networks. In ICLR, 2014.
+[29] X. Sun, P. Wu, and S. C. Hoi. Face detection using deep
+learning: An improved faster rcnn approach. arXiv preprint
+arXiv:1701.08289, 2017.
+
+[30] P. Viola and M. J. Jones. Robust real-time face detection.
+International journal of computer vision, 57(2):137–154,
+2004.
+
+[31] B. Yang, J. Yan, Z. Lei, and S. Z. Li. Convolutional channel
+features. In Proceedings of the IEEE international confer-
+ence on computer vision, pages 82–90, 2015.
+
+[32] B. Yang, J. Yan, Z. Lei, and S. Z. Li. Fine-grained evaluation
+on face detection in the wild. In Automatic Face and Gesture
+Recognition (FG), 11th IEEE International Conference on.
+IEEE, 2015.
+
+[33] S. Yang, P. Luo, C. C. Loy, and X. Tang. Wider face: A face
+
+detection benchmark. In CVPR, 2016.
+
+[34] F. Yu, W. Li, Q. Li, Y. Liu, X. Shi, and J. Yan. Poi: Multiple
+object tracking with high performance detection and appear-
+ance feature. In ECCV, pages 36–42. Springer International
+Publishing, 2016.
+
+[35] J. Yu, Y. Jiang, Z. Wang, Z. Cao, and T. Huang. Unitbox:
+In Proceedings of
+An advanced object detection network.
+the 2016 ACM on Multimedia Conference, pages 516–520.
+ACM, 2016.
+
+[36] X. Zeng, W. Ouyang, J. Yan, H. Li, T. Xiao, K. Wang, Y. Liu,
+Y. Zhou, B. Yang, Z. Wang, et al. Crafting gbd-net for object
+detection. arXiv preprint arXiv:1610.02579, 2016.
+
+[37] X. Zhu and D. Ramanan. Face detection, pose estimation,
+and landmark localization in the wild. In CVPR, pages 2879–
+2886, 2012.
+

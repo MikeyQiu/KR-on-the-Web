@@ -1,0 +1,3302 @@
+CuMF_SGD: Fast and Scalable Matrix Factorization
+
+Xiaolong Xie∗1, Wei Tan2, Liana L. Fong2, and Yun Liang1
+
+1Center for Energy-eﬃcient Computing and Applications, School of EECS, Peking University, China
+xiexl pku, ericlyun@pku.edu.cn
+2IBM Thomas J. Watson Research Center, New York, U.S.A
+wtan, llfong@us.ibm.com
+
+6
+1
+0
+2
+ 
+v
+o
+N
+ 
+0
+1
+ 
+ 
+]
+
+G
+L
+.
+s
+c
+[
+ 
+ 
+3
+v
+8
+3
+8
+5
+0
+.
+0
+1
+6
+1
+:
+v
+i
+X
+r
+a
+
+ABSTRACT
+Matrix factorization (MF) has been widely used in recom-
+mender systems, database systems, topic modeling, word
+embedding and others. Stochastic gradient descent (SGD)
+is popular in solving MF problems because it can deal with
+large data sets and is easy to do incremental learning. We
+observed that SGD for MF is memory bound. Meanwhile,
+single-node CPU systems with caches perform well only for
+small data sets; distributed systems have higher aggregated
+memory bandwidth but suﬀer from relatively slow network
+connection. This observation inspires us to accelerate MF
+by utilizing GPUs’s high memory bandwidth and fast intra-
+node connection.
+
+We present cuMF SGD, a CUDA-based SGD solution
+for large-scale MF problems. On a single GPU, we de-
+sign two workload scheduling schemes (batch-Hogwild! and
+wavefront-update) that fully exploit the massive amount
+of cores. Especially, batch-Hogwild!, a vectorized version
+of Hogwild!, overcomes the issue of memory discontinuity.
+We develop highly-optimized kernels for SGD update, lever-
+aging cache, warp-shuﬄe instructions, half-precision ﬂoats,
+etc. We also design a partition scheme to utilize multi-
+ple GPUs while addressing the well-known convergence is-
+sue when parallelizing SGD. Evaluations on three data sets
+with only one Maxwell or Pascal GPU show that cuMF SGD
+runs 3.1X-28.2X as fast compared with state-of-art CPU
+solutions on 1-64 CPU nodes. Evaluations also show that
+cuMF SGD scales well with multiple GPUs on large data
+sets. Finally, we believe that the lessons learned from build-
+ing cuMF SGD are applicable to other machine learning al-
+gorithms on, e.g., (1) embedding layers in deep learning and
+(2) bipartite graph.
+
+1.
+
+INTRODUCTION
+
+Matrix factorization (MF) has been widely used in rec-
+ommender systems [1] by many companies (i.e. Amazon,
+Netﬂix, Facebook [2] and Spotify). It can also be used in
+topic modeling, word embedding [3], database system [4],
+
+∗Work done when the author was with IBM.
+
+and has a natural connection to the embedding layers in
+deep neural network. Let us use the recommender system
+as example. Figure 1 shows a rating matrix R of m×n, with
+sparse ratings from m users to n items. We assume that R
+can be factorized into the multiplication of two low-rank fea-
+ture matrices P (m×k) and Q (k ×n), such that R ≈ P ×Q.
+The derived feature matrices P and Q can be used to pre-
+dict the missing ratings in R, or as features of corresponding
+users/items in downstream machine learning tasks. Matrix
+factorization often involves large data sets. For example,
+the number of users/items may range from thousands to
+hundreds-of-millions, and the number of observed samples
+in R may range from millions to tens-of-billions [2]. There-
+fore, there is a need to scale and speed up large-scale matrix
+factorization.
+
+Figure 1: An example of matrix factorization where
+m=4, n=4, k=2.
+
+There are mainly three algorithms to solve matrix factor-
+ization, i.e., coordinate gradient descent(CGD), alternate
+least square (ALS), and stochastic gradient descent (SGD).
+As previous works show that CGD is prone to reach local
+optima [5], we do not focus on it in this paper. ALS is
+easy to parallelize, and able to deal with implicit feedback
+such as purchase history [1]. Meanwhile, SGD usually con-
+verges faster because it is not as computation-intensive as
+ALS; SGD is also more applicable in incremental learning
+settings where new ratings are continuously fed in. With our
+previous work already tackled ALS [6], we focus on SGD in
+this paper.
+
+The optimization work on matrix factorization contains
+two streams: algorithm and system. The algorithmic stream
+tries to optimize update schemes such as learning rate in gra-
+dient descent, in order to reduce the number of epochs
+(an epoch is a full pass through the training set) needed
+to converge [7]. The system stream tries to accelerate the
+computation, in order to run each epoch faster [6, 5,
+8, 9, 10, 11]. We focus the system stream and the pro-
+posed techniques can be combined with other algorithmic
+optimizations. Our research is based on the following obser-
+vations.
+
+1
+
+Observation 1. MF with SGD is memory bound.
+When solving MF with SGD, in each step of an epoch,
+we randomly select one observed sample, read the corre-
+sponding features p and q, do an inner product of them,
+update p and q, and eventually write them back (details to
+be given in Section 2.2). Obviously, the compute oper-
+ations per byte is very low. For example,, if we use
+single-precision (4 byte ﬂoat) and k = 128, one SGD up-
+date involves 2432 bytes memory access (384 bytes for R +
+2048 bytes for p&q read/write) and 1536 ﬂoating point op-
+erations (256 ops for dot product and 1280 ops for feature
+update). That is, the ﬂops/byte ratio is 1536/2432 ≈ 0.63.
+To put this number into perspective, a modern processor
+can achieve 600 Gﬂops/s and memory bandwidth 60 GB/s.
+This means that the operation’s ﬂops/byte ratio has to be
+as large as 600/60 = 10 to saturate the computation units.
+The low ﬂops/byte ratio of MF with SGD indicates that, its
+performance is bounded by memory bandwidth.
+
+State-of-art SGD-based MF solutions are based on ei-
+ther shared-memory multi-threading [5] or distributed sys-
+tems [10]. We observed that neither of them is capable of
+oﬀering sustained high memory bandwidth to MF.
+
+Observation 2. Single-node CPU systems with
+caching achieve high memory bandwidth only for
+small data sets. Distributed systems have higher
+theoretical bandwidth, but handicapped by the rel-
+atively weak network connection.
+
+Shared-memory CPU systems [5, 12, 13] rely heavily on
+cache to achieve high memory throughput. To understand
+this, we evaluate a single-node and shared-memory MF li-
+brary LIBMF [5] with three data sets (details shown in Sec-
+tion 5). As seen from Figure 2(a), on the small Netﬂix data
+set, LIBMF achieves an observed 194 GB/s bandwidth1,
+much larger than the actual system DRAM bandwidth (∼ 60
+GB/s). However, on a much larger Hugewiki data set, the
+achieved memory bandwidth drops by 45%, to 106 GB/s.
+This is because that Hugewiki data set is large enough to
+vanish a lot of data locality. This evaluation demonstrates
+that single-node CPU systems cannot achieve high memory
+bandwidth when solving large-scale MF problems.
+
+Distributed systems are frequently used to accelerate time-
+consuming applications [14, 15]. Distributed systems can
+aggregate the memory bandwidth and caches on multiple
+nodes. However, SGD is inherently sequential and conse-
+quently diﬀerent nodes need to reconcile the parameters at
+the end of each epoch. As a result, despite of the high ag-
+gregated memory bandwidth, the performance is bounded
+by the limited network bandwidth between computer nodes.
+Figure 2(b) evaluates NOMAD [10], a distributed MF sys-
+tem. We measure its memory eﬃciency which is deﬁned as
+the ratio of achieved memory bandwidth to the aggregated
+memory bandwidth of all nodes. The memory eﬃciency of
+NOMAD rapidly decreases when scale to multiple nodes,
+due to the slow over-network communication.
+
+Observation 3. GPUs are with much higher mem-
+ory bandwidth and enjoy fast inter-device connec-
+tion within a single node, making GPU an ideal can-
+didate to accelerate MF.
+
+GPUs are widely used to accelerate applications with large
+data sets, e.g., machine learning and data base systems [16,
+
+1Observed bandwidth means the aggregated bandwidth of-
+fered by DRAM and cache that is observed by the compute
+unit.
+
+Figure 2: (1) The observed memory bandwidth of
+LIBMF drops when solving large data sets. (b) NO-
+MAD achieves lower memory eﬃciency when scaling
+to multiple nodes.
+
+17, 18]. Observations 1-2 inspire us to resort to GPUs for the
+following reasons. Firstly, GPUs are with high oﬀ-chip mem-
+ory bandwidth. For example, NVIDIA Maxwell GPUs has
+theoretical 360 GB/s oﬀ-chip memory bandwidth [19] and
+the newer generation Pascal GPUs provide 780 GB/s [20].
+These are several times to an-order-of-magnitude higher than
+CPUs. Secondly, GPUs do not rely on cache to reduce la-
+tency; instead, they rely on thousands of concurrent threads
+running on hundreds of cores to achieve high through-
+put [21, 22]. Therefore, unlike CPUs, GPUs’ achieved mem-
+ory bandwidth does not degrade when working data set ex-
+ceeds cache capacity, as shown in Figure 2(a). Thirdly, mul-
+tiple GPUs can enjoy very fast interconnect in a node. For
+example, the recent NVLink [23] can oﬀer 160 GB/s per-
+GPU bandwidth to CPU and peer-GPUs. This is much
+faster than PCIe 3.0 (32GB/s for 16x) and InﬁniBand (6.8
+GB/s for 56Gb/s FDR).
+
+Proposed solution: cuMF SGD to accelerate MF
+by utilizing one or multiple GPUs’ high memory
+bandwidth and intra-node connection.
+
+Parallelizing SGD on GPUs is challenging. Due to the
+architecture distinct, simply mapping CPUs’ algorithms to
+GPUs will lead to extremely low performance and subopti-
+mal resources usage [24, 25]. Moreoever, SGD is inherently
+serial, studies [26] have shown that existing MF solutions do
+not scale well using merely 30 threads. Hence, to acceler-
+ate SGD to MF on GPUs, comprehensive understanding of
+GPU architectural features and novel algorithms are needed.
+We present cuMF SGD2, a fast and scalable SGD-based
+MF solution on GPUs.
+Inspired by the lock-free [11] and
+the block-based [27, 5] approaches, and given the separated
+CPU/GPU memory space, cuMF SGD adopts a hybrid two-
+level execution scheme. (1) At the top level, the rating and
+feature matrices are partitioned into blocks and distributed
+to multiple GPUs. (2) At the second level, each GPU does
+SGD with its own partition. One GPU only synchronizes
+with other GPUs through the shared CPU memory, when
+it completes the processing of its partition. Within each
+GPU, the GPU-local data partition is further distributed to
+the hundreds of thread blocks. Each thread block processes
+SGD updates with highly-optimized vector operations. By
+this means, cuMF SGD is able to scale to massive threads on
+multiple GPUs and perform highly-vectorized operations.
+
+The contributions of this paper are as follows:
+
+• Workload characterization. We identify that SGD-
+based MF is bounded by memory bandwidth and syn-
+
+2http://github.com/cumf/cumf_sgd/
+
+2
+
+chronization overhead, instead of computation. We
+also identify the two challenges in implementing MF on
+GPUs using SGD, i.e., workload partitioning to avoid
+conﬂict and eﬃcient update to exploit GPU hardware.
+
+• Optimization on a single GPU. We design two ways
+to partition and schedule the work within a single
+GPU, i.e., (1) matrix blocking-based algorithm with
+lightweight, wave-based scheduling policy, and (2) batch-
+Hogwild! which can be seen as a mini-batch version of
+the original Hogwild! algorithm. Besides the schedul-
+ing schemes, we also develop highly optimized GPU
+kernels for SGD update. We leverage the architectural
+features such as cache, warp shuﬄe instructions, and
+half-precision ﬂoats with 16 bits.
+
+• Deal with big data on multiple GPUs. We design a
+scheme to partition large data sets and solve them on
+multiple GPUs. We overlap data transfer and compu-
+tation to minimize the execution time. We also ana-
+lyze the relation between the number of partitions and
+the number of workers, which impacts the randomness
+of the SGD update, and ultimately the convergence
+speed.
+
+• Evaluation. We implement cuMF SGD in a shared-
+memory system with multiple GPUs. Experimental
+results show that, cuMF SGD with one GPU is 3.1X-
+28.2X as fast compared with state-of-art CPU solu-
+tions on 1-64 CPU nodes. CuMF SGD is also able
+to scale to multiple GPUs and diﬀerent generations
+GPUs.
+
+The remaining of this paper is organized as follows. Sec-
+tion 2 analyzes the targeted GPU architecture, the work-
+load of SGD for MF, and its parallelization schemes. Sec-
+tion 3 presents the single-GPU cuMF SGD, including the
+two scheduling schemes and the GPU kernel. Section 4 dis-
+cusses how to solve large-scale problems by matrix parti-
+tioning. Section 5 presents and discusses experiment results.
+Section 6 discusses the related work and Section 7 concludes
+this paper.
+
+2. BACKGROUND
+
+This section ﬁrst brieﬂy introduces the GPU architecture,
+and the SGD algorithm for matrix factorization. Then, we
+discuss the parallelism schemes for MF with SGD. We ar-
+gue that, the current lock-free and matrix blocking schemes
+are not scalable on massive GPU cores. This leads to the
+innovations to be presented in Sections 3 and 4.
+
+2.1 The Compute Architecture
+
+To overcome the limited memory bandwidth of a single
+CPU node and limited network bandwidth of distributed
+systems, we use a heterogeneous platform with GPUs, as
+shown in Figure 3. GPUs have high intra-device mem-
+ory bandwidth and are connected via PCIe or NVLink [23]
+with high inter-device bandwidth. The CPUs take care of
+data pre-processing, data movement, and top-level workload
+scheduling, while the GPUs deal with feature update with
+massive parallelism.
+
+GPUs are throughput-oriented processors [28] with thou-
+sands of cores and high bandwidth memory (200-800 GB/s).
+
+3
+
+Figure 3: The compute architecture for cuMF SGD.
+
+To fully exploit the performance potential, GPU applica-
+tions need to be carefully designed to exploit the data and
+In the next two sub-sections we
+computation parallelism.
+show that is non-trivial for SGD as SGD is inherently serial.
+
+2.2 Stochastic Gradient Descent
+
+Given m users and n items and a sparse rating matrix R,
+where ru,v indicates the preference or rating of uth user on
+vth item. The goal of matrix factorization is to train a m×k
+feature matrix P and a k × n feature matrix Q such that:
+
+R ≈ P × Q
+
+The training process of matrix factorization is to minimize
+the following cost function:
+
+(cid:88)
+
+u,v∈R
+
+(ru,v − puqv)2 + λp || pu ||2 +λq || qv ||2
+
+where λp and λq are regularization parameters to avoid over-
+ﬁtting and N is the number of non-zero samples in matrix
+R. The key idea of SGD is in every single step, randomly
+select one sample, e.g., ru,v from R, to calculate the gradient
+w.r.t to the following cost function:
+
+(ru,v − puqv)2 + λp || pu ||2 +λq || qv ||2
+Then update feature vectors with learning rate α:
+
+erru,v = ru,v − puqv
+
+pu ← pu + α(erru,vqT
+
+v − λppu)
+
+qv ← qv + α(erru,vpT
+2.3 Parallelization Schemes
+
+u − λqqv)
+
+SGD is inherently serial where each time one sample is
+selected to update. Given a data set with N samples, an
+epoch (aka., iteration) involves executing N updates one af-
+ter other. Usually, it takes tens to hundreds of epochs to
+converge. To accelerate this process, it was observed that
+two samples can update in parallel if they are neither in
+same row nor same column.
+In this paper, we call these
+samples as ”independent samples”. Figure 4 shows an ex-
+ample. Sample A (row 0, column 1) and Sample B (row
+1, column 0) are independent as they are associated with
+diﬀerent rows in P and diﬀerent columns in Q. Meanwhile,
+Sample A and Sample C are dependent as they update
+the sample column 1 in Q. Ideally, SGD can be parallelized
+without losing accuracy, if we update independent samples
+in parallel, and update dependent samples sequentially [5].
+To accelerate the SGD algorithm, how to partition the
+workloads to parallel workers becomes one major challenge.
+The eﬃciency of the workload scheduling scheme has a pro-
+found impact to the convergence speed. The workload schedul-
+ing policies in existing work [5, 10, 26, 11, 27] can be divided
+into two categories, Hogwild! and matrix-blocking.
+
+Section 4. We need to tackle two issues in single GPU. Sec-
+tion 3.1 discusses the issue of computation optimization,
+i.e., to optimize each individual SGD update by exploiting
+GPU hardware. Section 3.2 discusses workload schedul-
+ing, i.e., to distribute the many SGD updates to thousands
+of concurrent GPU threads.
+
+3.1 Computation Optimization
+
+In MF, one SGD update consists of four steps: 1) read one
+sample (ru,v) from the rating matrix, 2) read two feature
+vectors (pu, qv), 3) compute prediction error ru,v − puqv,
+and 4) update the features. Except the ﬁrst step, other
+three steps are all vector operations at length k. k is an in-
+put parameter and typically ranges from O(10) to O(100).
+On a CPU, a parallel worker can be a thread or process,
+where vector instructions such as SSE and AVX can be used
+to accelerate the computation. GPUs are SIMD architec-
+tures [29], where a thread block is a vector group. Hence,
+in cuMF SGD, we use a thread block as a parallel worker.
+Figure 6 shows a code snippet of the computational part
+of cuMF SGD, where we use k = 64 as an example. We
+highlight the major optimization techniques in Figure 6 and
+explain them in the following.
+
+Cache. Since Fermi architectures, NVIDIA GPUs fea-
+ture on-chip L1 cache and allows the programmers to con-
+trol the cache behavior of each memory instruction (cache
+or bypass). While many GPU applications do not bene-
+ﬁt from cache due to cache contention [30], some memory
+instructions may beneﬁt from cache as the accessed data
+may be frequently reused in the future (temporal reuse) or
+by other threads (spatial reuse). Following the model pro-
+vided by [30], we observe that the memory load of the rating
+matrix beneﬁts from cache and use the intrinsic instruction
+
+ldg [28] to enable cache-assisted read.
+Memory coalescing. On GPUs, when threads within
+one warp access the data within one cache line, the access
+is coalesced to minimize the bandwidth consumption [31].
+This is called memory coalescing. In cuMF SGD, the read/write
+of P and Q are carefully coalesced to ensure that consecutive
+threads access consecutive memory addresses.
+
+Warp shuﬄe. Warp shuﬄe instructions [32] are used
+to compute the dot product p · q and broadcast the re-
+sult. Compared with traditional shared-memory-based ap-
+proaches, this warp shuﬄe-based approach performs better
+because: (1) warp shuﬄe instructions have extra hardware
+support, (2) register is faster than shared memory, and (3)
+no thread synchronization is involved. To exploit the warp
+shuﬄe feature, we ﬁx the thread blocks size as warp size(32).
+ILP. Modern GPUs support compiler-aided super scalar
+to exploit the instruction-level parallelism (ILP). In cuMF SGD,
+when k > 32, a thread is responsible to process k/32 inde-
+pendent scalars. Hence, with awareness of the low-level ar-
+chitecture information, we reorder the instructions to max-
+imize the beneﬁt of ILP.
+
+Register usage. Register ﬁle is an important resource
+on GPUs [33]. As the total number of registers on GPUs are
+limited, while each thread uses too many registers, the regis-
+ter consumption may become the limitation to concurrency.
+In our case, we identify that the concurrency is only limited
+by the number of thread blocks of GPUs [28]. Hence, we
+allocate as many as possible registers to each thread such
+that every reusable variable is kept in the fastest register
+ﬁle.
+
+Figure 4: Samples in diﬀerent rows and columns are
+independent, e.g., samples A and B. Otherwise they
+are dependent, e.g. samples A and C.
+
+Figure 5: Two SGD parallelization schemes for MF:
+Hogwild! and matrix-blocking.
+
+Hogwild!(Figure 5(a)) is a lock-free approach to paral-
+lelize SGD[11]. In this paper, we call that a conﬂict happens
+if two or more concurrent threads update samples in the
+same row or column at the same time. Intuitively, certain
+synchronization should be used to avoid conﬂicts. However,
+Hogwild! observes that such synchronization is not needed
+when the R is very sparse and the number of concurrent
+threads is much less than the number of samples. The in-
+tuition is that, when the aforementioned requirements are
+met, the probability of conﬂicts is very low and the incurred
+accuracy loss can be ignored. Based on the low synchroniza-
+tion overhead, it is used by some MF solutions. However,
+we need to enhance Hogwild! in cuMF SGD in two aspects:
+(1) Hogwild! assumes a global shared memory space, which
+is not feasible in our hybrid CPU/GPU setting where each
+GPU has its own memory space. We can only run Hog-
+in a single GPU and need another layer of partition
+wild!
+among multiple GPUs.
+is not
+cache friendly because of random access. How to balance
+the randomness in SGD update and cache eﬃciency is an
+important issue at design time.
+
+(2) The vanilla Hogwild!
+
+Matrix-blocking (Figure 5(b)) divides the rating matrix
+into several sub-blocks, and sub-blocks that do not share
+rows or columns can update in parallel. Matrix-blocking is
+used by many recent work [10, 5, 26, 27]. Matrix-blocking
+has advantage in that, it totally avoids conﬂict. However, in
+matrix-blocking parallel workers need to ask a global sched-
+uler on which blocks to proceed next. This global scheduler
+has been shown not scalable to many-core architectures [26].
+Hence, we need to enhance existing matrix-blocking schemes
+to scale to the many cores on GPUs.
+
+3. SINGLE GPU IMPLEMENTATION
+
+This section presents how cuMF SGD solves MF with one
+GPU. We pre-assume that all required data resides in GPU
+device memory. We discuss multi-GPU implementation in
+
+4
+
+Figure 6: The exemplify code of computation part of cuMF SGD, where k = 64. The used optimization
+techniques are highlighted.
+
+Half-precision. As addressed before, SGD is memory
+bound. Most of the memory bandwidth is spent on the
+read/write to the feature matrices. Recently, GPU archi-
+tectures support the storage of half-precision (2 bytes vs. 4
+bytes of single-precision) and fast transformation between
+ﬂoating point and half-precision. In practice, after parame-
+ter scaling, half-precision is precise enough to store the fea-
+ture matrices and do not incur accuracy loss. CuMF SGD
+uses half-precision to store feature matrices, which halves
+the memory bandwidth need when accessing feature matri-
+ces.
+
+3.2 Workload Scheduling
+
+3.2.1
+
+Scalability issue of global scheduling
+
+The original SGD algorithm is serial, with samples in the
+rating matrix picked up randomly and updated in sequence.
+To exploit parallelism, a workload scheduling policy that
+assigns tasks to parallel workers becomes necessary. We
+start from investigating the existing CPU-based schedul-
+ing policies. Speciﬁcally, we select a representative system
+LIBMF [5], a shared memory SGD solution to MF. LIBMF
+proposes a novel workload scheduling policy which success-
+fully solves the load imbalance problem and achieve high ef-
+ﬁciency. As shown in Figure 7(a), LIBMF divides the rating
+matrix to several blocks and uses a global scheduling table
+to manage the parallel workers. Whenever a worker is free,
+an idle independent block is scheduled to it. The process
+is repeated until convergence. However, we and others [26]
+observe that LIBMF faces scalability issues because of
+the global scheduling table it uses.
+
+Figure 7(b) shows a scalability study of LIBMF. LIBMF-
+GPU is a GPU version of LIBMF that combines the work-
+load scheduling policy of LIBMF and our GPU computation
+implementation described in Section 3.1. We use SGD up-
+dates per second as the performance metric:
+
+#U pdates/s =
+
+#Iterations × #Samples
+Elapsed T ime
+
+where #Iterations, #Samples, Elapsed T ime indicate num-
+ber of iterations, number of non-zero samples in the input
+matrix R, and elapsed time in seconds, respectively.
+
+Evaluations show that the performance of LIBMF satu-
+rates around 30 concurrent workers (CPU threads), which
+is consistent with the previous study [26]. We perform some
+GPU-speciﬁc optimization techniques when implementing
+
+LIBMF-GPU, however, it still can only scale to 240 thread
+blocks, much lower than the hardware limit(768 thread blocks).
+The reason why LIBMF cannot scale to many parallel work-
+ers is that, it uses a global scheduling table to manage all
+parallel workers.
+
+At each time, only one parallel worker can access the table
+and it is also time consuming to ﬁnd a free block to assign the
+work to. Therefore, when the number of workers increase,
+the waiting time also increases. As the number of worker
+grows, the waiting time becomes dominating. This shows
+that, cuMF SGD can not simply re-use existing schedul-
+ing policies. To overcome this scheduling overhead, we pro-
+pose two GPU-speciﬁc scheduling schemes, batch-Hogwild!
+and Wavefront-update. Batch-Hogwild! avoids block-based
+scheduling and improves the cache eﬃciency by process sam-
+ples in batch. Wavefront-update is still block-based, but
+only requires a local look-up instead of the expensive global
+look-up in LIBMF.
+
+Figure 7:
+(a) LIBMF uses a centralized table to
+manage parallel workers. (b) LIBMF scales to only
+30 CPU threads and 240 GPU thread blocks.
+
+3.2.2 Batch-Hogwild!
+
+We propose batch-Hogwild!, a variant of Hogwild! [11]
+is eﬃcient as its
+with better cache eﬃciency. Hogwild!
+lock-free scheme incurs low scheduling overhead. It is not
+eﬃcient, however, in terms of data locality [5].
+In vanilla
+Hogwild!, each parallel worker randomly selects one sample
+from the rating matrix at each step. After each update, Hog-
+wild! may not access the consecutive samples in the rating
+matrix and corresponding rows and columns in the feature
+matrices during a long time interval, leading to low cache
+eﬃciency. As discussed in Section 3.1, we carefully align the
+
+5
+
+memory access to feature matrices to achieve perfect mem-
+ory coalescing and the high memory bandwidth on GPUs
+makes accessing feature matrices no longer a performance
+bottleneck. To accelerate the access to rating matrix, we
+exploit the spatial data locality using L1 data cache. We let
+each parallel worker, instead of fetch one sample randomly
+at a time, fetches f consecutive samples and update them
+serially. Note that these samples are consecutive in terms
+of their memory storage; because we shuﬄe samples, they
+are still random in terms of their coordinates in R. By do-
+ing so, the data locality is fully exploited. Consider the L1
+cache line size is 128 bytes and the size of each sample is 12
+bytes (one ﬂoating point and two integers), f > 128/12 is
+enough to exploit the locality. We evaluate diﬀerent values
+of f and ﬁnd that they yield similar beneﬁt. Therefore we
+choose f = 256 without loss of generality.
+
+Figure 8: Wavefront-update. Each parallel worker
+is assigned to a row and pre-randomize its column
+update sequence. E.g., when Worker 3 completes
+Block 3 in Wave 1, it releases Column 4 such that
+Worker 1 can start Block 5 in Wave 2.
+
+3.2.3 Wavefront-update
+
+As discussed, existing scheduling schemes [5, 27] impose
+a global synchronization, where all workers look up a global
+table to ﬁnd both row and column coordinates to up-
+date. This is expensive and has been shown not scalable to
+the hundreds of workers on GPUs. To overcome this, we
+propose wavefront-update, a light-weight scheme that locks
+and look up columns only.
+
+We explain the idea of wavefront-update using Figure 8.
+We use four parallel works to process an R which is par-
+titioned into 4 × 8 blocks. Each worker is assigned to a
+row in this 4 × 8 grid, and each generates a permutation
+of {1, 2, 3, ..., 7, 8} as its column update sequence. By this
+means, an epoch is conducted in eight waves given this se-
+quence.
+In each wave, one worker update one block, and
+workers do not update blocks in the same column. Assume
+Worker 1 has the sequence deﬁned as {2, 4, ...} and Workder
+3 has sequence {4, 6, ...}. With this sequence, Worker 1 up-
+dates Block 1 in wave 1 and Block 5 in wave 2. To avoid
+conﬂicts, we propose a light-weight synchronization scheme
+between waves using the column lock array. As shown the
+ﬁgure, we use an array to indicate the status of each col-
+umn. Before a worker moves to next wave, it checks the
+status of the next column deﬁned in its sequence. For ex-
+ample, after Worker 1 ﬁnishes Block 1, it needs to check
+the status of column 4 and does not need to care about
+other columns’ status. When Work 3 ﬁnishes Block 3 and
+releases column 4, Worker 1 is allowed to move to wave 2.
+There are two main beneﬁts by doing so: (1) reduce the
+two-dimension look-up table in [5, 27] to an one-dimension
+array, (2) minimize the workload imbalance problem, as a
+
+worker can start the next block earlier compared to waiting
+for all other workers to ﬁnish.
+
+Figure 9:
+Performance Comparison of batch-
+Hogwild! and wavefront-update on Netﬂix data set.
+Both techniques scale much better than LIBMF.
+
+3.2.4 Evaluation of scheduling schemes
+
+We evaluate both techniques in terms of performance and
+convergence speed using the Netﬂix data set and the Maxwell
+platform3. We use metric #U pdates/s to quantitative the
+performance. Figure 9(a) shows the scalability of batch-
+Hogwild! and Wavefront-update with diﬀerent number of
+parallel workers (i.e., thread blocks). When increasing the
+number of parallel workers, both techniques achieve near-
+linear scalability. When the number of parallel workers hits
+the hardware limit (768) of the Maxwell GPU, both tech-
+niques achieve ∼0.27 billion updates per second, which is 2.5
+times of LIBMF. Therefore, we conclude that our proposed
+solutions can perfectly solve the scalability problem of the
+scheduling policy and fully exploit the equipped hardware
+resources on GPUs. We also evaluate the convergence speed
+of both techniques. We use the root mean square root error
+on the standard test data set as the indication of conver-
+gence. Figure 9(b) shows the decrease of Test RMSE in iter-
+ations. Overall, batch-Hogwild! converges a little bit faster
+than Wavefront-update. The reason is, batch-Hogwild! en-
+forces more randomness in update sequence, compared with
+the block-based wavefront-update. Based on this observa-
+tion, we use batch-Hogwild! as the default scheme on one
+GPU.
+
+4. SCALE TO LARGE DATA SETS
+
+Section 3 presents how to solve MF in a single GPU,
+assuming the rating matrix and feature matrices fully re-
+side in GPU memory. However, the limited GPU memory
+capacity [34] prevents cuMF SGD from solving large scale
+problems. For example, NVIDIA TITAN X GPU has 12
+GB device memory that can only store 1 billion samples
+(one sample needs one ﬂoat and two integers). Nowadays,
+real-world problems may have 1011 samples [6]. Techniques
+such as Uniﬁed Virtual Memory [28] allow GPU to use CPU
+memory but with high overhead. Consider these factors,
+to solve large-scale MF problems that can not ﬁt into one
+GPU’s device memory, we need to partition the data sets
+and stage the partitions to GPUs in batches. Moreover,
+We should overlap data transfer with computation to alle-
+viate the delay caused by slow CPU-GPU memory transfer.
+Please note that, the partitions can be processed by one or
+multiple GPUs.
+
+Details of the data set and platform are presented in Section 5.
+
+3
+
+6
+
+Figure 10: (a) Multiple GPUs solution of cuMF SGD, where the rating matrix is partitioned and each
+partition can ﬁt into a GPU’s device memory. (b) Optimizing the multi-GPU solution by overlapping memory
+transfer with computation.
+
+4.1 Partition to Multiple GPUs
+
+Figure 10 shows our proposed multiple GPUs solution.
+The main idea is to divide the rating matrix R into multiple
+blocks; each block is small enough to ﬁt into a GPU’s device
+memory such that independent blocks can update concur-
+rently on diﬀerent GPUs. The multiple GPU solution works
+as follows,
+
+1. Divide the rating matrix R into i × j blocks. Mean-
+while, divide feature matrix p into i segments and fea-
+ture matrix q into j segments accordingly.
+
+2. When a GPU is idle, randomly select one matrix block
+from those independent blocks and dispatch it to the
+GPU.
+
+3. Transfer the matrix block and corresponding feature
+sub-matrices p and q to the GPU. Then update the
+matrix block using the single GPU implementation dis-
+cussed in Section 3. After the update, transfer p and
+q back to CPU.
+
+4. Iterate from 2 until convergence or the given number
+
+of iterations is reached.
+
+We further explain the proposed scheme using the exam-
+ple shown in Figure 10(a). In Step 1, we divide R into 4 × 4
+blocks and use two GPUs. In Step 2, we send block R2 to
+GPU 0 and R11 to GPU 1. Again, consider the nature of
+MF, updating R2 only touches sub-matrices p1 & q2 while
+updating R11 only touches p3 & q3. Hence, GPU 0 only
+needs to store R2, p1, and q2 in its device memory while
+GPU 1 only needs to store R11, p3, and q3. By doing so, the
+problem is divided and conquered by multiple GPUs. After
+deciding the block scheduling order, cuMF SGD transfers
+p1, q2, R2 to GPU 0 and p3, q3, R11 to GPU 1, then per-
+forms the computation on two GPUs in parallel. The GPU
+side computation follows the rules we discussed in Section 3.
+After ﬁnishing the computation, the updated p1, q2, p3, and
+q3 are transferred back to CPU memory. Note that we don’t
+have to transfer R2 or R11 back to CPU memory as they
+are read-only.
+
+Scalability problem. We mentioned LIBMF faces scal-
+ability issue, as the scheduling overhead increases quickly
+with the number of workers [26]. Our multiple-GPU schedul-
+ing scheme has similar complexity with that of LIBMF.
+However, it does not face the same scalability issue as we
+only need to schedule to a few GPUs instead of hundreds of
+workers.
+
+4.2 Overlap Data Transfer and Compute
+
+GPUs’ memory bandwidth are much larger than the CPU-
+GPU memory transfer bandwidth. For example, NVIDIA
+
+TITAN X GPUs provide 360 GB/s device memory band-
+width while the CPU-GPU memory bandwidth is only ∼16
+GB/s (PCIe v3 16x). In single GPU implementation, CPU-
+GPU memory transfer only happens at the start and end
+of MF, and therefore not dominant. However, when the
+data set can not ﬁt into the GPU memory, memory trans-
+fer happens frequently and has higher impact on the overall
+performance.
+
+Given the memory transfer overhead, we overlap the mem-
+ory transfers and computation when solving large problems,
+as shown in Figure 10(b). Due to space limitation , we only
+plot one GPU. The key idea is, at the block scheduling time,
+instead of randomly selecting one independent block for the
+GPU, the optimized technique randomly selects multiple
+blocks at a time. Those blocks are pipelined to overlap the
+memory transfer and computation: we schedule two blocks
+to GPU 0, and overlap the memory transfer of the second
+block (R8) with the computation of the ﬁrst block (R2).
+Note that the two blocks scheduled to one GPU do not need
+to be independent as they are updated in serial; meanwhile,
+blocks scheduled to diﬀerent GPUs have to be independent
+with each other to avoid conﬂicts. By doing so, we can re-
+duce the overhead of slow CPU-GPU memory transfer and
+improve the overall performance.
+
+Discussion. Allocating more blocks to one GPU would
+yield more performance beneﬁt as more memory/computation
+overlapping can be achieved. However, the number of avail-
+able blocks is limited by how do we divide the rating matrix
+R. Consider we divide R to i × i and we have two GPUs
+running in parallel, the number of blocks per GPU cannot
+be more than i/2. In practice, i is determined by the size
+of the rating matrix R and the available hardware resources
+on the GPU. We will discuss it in Section 5.5.
+Implementation Details
+4.3
+
+Multiple GPUs management. We implement it using
+multiple CPU threads within one process. Within the pro-
+cess, there is one host thread and multiple worker threads,
+where each GPU is bound to one worker thread. The host
+thread manages the workload scheduling and informs worker
+threads of the scheduling decision. Each worker thread then
+starts data transfer and launches compute kernels on a GPU.
+Overlapping. Each worker thread is responsible to over-
+lap the computation and CPU-GPU memory transfers. We
+use CUDA streams to achieve this. A stream contains a list
+of GPU commands that are executed in serial, and com-
+mands in diﬀerent streams are executed in parallel if hard-
+ware resources permit. Each worker thread uses three streams
+that manage CPU-GPU memory transfer, GPU-CPU mem-
+ory transfer, and GPU kernel launch, respectively.
+
+7
+
+• What is the implication of using diﬀerent generations
+
+art approaches.
+
+of GPUs? (Section 5.3)
+
+5. EXPERIMENTS
+
+We implement cuMF SGD using CUDA C (source code at
+http://github.com/cumf/cumf_sgd/), evaluate its perfor-
+mance on public data sets, and demonstrate its advantage
+in terms of performance and cost. Section 5.1 introduces
+the experimental environment. The following experiments
+are designed to answer these questions:
+
+• Compared with state-of-the-art SGD-based approaches
+on CPUs [7, 10], is cuMF SGD better and why? (Sec-
+tion 5.2)
+
+• Compared with the ALS-based GPU library cuMF ALS
+that we published earlier [6], what is the advantage of
+cuMF SGD? (Section 5.4)
+
+• Parallelizing SGD is always tricky and may lead to
+converge problems. What are the factors impacting
+parallelizing SGD? (Section 5.5)
+
+• When scale up to multiple GPUs, is cuMF SGD still
+
+eﬃcient? (Section 5.6)
+
+5.1 Experimental Setup
+
+Platform. We evaluate cuMF SGD on heterogeneous
+platforms with both CPU and GPUs. Table 1 shows the
+conﬁguration of the two servers used in experiments.
+
+Table 1: Conﬁguration of the Maxwell [19] and Pas-
+cal [20] Platform.
+
+Maxwell Platform
+
+CPU
+
+GPU
+
+CPU
+
+GPU
+
+12-core Intel Xeon CPU E5-2670*2 (up to 48 threads),
+512 GB memory
+TITAN X GPU*4, per GPU: 24 SMs, up to 768 thread
+blocks, 12 GB device memory.
+
+Pascal Platform
+
+2*10 PowerNV 8 processors with SMT 8 and NVLink.
+Tesla P100 GPU*4, per GPU: 56 SMs, up to 1792 thread
+blocks, 16 GB device memory.
+
+Data sets. We use three public data sets: Netﬂix, Ya-
+hoo!Music, and Hugewiki. Details of them are shown in Ta-
+ble 2. Netﬂix and Yahoo!Music come with a test set but
+Hugewiki does not. We randomly sample and extract out
+1% of the data set for testing purpose.
+
+Table 2: Details of data sets used.
+
+Dataset
+m
+n
+k
+T rain Set
+T est Set
+
+Netﬂix
+480,190
+17,771
+128
+99,072,112
+1,408,395
+
+Yahoo!Music
+1,000,990
+624,961
+128
+252,800,275
+4,003,960
+
+Hugewiki
+50,082,604
+39,781
+128
+3,069,817,980
+31,327,899
+
+Parameter. As mentioned in the introduction, this pa-
+per focus on system-level but not algorithmic-level optimiza-
+tion. Therefore, we did not spend much eﬀort in parameter
+turning. Instead, we use the parameters adopted by earlier
+work [6, 10, 5, 7]. For learning rate, we adopt the learning
+rate scheduling techniques used by Yun et al. [10], where the
+learning rate st at epoch t is monotonically reduced in the
+following routine:
+
+st =
+
+α
+1 + β · t1.5
+
+α is the given initial learning rate and β is another given
+parameter. The parameters used by cuMF SGD are listed
+in Table 3.
+
+8
+
+Table 3: Used parameters for each dataset.
+
+Dataset
+Netﬂix
+Yahoo!Music
+Hugewiki
+
+λ
+0.05
+1.0
+0.03
+
+α
+0.08
+0.08
+0.08
+
+β
+0.3
+0.2
+0.3
+
+5.2 Comparison of SGD approaches
+
+We compare cuMF SGD with the following state-of-the-
+
+• LIBMF [5]. LIBMF is a representative blocking-based
+solution on shared-memory systems. Its main design
+purpose is to balance the workload across CPU threads
+and accelerate the memory access. It leverages SSE in-
+structions and a novel learning rate schedule to speed
+up the convergence [7].
+
+We exhaustively evaluate all possible parallel param-
+eters on the Maxwell platform and select the optimal
+one. For example, we use 40 CPU threads and divide
+the input rating matrix R into 100 × 100 blocks; we
+set its initial learning rate as 0.1.
+
+• NOMAD [10]. NOMAD is a representative distributed
+matrix factorization solution. It uses a 64-node HPC
+cluster to solve MF. It proposes a decentralized schedul-
+ing policy to reduce the synchronization overhead and
+discusses how to reduce the inter-node communication.
+We present the best results presented in the original
+paper, i.e., using 32 nodes for Netﬂix and Yahoo!Music
+data sets and using all 64 nodes for Hugewiki data set
+on the HPC cluster.
+
+• CuMF SGD. We evaluate cuMF SGD on both Maxwell
+and Pascal platforms, with all three data sets. We
+name the results on Maxwell as cuMF SGD-M and
+those on Pascal as cuMF SGD-P. We use one GPU
+in this subsection. The number of parallel workers
+(thread blocks) is set as the maximum of the corre-
+sponding GPU architecture (768 on Maxwell platform
+and 1792 on Pascal platform). As Hugewiki can not
+ﬁt into one GPU’s memory, we divide it into 64 × 1
+blocks and at each scheduling, we schedule 8 blocks to
+overlap memory transfer and computation.
+
+Figure 11 shows the test RMSE w.r.t. the training time.
+Table 4 summarizes the training time required to converge
+to a reasonable RMSE (0.92, 22.0, and 0.52 for Netﬂix, Ya-
+hoo!Music, and Hugewki, respectively). Results show that
+with only one GPU, cuMF SGD-P and cuMF SGD-
+M perform much better (3.1X to 28.2X) on all data
+sets compared to all competitors, including NOMAD
+on a 64-node HPC cluster. In the following we analyze the
+reasons.
+
+Table 4: Training time speedup normalized by
+LIBMF.
+
+Data set
+LIBMF
+NOMAD
+CuMF SGD-M
+CuMF SGD-P
+
+Netﬂix
+23.0s
+9.6s(2.4X)
+7.5s(3.1X)
+3.3s(7.0X)
+
+Yahoo!Music
+37.9s
+108.7s(0.35X)
+8.8s(4.3X)
+3.8s(10.0X)
+
+Hugewiki
+3020.7s
+459.1s(6.6X)
+442.3s(6.8X)
+107.0s(28.2X)
+
+Figure 11: Test RMSE over training time on three data sets. CuMF SGD converges faster than all other
+approaches with only one GPU card.
+
+bounded and data communication happens frequently be-
+tween parallel workers. When NOMAD distributes parallel
+workers to diﬀerent nodes, the network bandwidth which is
+much less than intra-node communication, becomes the bot-
+tleneck. Consequently, NOMAD achieves suboptimal scal-
+ability when scale from single node to multiple nodes, es-
+pecially for small data sets. For example, on Yahoo!Music,
+NOMAD performs even worse than LIBMF that uses only
+one machine.
+
+NOMAD (on a 64-node HPC cluster) has similar perfor-
+mance with cuMF SGD-M on Hugewiki, while it is much
+slower than cuMF SGD-P. Obviously, cuMF SGD is not only
+faster, using a single CPU card, it is also more cost-eﬃcient.
+
+Figure 14: Updates-per-second and achieved mem-
+ory bandwidth cuMF SGD on Maxwell and Pascal,
+using the Netﬂix data set. CuMF SGD performs
+better on the more recent Pascal platform.
+
+5.3
+
+Implication of GPU Architectures
+
+We have evaluated cuMF SGD on the two current gen-
+erations of GPUs: Maxwell and Pascal. We believe that
+cuMF SGD is able to scale to future GPU architectures
+with minor tuning eﬀort.
+In this section, we explain the
+performance gap between Maxwell and Pascal in three as-
+pects: computation resources, oﬀ-chip memory bandwidth,
+and CPU-GPU memory bandwidth.
+
+Computation resources. We show the SGD updates-
+per-second metric of two platforms with diﬀerent number of
+parallel workers using Netﬂix in Figure 14(a). Results show
+that the Pascal platform scales to more parallel workers and
+achieves much higher #updates/s than Maxwell. This is
+because the Maxwell platform has 24 streaming multipro-
+cessors (SMs) within each GPU, with each SM allowing up
+to 32 parallel workers (thread blocks). Hence, one Maxwell
+GPU allows up to 768 parallel workers. Meanwhile, the Pas-
+cal GPU used has 56 SMs and allows 32 thread blocks on
+each SM. Hence, a Pascal GPU allows up to 1792 parallel
+
+Figure 12: Updates per second and achieved
+memory bandwidth of LIBMF, cuMF SGD-M, and
+cuMF SGD-P. The achieved memory bandwidth ex-
+plains the advantage of cuMF SGD.
+
+Comparison with LIBMF. As shown in Figure 11 and
+Table 4, cuMF SGD outperforms LIBMF on all data sets,
+on both Maxwell and Pascal. More precisely, cuMF SGD-
+M is 3.1X - 6.8X as fast as LIBMF and cuMF SGD-P is
+7.0X - 28.2X as fast. CuMF SGD outperforms LIBMF be-
+cause it can do more updates per second, as shown in Fig-
+ure 12(a). We already mentioned that that matrix factor-
+ization is memory bound; LIBMF is also aware of that and
+strives to keep all frequently used data in the CPU cache.
+However, the limited cache capacity on a single CPU makes
+LIMBF suboptimal in large data sets. As shown in Fig-
+ure 12(b), LIBMF achieves an eﬀective memory bandwidth
+of 194 GB/s4 on the Netﬂix data set (with 99M samples)
+– close to cuMF SGD-M. However its achieved bandwidth
+drops almost by half, to 106 GB/s on the larger Hugewiki
+data set (with 3.1B samples) – while cuMF SGD achieves
+similar bandwidth in all data sets.
+
+On the scheduling policy of LIBMF. Simply porting LIBMF
+
+to GPUs leads to resource under-utilization due to the scal-
+ability of it scheduling policy (recall Figure 7). In contrast,
+the workload scheduling policy and memory/computation
+pattern of cuMF SGD are speciﬁcally designed to fully ex-
+ploit the computation and memory resources on GPUs. Hence,
+as shown in Figure 12 (b), cuMF SGD achieves much higher
+bandwidth than LIBMF. Moreover, cuMF SGD uses half-
+precision (2 bytes for a ﬂoat number) to store feature ma-
+trices. As a result, it can perform twice updates as LIBMF
+with the same bandwidth consumption.
+
+Compared with NOMAD. As presented in [10], NO-
+MAD uses 32 nodes for Netﬂix and Yahoo!Music and 64
+HPC nodes for Hugewiki. Despite of the tremendous hard-
+ware resources, NOMAD is still outperformed by cuMF SGD
+on all data sets. As observed in Section 1, MF is a memory
+
+4
+
+The achieved memory bandwidth measures the data processed by
+the compute units per second, and can be higher than the theoretical
+oﬀ-chip memory bandwidth thanks to the cache eﬀect.
+
+9
+
+Figure 13: CuMF SGD vs. cuMF ALS. With one GPU, CuMF SGD converges faster than cuMF ALS-1
+(one GPU) and similar to cuMF ALS-4 (four GPUs).
+
+CPU-GPU memory bandwidth. Netﬂix and Yahoo!Music
+
+5.5.1 Hogwild!
+
+workers, which is 2.3 times of that of Maxwell GPU. Over-
+all, a Pascal GPU is more powerful than a Maxwell GPU in
+term of the amount of computation resources.
+
+Oﬀ-chip memory bandwidth. As we discussed before,
+SGD is memory bound. Optimized for throughput, GPUs
+are able to overlap memory access and computation by fast
+context switch among parallel workers [28]. When there are
+enough parallel workers running on GPUs, long memory la-
+tencies can be hidden, which is exactly what happens with
+cuMF SGD. In this scenario, memory bandwidth, instead of
+memory latency, becomes the limitation of the performance.
+Pascal platforms provides twice as much theoretical peak
+oﬀ-chip memory bandwidth (780 GB/s) as Maxwell plat-
+forms(360 GB/s). Figure 14(b) shows the achieved memory
+bandwidth on two platforms with diﬀerent number of par-
+allel workers. On Maxwell and Pascal, cuMF SGD achieves
+up to 266 GB/s and 567 GB/s, respectively.
+
+data sets are small enough to ﬁt into the GPU device mem-
+ory. For Hugewiki, memory transfer occurs multiple times
+as the data cannot ﬁt into GPU device memory.
+In Sec-
+tion 4.2, we propose to overlap data transfer with computa-
+tion. Despite of this optimization, the CPU-GPU memory
+bandwidth still has noticeable impact on the overall perfor-
+mance as the perfect overlapping cannot be achieved. On
+the Maxwell platform, the memory transfer between CPU
+and GPU is via PCIe v3 16x with 16 GB/s bandwidth
+(we observe that on average, the achieved bandwidth is 5.5
+GB/s). The very recent Pascal platform is with NVLink [23]
+that can provide 40 GB/s in theory (we observe an av-
+erage 29.1 GB/s CPU-GPU memory transfer bandwidth,
+which is 5.3X as that on Maxwell). This also explains why
+cuMF SGD achieves much more speedup on Hugewiki us-
+ing Pascal platform (28.2X) than that on Maxwell platform
+(6.8X).
+
+5.4 Comparison with cuMF_ALS
+
+Our earlier work cuMF ALS [6] represents the state-of-
+art ALS-based matrix factorization solution on GPUs. We
+use one GPU for cuMF SGD, and one and four GPUs for
+cuMF ALS. Figure 13 compares their performance on three
+data sets on Maxwell. We observe that cuMF SGD is faster
+than cuMF ALS-1 and achieves similar performance with
+cuMF ALS-4 with only one GPU.
+
+It expected that cuMF SGD is faster than cuMF ALS,
+with the following reason. Each epoch of SGD needs mem-
+ory access of O(N ∗ k) and computation of O(N ∗ k). Each
+epoch of ALS needs memory access of O(N ∗ k) and com-
+putation of O(N ∗ k2 + (m + n) ∗ k3). ALS’s epochs run
+slower due to its much more intensive computation. Al-
+
+though ALS needs fewer epochs to coverage, as a whole
+it converges slower. Despite the fact that cuMF ALS is
+slower than cuMF SGD, we still maintain both solutions
+at https://github.com/cuMF/ because they serve diﬀerent
+purposes: SGD converges fast and easy to do incremental
+update, while ALS is easy to parallelize and is able to deal
+with non-sparse rating matrices [1].
+
+5.5 Convergence Analysis
+
+The original SGD algorithm is serial. To speed it up,
+we discuss how to parallelize it on one GPU in Section 3.2
+and on multiple GPUs in Section 4.1. It is well-known that
+SGD parallelization may have subtle implications on conver-
+gence [5, 10]. In the context of matrix factorization, the im-
+plication varies on the two schemes proposed in Section 3.2:
+Hogwild! and matrix-blocking.
+
+For one GPU, Section 3.2.2 proposes the batch-Hogwild!
+scheme to partition work . As a vectorized version of Hog-
+wild!, batch-Hogwild!
+inherits the limitation of Hogwild!.
+Given a rating matrix of m × n and s parallel workers, con-
+vergence is ensured only when the following condition satis-
+ﬁed [11]:
+
+s (cid:28) min(m, n)
+
+For multiple GPUs, Section 4 proposes to ﬁrst divide the
+rating matrix R into i × j blocks and process one block on
+one GPU in parallel if possible.
+In this case, the above
+condition needs to change to:
+
+s (cid:28) min((cid:98)m/i(cid:99), (cid:98)n/j(cid:99))
+
+Our empirical study on Hugewiki data set shows that, s
+needs to be < 1/20 ∗ min((cid:98)m/i(cid:99), (cid:98)n/j(cid:99)) to converge. We
+validated that, Hugewiki data set has min(m, n) = 40k
+and we choose s = 768; convergence is achieved when j <
+40k/20/768 ≈ 2, and fails when j = 4. We believe this is a
+limitation for all Hogwild!-style solutions.
+
+5.5.2 Matrix-blocking
+
+The purpose of matrix-blocking is to avoid conﬂicts be-
+tween parallel workers. However, we observe that matrix-
+blocking can have negative impact on convergence. Fig-
+ure 15 illustrates the the convergence speed of LIBMF on
+Netﬂix data set with diﬀerent parameters.
+In this study,
+we ﬁx the number of parallel workers s = 40; without loss
+of generality, we divide R into i × i blocks and vary the
+value of i. Figure 15 shows that when i is less than or close
+to s, convergence speed is much slower or even cannot be
+achieved. We have similar observations on other data sets
+
+10
+
+and using cuMF SGD. We brieﬂy explain the reason with a
+simple example shown in Figure 16.
+
+Figure 15: Convergence speed of LIBMF on Netﬂix.
+We ﬁx #parallel-workers s = 40 and vary value i to
+partition to i × i blocks.
+
+In Figure 16, we divide the rating matrix into 2 × 2 blocks
+and use 2 parallel workers.
+In theory, 4 blocks can have
+4 × 3 × 2 × 1 = 24 possible update orders. We also show all
+update orders in Figure 16. However, only orders 1∼8 out of
+the total 24 are feasible so as to avoid update conﬂicts. For
+example, when Block 1 is issued to one worker, only Block
+4 can be issued to another worker. Hence, Blocks 2 and 3
+cannot be updated between 1 and 4, which precludes order
+9∼12. This demonstrated that when s ≥ i, all independent
+blocks have to be updated concurrently to make all work-
+ers busy, which enforces certain update order constraints
+and hurts the randomness. As a consequence, convergence
+speed can deteriorate. In practice, when cuMF SGD uses
+two GPUs, R should at least be divided into 4 × 4 blocks.
+
+Figure 16: A simple example to demonstrate the
+limitation of matrix blocking. The rating matrix
+is divided into 2 × 2 blocks and updated using two
+parallel workers.
+
+5.6 Scale Up to Multiple GPUs
+
+System wise, cuMF SGD is designed to scale to multiple
+GPUs. However, algorithmic wise, the scaling is restricted
+by factors such as problem dimension and number of paral-
+lel workers, as discussed earlier in Section 5.5. Among the
+three data sets used in this paper, Netﬂix and Hugewiki have
+very small n(20k, 40k, receptively), preventing cuMF SGD
+from solving them on multiple GPUs. In comparison, Ya-
+hoo!Music can be solved on multiple GPUs as the dimension
+of it R is 1M × 625k. We divide its R into 8 × 8 blocks and
+run it with two Pascal GPUs. Figure 17 shows the conver-
+gence speed. With 2 Pascal GPUs, cuMF SGD takes 2.5s
+to converge to RMSE 22, which is 1.5X as fast as 1 Pascal
+GPU (3.8s). The reason behind this sub-linear scalability
+is that, the multi-GPU cuMF SGD needs to spend time on
+CPU-GPU memory transfer so as to synchronize two GPUs.
+
+6. RELATED WORK
+
+Algorithms. SGD has been widely used to solve matrix
+factorization [1]. Serial SGD can be parallelized to achieve
+better performance. ALS is naturally easy to parallelize and
+
+11
+
+Figure 17: Convergence of cuMF SGD on Ya-
+hoo!Music: two Pascal GPUs is 1.5X as fast as one.
+
+it can also been used in dense matrix factorization. Coordi-
+nate descent is another algorithm to solve matrix factoriza-
+tion [9, 35]. It updates the feature matrix along one coordi-
+nate direction in each step. Our earlier work [6] focuses on
+ALS algorithm.
+
+Parallel SGD solutions have been discussed in multi-
+core [5, 7, 36], multi-node [10, 37], MapReduce [27, 38]
+and parameter-servers [39, 40] settings. Existing works are
+mostly inspired by Hogwild! [11] that allows lock-free up-
+date, or matrix-blocking that partitions to avoid conﬂicts,
+or a combination of them. LIBMF [5, 7] is a representa-
+tive shared-memory multi-core system. Evaluations have
+shown that it outperforms all previous approaches with one
+machine. Although it has been optimized for cache eﬃ-
+ciency, it is still not eﬃcient at processing large scale data
+sets. Moreover, the high complexity of its scheduling policy
+makes it infeasible to scale to many cores. NOMAD [10]
+partitions the data on HPC clusters to improve the cache
+performance. At the meantime, they propose to minimize
+the communication overhead. Compared with LIBMF, it
+has similar performance on one machine and is able to scale
+to 64 nodes.
+
+Parallelization is also used in coordinate descent [9]. Com-
+pared with SGD, coordinate descent has lower overhead and
+runs faster at the ﬁrst few epochs of training. However, due
+to the algorithmic limitation, coordinate descent is prone to
+reach local optima [5] in the later epochs of training.
+
+Compared with CGD and SGD, ALS is inherently easy
+to parallel, ALS based parallel solutions are widely dis-
+cussed [41, 42, 2, 15, 43]. Our earlier work, cuMF ALS [6]
+focuses on optimizing ALS to matrix factorization on GPUs.
+As ALS algorithm is more compute intensive, it runs slower
+than cuMF SGD.
+
+GPU solutions. Prior to our work,
+
+[44] applies Re-
+[45]
+stricted Boltzmann Machines on GPUs to solve MF.
+implements both SGD and ALS on GPU to solve MF. In
+contrast, cuMF SGD outperforms them because we opti-
+mize both memory access and workload scheduling.
+
+7. CONCLUSION
+
+Matrix factorization is widely used in recommender sys-
+tems and other applications. SGD-based MF is limited by
+memory bandwidth which single and multi-GPU systems
+cannot eﬃciently provision. We propose a GPU-based so-
+lution, by observing that GPUs oﬀers abundant memory
+bandwidth and can enjoy fast intra-node connection. We
+design workload partition and schedule schemes to dispatch
+tasks insides a GPU and across GPUs, without impacting
+the randomness required by SGD. We also develop highly-
+optimized GPU kernels for individual SGD updates. With
+only one Maxwell or Pascal GPU, cuMF SGD runs 3.1X-
+28.2X as fast compared with state-of-art CPU solutions on
+
+[3] J. Pennington, R. Socher, and C. D. Manning, “Glove: Global
+
+[27] R. Gemulla, E. Nijkamp, P. J. Haas, and Y. Sismanis,
+
+[9] H.-F. Yu, C.-J. Hsieh, S. Si, and I. Dhillon, “Scalable
+
+[33] J. Lai and A. Seznec, “Performance upper bound analysis and
+
+1-64 CPU nodes. Evaluations also show that cuMF SGD
+scales well on multiple GPUs in large data sets.
+
+8. REFERENCES
+
+[1] Y. Koren, R. Bell, and C. Volinsky, “Matrix factorization
+
+techniques for recommender systems,” Computer.
+[2] “Recommending items to more than a billion people..”
+https://code.facebook.com/posts/861999383875667/
+recommending-items-to-more-than-a-billion-people/.
+
+vectors for word representation.,” in EMNLP, 2014.
+[4] M. Sarwat, Database Management System Support for
+
+Collaborative Filtering Recommender Systems. PhD thesis,
+UNIVERSITY OF MINNESOTA, 2014.
+
+[5] W.-S. Chin, Y. Zhuang, Y.-C. Juan, and C.-J. Lin, “A fast
+
+parallel stochastic gradient method for matrix factorization in
+shared memory systems,” ACM Transactions on Intelligent
+Systems and Technology (TIST), 2015.
+
+[6] W. Tan, L. Cao, and L. Fong, “Faster and cheaper:
+
+Parallelizing large-scale matrix factorization on gpus,” in
+Proceedings of the 25th ACM International Symposium on
+High-Performance Parallel and Distributed Computing,
+HPDC ’16, 2016.
+
+[7] W.-S. Chin, Y. Zhuang, Y.-C. Juan, and C.-J. Lin, “A
+
+learning-rate schedule for stochastic gradient methods to
+matrix factorization,” in Paciﬁc-Asia Conference on
+Knowledge Discovery and Data Mining, Springer, 2015.
+[8] C. Teﬂioudi, F. Makari, and R. Gemulla, “Distributed matrix
+
+completion,” in 2012 IEEE 12th International Conference on
+Data Mining, IEEE, 2012.
+
+coordinate descent approaches to parallel matrix factorization
+for recommender systems,” in 2012 IEEE 12th International
+Conference on Data Mining, IEEE, 2012.
+
+[10] H. Yun, H.-F. Yu, C.-J. Hsieh, S. V. N. Vishwanathan, and
+I. Dhillon, “Nomad: Non-locking, stochastic multi-machine
+algorithm for asynchronous and decentralized matrix
+completion,” Proc. VLDB Endow., 2014.
+
+[11] B. Recht, C. Re, S. Wright, and F. Niu, “Hogwild: A lock-free
+approach to parallelizing stochastic gradient descent,” in
+Advances in Neural Information Processing Systems,
+pp. 693–701, 2011.
+
+[12] Z. Liu, Y.-X. Wang, and A. Smola, “Fast diﬀerentially private
+
+matrix factorization,” in Proceedings of the 9th ACM
+Conference on Recommender Systems, RecSys’15, 2015.
+[13] S. Blanas, Y. Li, and J. M. Patel, “Design and evaluation of
+
+main memory hash join algorithms for multi-core cpus,” in
+Proceedings of the 2011 ACM SIGMOD International
+Conference on Management of Data, SIGMOD ’11, 2011.
+[14] F. Yang, J. Li, and J. Cheng, “Husky: Towards a more eﬃcient
+and expressive distributed computing framework,” Proceedings
+of the VLDB Endowment, 2016.
+
+[15] Y. Low, D. Bickson, J. Gonzalez, C. Guestrin, A. Kyrola, and
+J. M. Hellerstein, “Distributed graphlab: a framework for
+machine learning and data mining in the cloud,” Proceedings of
+the VLDB Endowment, 2012.
+
+[16] K. S. Bøgh, S. Chester, and I. Assent, “Work-eﬃcient parallel
+skyline computation for the gpu,” Proc. VLDB Endow., 2015.
+
+[17] K. Zhang, K. Wang, Y. Yuan, L. Guo, R. Lee, and X. Zhang,
+“Mega-kv: a case for gpus to maximize the throughput of
+in-memory key-value stores,” Proceedings of the VLDB
+Endowment, 2015.
+
+[18] K. Wang, K. Zhang, Y. Yuan, S. Ma, R. Lee, X. Ding, and
+
+X. Zhang, “Concurrent analytical query processing with gpus,”
+Proceedings of the VLDB Endowment, 2014.
+
+[19] “NVIDIA Maxwell Architecture ..”
+
+https://developer.nvidia.com/maxwell-compute-architecture.
+
+[20] “NVIDIA Pascal Architecture ..”
+
+http://www.geforce.com/hardware/10series/architecture.
+
+[21] E. A. Sitaridi and K. A. Ross, “Gpu-accelerated string
+
+matching for database applications,” The VLDB Journal, 2016.
+[22] J. Zhou, Q. Guo, H. Jagadish, W. Luan, A. K. Tung, Y. Yang,
+and Y. Zheng, “Generic inverted index on the gpu,” arXiv
+preprint arXiv:1603.08390, 2016.
+
+[23] “NVIDIA NVLink.”
+
+http://www.nvidia.com/object/nvlink.html.
+
+[24] Y. Yang, P. Xiang, J. Kong, and H. Zhou, “A gpgpu compiler
+for memory optimization and parallelism management,” in
+
+Proceedings of the 31st ACM SIGPLAN Conference on
+Programming Language Design and Implementation, PLDI
+’10, (New York, NY, USA), pp. 86–97, ACM, 2010.
+
+[25] B. Zhao, Q. Luo, and C. Wu, “Parallelizing astronomical source
+extraction on the gpu,” in eScience (eScience), 2013 IEEE
+9th International Conference on, 2013.
+
+[26] Y. Nishioka and K. Taura, “Scalable task-parallel sgd on
+
+matrix factorization in multicore architectures,” in Proceedings
+of the 2015 IEEE International Parallel and Distributed
+Processing Symposium Workshop, IPDPSW ’15, (Washington,
+DC, USA), pp. 1178–1184, IEEE Computer Society, 2015.
+
+“Large-scale matrix factorization with distributed stochastic
+gradient descent,” in Proceedings of the 17th ACM SIGKDD
+international conference on Knowledge discovery and data
+mining, ACM, 2011.
+
+[28] “NVIDIA CUDA programming guide..”
+
+http://docs.nvidia.com/cuda/cuda-c-programming-guide.
+[29] D. Song and S. Chen, “Exploiting simd for complex numerical
+predicates,” in 2016 IEEE 32nd International Conference on
+Data Engineering Workshops (ICDEW), 2016.
+
+[30] X. Xie, Y. Liang, G. Sun, and D. Chen, “An eﬃcient compiler
+framework for cache bypassing on gpus,” in IEEE/ACM
+International Conference on Computer-Aided Design, 2013.
+
+[31] Y. Yang, P. Xiang, J. Kong, and H. Zhou, “A GPGPU compiler
+for memory optimization and parallelism management,” in
+2010 ACM SIGPLAN Conference on Programming Language
+Design and Implementation, PLDI ’10, pp. 86–97, 2010.
+[32] C. del Mundo and W.-c. Feng, “Enabling eﬃcient intra-warp
+
+communication for fourier transforms in a many-core
+architecture,” in Supercomputing, 2013. Proceedings of the
+2013 ACM/IEEE International Conference on, 2013.
+
+optimization of sgemm on fermi and kepler gpus,” in
+Proceedings of the 2013 IEEE/ACM International Symposium
+on Code Generation and Optimization(CGO), 2013.
+
+[34] S. Ryoo, C. I. Rodrigues, S. S. Baghsorkhi, S. S. Stone, D. B.
+Kirk, and W.-m. W. Hwu, “Optimization principles and
+application performance evaluation of a multithreaded gpu
+using cuda,” in Proceedings of the 13th ACM SIGPLAN
+Symposium on Principles and Practice of Parallel
+Programming, PPoPP ’08, 2008.
+
+[35] C.-J. Hsieh and I. S. Dhillon, “Fast coordinate descent methods
+
+with variable selection for non-negative matrix factorization,”
+in Proceedings of the 17th ACM SIGKDD international
+conference on Knowledge discovery and data mining, ACM,
+2011.
+
+[36] J. Oh, W.-S. Han, H. Yu, and X. Jiang, “Fast and robust
+
+parallel sgd matrix factorization,” in Proceedings of the 21th
+ACM SIGKDD International Conference on Knowledge
+Discovery and Data Mining, ACM, 2015.
+
+[37] C. Teﬂioudi, F. Makari, and R. Gemulla, “Distributed matrix
+
+completion,” in IEEE 12th International Conference on Data
+Mining, IEEE, 2012.
+
+[38] B. Li, S. Tata, and Y. Sismanis, “Sparkler: supporting
+
+large-scale matrix factorization,” in Proceedings of the 16th
+International Conference on Extending Database Technology,
+ACM, 2013.
+
+[39] S. Schelter, V. Satuluri, and R. Zadeh, “Factorbird-a parameter
+server approach to distributed matrix factorization,” arXiv
+preprint arXiv:1411.0602, 2014.
+
+[40] H. Cui, J. Cipar, Q. Ho, J. K. Kim, S. Lee, A. Kumar, J. Wei,
+W. Dai, G. R. Ganger, P. B. Gibbons, et al., “Exploiting
+bounded staleness to speed up big data analytics,” in USENIX
+Annual Technical Conference (USENIX ATC), 2014.
+[41] X. Meng, J. Bradley, B. Yuvaz, E. Sparks, S. Venkataraman,
+
+D. Liu, J. Freeman, D. Tsai, M. Amde, S. Owen, et al., “Mllib:
+Machine learning in apache spark,” JMLR, 2016.
+
+[42] Y. Zhou, D. Wilkinson, R. Schreiber, and R. Pan, “Large-scale
+
+parallel collaborative ﬁltering for the netﬂix prize,” in
+International Conference on Algorithmic Applications in
+Management, Springer, 2008.
+
+[43] M. Gates, H. Anzt, J. Kurzak, and J. Dongarra, “Accelerating
+
+collaborative ﬁltering using concepts from high performance
+computing,” in Big Data, 2015 IEEE International
+Conference on, 2015.
+
+[44] X. Cai, Z. Xu, G. Lai, C. Wu, and X. Lin, “Gpu-accelerated
+restricted boltzmann machine for collaborative ﬁltering,” in
+International Conference on Algorithms and Architectures for
+Parallel Processing, Springer, 2012.
+
+12
+
+[45] D. Zastrau and S. Edelkamp, “Stochastic gradient descent with
+gpgpu,” in Annual Conference on Artiﬁcial Intelligence,
+Springer, 2012.
+
+13
+
+CuMF_SGD: Fast and Scalable Matrix Factorization
+
+Xiaolong Xie∗1, Wei Tan2, Liana L. Fong2, and Yun Liang1
+
+1Center for Energy-eﬃcient Computing and Applications, School of EECS, Peking University, China
+xiexl pku, ericlyun@pku.edu.cn
+2IBM Thomas J. Watson Research Center, New York, U.S.A
+wtan, llfong@us.ibm.com
+
+6
+1
+0
+2
+ 
+v
+o
+N
+ 
+0
+1
+ 
+ 
+]
+
+G
+L
+.
+s
+c
+[
+ 
+ 
+3
+v
+8
+3
+8
+5
+0
+.
+0
+1
+6
+1
+:
+v
+i
+X
+r
+a
+
+ABSTRACT
+Matrix factorization (MF) has been widely used in recom-
+mender systems, database systems, topic modeling, word
+embedding and others. Stochastic gradient descent (SGD)
+is popular in solving MF problems because it can deal with
+large data sets and is easy to do incremental learning. We
+observed that SGD for MF is memory bound. Meanwhile,
+single-node CPU systems with caches perform well only for
+small data sets; distributed systems have higher aggregated
+memory bandwidth but suﬀer from relatively slow network
+connection. This observation inspires us to accelerate MF
+by utilizing GPUs’s high memory bandwidth and fast intra-
+node connection.
+
+We present cuMF SGD, a CUDA-based SGD solution
+for large-scale MF problems. On a single GPU, we de-
+sign two workload scheduling schemes (batch-Hogwild! and
+wavefront-update) that fully exploit the massive amount
+of cores. Especially, batch-Hogwild!, a vectorized version
+of Hogwild!, overcomes the issue of memory discontinuity.
+We develop highly-optimized kernels for SGD update, lever-
+aging cache, warp-shuﬄe instructions, half-precision ﬂoats,
+etc. We also design a partition scheme to utilize multi-
+ple GPUs while addressing the well-known convergence is-
+sue when parallelizing SGD. Evaluations on three data sets
+with only one Maxwell or Pascal GPU show that cuMF SGD
+runs 3.1X-28.2X as fast compared with state-of-art CPU
+solutions on 1-64 CPU nodes. Evaluations also show that
+cuMF SGD scales well with multiple GPUs on large data
+sets. Finally, we believe that the lessons learned from build-
+ing cuMF SGD are applicable to other machine learning al-
+gorithms on, e.g., (1) embedding layers in deep learning and
+(2) bipartite graph.
+
+1.
+
+INTRODUCTION
+
+Matrix factorization (MF) has been widely used in rec-
+ommender systems [1] by many companies (i.e. Amazon,
+Netﬂix, Facebook [2] and Spotify). It can also be used in
+topic modeling, word embedding [3], database system [4],
+
+∗Work done when the author was with IBM.
+
+and has a natural connection to the embedding layers in
+deep neural network. Let us use the recommender system
+as example. Figure 1 shows a rating matrix R of m×n, with
+sparse ratings from m users to n items. We assume that R
+can be factorized into the multiplication of two low-rank fea-
+ture matrices P (m×k) and Q (k ×n), such that R ≈ P ×Q.
+The derived feature matrices P and Q can be used to pre-
+dict the missing ratings in R, or as features of corresponding
+users/items in downstream machine learning tasks. Matrix
+factorization often involves large data sets. For example,
+the number of users/items may range from thousands to
+hundreds-of-millions, and the number of observed samples
+in R may range from millions to tens-of-billions [2]. There-
+fore, there is a need to scale and speed up large-scale matrix
+factorization.
+
+Figure 1: An example of matrix factorization where
+m=4, n=4, k=2.
+
+There are mainly three algorithms to solve matrix factor-
+ization, i.e., coordinate gradient descent(CGD), alternate
+least square (ALS), and stochastic gradient descent (SGD).
+As previous works show that CGD is prone to reach local
+optima [5], we do not focus on it in this paper. ALS is
+easy to parallelize, and able to deal with implicit feedback
+such as purchase history [1]. Meanwhile, SGD usually con-
+verges faster because it is not as computation-intensive as
+ALS; SGD is also more applicable in incremental learning
+settings where new ratings are continuously fed in. With our
+previous work already tackled ALS [6], we focus on SGD in
+this paper.
+
+The optimization work on matrix factorization contains
+two streams: algorithm and system. The algorithmic stream
+tries to optimize update schemes such as learning rate in gra-
+dient descent, in order to reduce the number of epochs
+(an epoch is a full pass through the training set) needed
+to converge [7]. The system stream tries to accelerate the
+computation, in order to run each epoch faster [6, 5,
+8, 9, 10, 11]. We focus the system stream and the pro-
+posed techniques can be combined with other algorithmic
+optimizations. Our research is based on the following obser-
+vations.
+
+1
+
+Observation 1. MF with SGD is memory bound.
+When solving MF with SGD, in each step of an epoch,
+we randomly select one observed sample, read the corre-
+sponding features p and q, do an inner product of them,
+update p and q, and eventually write them back (details to
+be given in Section 2.2). Obviously, the compute oper-
+ations per byte is very low. For example,, if we use
+single-precision (4 byte ﬂoat) and k = 128, one SGD up-
+date involves 2432 bytes memory access (384 bytes for R +
+2048 bytes for p&q read/write) and 1536 ﬂoating point op-
+erations (256 ops for dot product and 1280 ops for feature
+update). That is, the ﬂops/byte ratio is 1536/2432 ≈ 0.63.
+To put this number into perspective, a modern processor
+can achieve 600 Gﬂops/s and memory bandwidth 60 GB/s.
+This means that the operation’s ﬂops/byte ratio has to be
+as large as 600/60 = 10 to saturate the computation units.
+The low ﬂops/byte ratio of MF with SGD indicates that, its
+performance is bounded by memory bandwidth.
+
+State-of-art SGD-based MF solutions are based on ei-
+ther shared-memory multi-threading [5] or distributed sys-
+tems [10]. We observed that neither of them is capable of
+oﬀering sustained high memory bandwidth to MF.
+
+Observation 2. Single-node CPU systems with
+caching achieve high memory bandwidth only for
+small data sets. Distributed systems have higher
+theoretical bandwidth, but handicapped by the rel-
+atively weak network connection.
+
+Shared-memory CPU systems [5, 12, 13] rely heavily on
+cache to achieve high memory throughput. To understand
+this, we evaluate a single-node and shared-memory MF li-
+brary LIBMF [5] with three data sets (details shown in Sec-
+tion 5). As seen from Figure 2(a), on the small Netﬂix data
+set, LIBMF achieves an observed 194 GB/s bandwidth1,
+much larger than the actual system DRAM bandwidth (∼ 60
+GB/s). However, on a much larger Hugewiki data set, the
+achieved memory bandwidth drops by 45%, to 106 GB/s.
+This is because that Hugewiki data set is large enough to
+vanish a lot of data locality. This evaluation demonstrates
+that single-node CPU systems cannot achieve high memory
+bandwidth when solving large-scale MF problems.
+
+Distributed systems are frequently used to accelerate time-
+consuming applications [14, 15]. Distributed systems can
+aggregate the memory bandwidth and caches on multiple
+nodes. However, SGD is inherently sequential and conse-
+quently diﬀerent nodes need to reconcile the parameters at
+the end of each epoch. As a result, despite of the high ag-
+gregated memory bandwidth, the performance is bounded
+by the limited network bandwidth between computer nodes.
+Figure 2(b) evaluates NOMAD [10], a distributed MF sys-
+tem. We measure its memory eﬃciency which is deﬁned as
+the ratio of achieved memory bandwidth to the aggregated
+memory bandwidth of all nodes. The memory eﬃciency of
+NOMAD rapidly decreases when scale to multiple nodes,
+due to the slow over-network communication.
+
+Observation 3. GPUs are with much higher mem-
+ory bandwidth and enjoy fast inter-device connec-
+tion within a single node, making GPU an ideal can-
+didate to accelerate MF.
+
+GPUs are widely used to accelerate applications with large
+data sets, e.g., machine learning and data base systems [16,
+
+1Observed bandwidth means the aggregated bandwidth of-
+fered by DRAM and cache that is observed by the compute
+unit.
+
+Figure 2: (1) The observed memory bandwidth of
+LIBMF drops when solving large data sets. (b) NO-
+MAD achieves lower memory eﬃciency when scaling
+to multiple nodes.
+
+17, 18]. Observations 1-2 inspire us to resort to GPUs for the
+following reasons. Firstly, GPUs are with high oﬀ-chip mem-
+ory bandwidth. For example, NVIDIA Maxwell GPUs has
+theoretical 360 GB/s oﬀ-chip memory bandwidth [19] and
+the newer generation Pascal GPUs provide 780 GB/s [20].
+These are several times to an-order-of-magnitude higher than
+CPUs. Secondly, GPUs do not rely on cache to reduce la-
+tency; instead, they rely on thousands of concurrent threads
+running on hundreds of cores to achieve high through-
+put [21, 22]. Therefore, unlike CPUs, GPUs’ achieved mem-
+ory bandwidth does not degrade when working data set ex-
+ceeds cache capacity, as shown in Figure 2(a). Thirdly, mul-
+tiple GPUs can enjoy very fast interconnect in a node. For
+example, the recent NVLink [23] can oﬀer 160 GB/s per-
+GPU bandwidth to CPU and peer-GPUs. This is much
+faster than PCIe 3.0 (32GB/s for 16x) and InﬁniBand (6.8
+GB/s for 56Gb/s FDR).
+
+Proposed solution: cuMF SGD to accelerate MF
+by utilizing one or multiple GPUs’ high memory
+bandwidth and intra-node connection.
+
+Parallelizing SGD on GPUs is challenging. Due to the
+architecture distinct, simply mapping CPUs’ algorithms to
+GPUs will lead to extremely low performance and subopti-
+mal resources usage [24, 25]. Moreoever, SGD is inherently
+serial, studies [26] have shown that existing MF solutions do
+not scale well using merely 30 threads. Hence, to acceler-
+ate SGD to MF on GPUs, comprehensive understanding of
+GPU architectural features and novel algorithms are needed.
+We present cuMF SGD2, a fast and scalable SGD-based
+MF solution on GPUs.
+Inspired by the lock-free [11] and
+the block-based [27, 5] approaches, and given the separated
+CPU/GPU memory space, cuMF SGD adopts a hybrid two-
+level execution scheme. (1) At the top level, the rating and
+feature matrices are partitioned into blocks and distributed
+to multiple GPUs. (2) At the second level, each GPU does
+SGD with its own partition. One GPU only synchronizes
+with other GPUs through the shared CPU memory, when
+it completes the processing of its partition. Within each
+GPU, the GPU-local data partition is further distributed to
+the hundreds of thread blocks. Each thread block processes
+SGD updates with highly-optimized vector operations. By
+this means, cuMF SGD is able to scale to massive threads on
+multiple GPUs and perform highly-vectorized operations.
+
+The contributions of this paper are as follows:
+
+• Workload characterization. We identify that SGD-
+based MF is bounded by memory bandwidth and syn-
+
+2http://github.com/cumf/cumf_sgd/
+
+2
+
+chronization overhead, instead of computation. We
+also identify the two challenges in implementing MF on
+GPUs using SGD, i.e., workload partitioning to avoid
+conﬂict and eﬃcient update to exploit GPU hardware.
+
+• Optimization on a single GPU. We design two ways
+to partition and schedule the work within a single
+GPU, i.e., (1) matrix blocking-based algorithm with
+lightweight, wave-based scheduling policy, and (2) batch-
+Hogwild! which can be seen as a mini-batch version of
+the original Hogwild! algorithm. Besides the schedul-
+ing schemes, we also develop highly optimized GPU
+kernels for SGD update. We leverage the architectural
+features such as cache, warp shuﬄe instructions, and
+half-precision ﬂoats with 16 bits.
+
+• Deal with big data on multiple GPUs. We design a
+scheme to partition large data sets and solve them on
+multiple GPUs. We overlap data transfer and compu-
+tation to minimize the execution time. We also ana-
+lyze the relation between the number of partitions and
+the number of workers, which impacts the randomness
+of the SGD update, and ultimately the convergence
+speed.
+
+• Evaluation. We implement cuMF SGD in a shared-
+memory system with multiple GPUs. Experimental
+results show that, cuMF SGD with one GPU is 3.1X-
+28.2X as fast compared with state-of-art CPU solu-
+tions on 1-64 CPU nodes. CuMF SGD is also able
+to scale to multiple GPUs and diﬀerent generations
+GPUs.
+
+The remaining of this paper is organized as follows. Sec-
+tion 2 analyzes the targeted GPU architecture, the work-
+load of SGD for MF, and its parallelization schemes. Sec-
+tion 3 presents the single-GPU cuMF SGD, including the
+two scheduling schemes and the GPU kernel. Section 4 dis-
+cusses how to solve large-scale problems by matrix parti-
+tioning. Section 5 presents and discusses experiment results.
+Section 6 discusses the related work and Section 7 concludes
+this paper.
+
+2. BACKGROUND
+
+This section ﬁrst brieﬂy introduces the GPU architecture,
+and the SGD algorithm for matrix factorization. Then, we
+discuss the parallelism schemes for MF with SGD. We ar-
+gue that, the current lock-free and matrix blocking schemes
+are not scalable on massive GPU cores. This leads to the
+innovations to be presented in Sections 3 and 4.
+
+2.1 The Compute Architecture
+
+To overcome the limited memory bandwidth of a single
+CPU node and limited network bandwidth of distributed
+systems, we use a heterogeneous platform with GPUs, as
+shown in Figure 3. GPUs have high intra-device mem-
+ory bandwidth and are connected via PCIe or NVLink [23]
+with high inter-device bandwidth. The CPUs take care of
+data pre-processing, data movement, and top-level workload
+scheduling, while the GPUs deal with feature update with
+massive parallelism.
+
+GPUs are throughput-oriented processors [28] with thou-
+sands of cores and high bandwidth memory (200-800 GB/s).
+
+3
+
+Figure 3: The compute architecture for cuMF SGD.
+
+To fully exploit the performance potential, GPU applica-
+tions need to be carefully designed to exploit the data and
+In the next two sub-sections we
+computation parallelism.
+show that is non-trivial for SGD as SGD is inherently serial.
+
+2.2 Stochastic Gradient Descent
+
+Given m users and n items and a sparse rating matrix R,
+where ru,v indicates the preference or rating of uth user on
+vth item. The goal of matrix factorization is to train a m×k
+feature matrix P and a k × n feature matrix Q such that:
+
+R ≈ P × Q
+
+The training process of matrix factorization is to minimize
+the following cost function:
+
+(cid:88)
+
+u,v∈R
+
+(ru,v − puqv)2 + λp || pu ||2 +λq || qv ||2
+
+where λp and λq are regularization parameters to avoid over-
+ﬁtting and N is the number of non-zero samples in matrix
+R. The key idea of SGD is in every single step, randomly
+select one sample, e.g., ru,v from R, to calculate the gradient
+w.r.t to the following cost function:
+
+(ru,v − puqv)2 + λp || pu ||2 +λq || qv ||2
+Then update feature vectors with learning rate α:
+
+erru,v = ru,v − puqv
+
+pu ← pu + α(erru,vqT
+
+v − λppu)
+
+qv ← qv + α(erru,vpT
+2.3 Parallelization Schemes
+
+u − λqqv)
+
+SGD is inherently serial where each time one sample is
+selected to update. Given a data set with N samples, an
+epoch (aka., iteration) involves executing N updates one af-
+ter other. Usually, it takes tens to hundreds of epochs to
+converge. To accelerate this process, it was observed that
+two samples can update in parallel if they are neither in
+same row nor same column.
+In this paper, we call these
+samples as ”independent samples”. Figure 4 shows an ex-
+ample. Sample A (row 0, column 1) and Sample B (row
+1, column 0) are independent as they are associated with
+diﬀerent rows in P and diﬀerent columns in Q. Meanwhile,
+Sample A and Sample C are dependent as they update
+the sample column 1 in Q. Ideally, SGD can be parallelized
+without losing accuracy, if we update independent samples
+in parallel, and update dependent samples sequentially [5].
+To accelerate the SGD algorithm, how to partition the
+workloads to parallel workers becomes one major challenge.
+The eﬃciency of the workload scheduling scheme has a pro-
+found impact to the convergence speed. The workload schedul-
+ing policies in existing work [5, 10, 26, 11, 27] can be divided
+into two categories, Hogwild! and matrix-blocking.
+
+Section 4. We need to tackle two issues in single GPU. Sec-
+tion 3.1 discusses the issue of computation optimization,
+i.e., to optimize each individual SGD update by exploiting
+GPU hardware. Section 3.2 discusses workload schedul-
+ing, i.e., to distribute the many SGD updates to thousands
+of concurrent GPU threads.
+
+3.1 Computation Optimization
+
+In MF, one SGD update consists of four steps: 1) read one
+sample (ru,v) from the rating matrix, 2) read two feature
+vectors (pu, qv), 3) compute prediction error ru,v − puqv,
+and 4) update the features. Except the ﬁrst step, other
+three steps are all vector operations at length k. k is an in-
+put parameter and typically ranges from O(10) to O(100).
+On a CPU, a parallel worker can be a thread or process,
+where vector instructions such as SSE and AVX can be used
+to accelerate the computation. GPUs are SIMD architec-
+tures [29], where a thread block is a vector group. Hence,
+in cuMF SGD, we use a thread block as a parallel worker.
+Figure 6 shows a code snippet of the computational part
+of cuMF SGD, where we use k = 64 as an example. We
+highlight the major optimization techniques in Figure 6 and
+explain them in the following.
+
+Cache. Since Fermi architectures, NVIDIA GPUs fea-
+ture on-chip L1 cache and allows the programmers to con-
+trol the cache behavior of each memory instruction (cache
+or bypass). While many GPU applications do not bene-
+ﬁt from cache due to cache contention [30], some memory
+instructions may beneﬁt from cache as the accessed data
+may be frequently reused in the future (temporal reuse) or
+by other threads (spatial reuse). Following the model pro-
+vided by [30], we observe that the memory load of the rating
+matrix beneﬁts from cache and use the intrinsic instruction
+
+ldg [28] to enable cache-assisted read.
+Memory coalescing. On GPUs, when threads within
+one warp access the data within one cache line, the access
+is coalesced to minimize the bandwidth consumption [31].
+This is called memory coalescing. In cuMF SGD, the read/write
+of P and Q are carefully coalesced to ensure that consecutive
+threads access consecutive memory addresses.
+
+Warp shuﬄe. Warp shuﬄe instructions [32] are used
+to compute the dot product p · q and broadcast the re-
+sult. Compared with traditional shared-memory-based ap-
+proaches, this warp shuﬄe-based approach performs better
+because: (1) warp shuﬄe instructions have extra hardware
+support, (2) register is faster than shared memory, and (3)
+no thread synchronization is involved. To exploit the warp
+shuﬄe feature, we ﬁx the thread blocks size as warp size(32).
+ILP. Modern GPUs support compiler-aided super scalar
+to exploit the instruction-level parallelism (ILP). In cuMF SGD,
+when k > 32, a thread is responsible to process k/32 inde-
+pendent scalars. Hence, with awareness of the low-level ar-
+chitecture information, we reorder the instructions to max-
+imize the beneﬁt of ILP.
+
+Register usage. Register ﬁle is an important resource
+on GPUs [33]. As the total number of registers on GPUs are
+limited, while each thread uses too many registers, the regis-
+ter consumption may become the limitation to concurrency.
+In our case, we identify that the concurrency is only limited
+by the number of thread blocks of GPUs [28]. Hence, we
+allocate as many as possible registers to each thread such
+that every reusable variable is kept in the fastest register
+ﬁle.
+
+Figure 4: Samples in diﬀerent rows and columns are
+independent, e.g., samples A and B. Otherwise they
+are dependent, e.g. samples A and C.
+
+Figure 5: Two SGD parallelization schemes for MF:
+Hogwild! and matrix-blocking.
+
+Hogwild!(Figure 5(a)) is a lock-free approach to paral-
+lelize SGD[11]. In this paper, we call that a conﬂict happens
+if two or more concurrent threads update samples in the
+same row or column at the same time. Intuitively, certain
+synchronization should be used to avoid conﬂicts. However,
+Hogwild! observes that such synchronization is not needed
+when the R is very sparse and the number of concurrent
+threads is much less than the number of samples. The in-
+tuition is that, when the aforementioned requirements are
+met, the probability of conﬂicts is very low and the incurred
+accuracy loss can be ignored. Based on the low synchroniza-
+tion overhead, it is used by some MF solutions. However,
+we need to enhance Hogwild! in cuMF SGD in two aspects:
+(1) Hogwild! assumes a global shared memory space, which
+is not feasible in our hybrid CPU/GPU setting where each
+GPU has its own memory space. We can only run Hog-
+in a single GPU and need another layer of partition
+wild!
+among multiple GPUs.
+is not
+cache friendly because of random access. How to balance
+the randomness in SGD update and cache eﬃciency is an
+important issue at design time.
+
+(2) The vanilla Hogwild!
+
+Matrix-blocking (Figure 5(b)) divides the rating matrix
+into several sub-blocks, and sub-blocks that do not share
+rows or columns can update in parallel. Matrix-blocking is
+used by many recent work [10, 5, 26, 27]. Matrix-blocking
+has advantage in that, it totally avoids conﬂict. However, in
+matrix-blocking parallel workers need to ask a global sched-
+uler on which blocks to proceed next. This global scheduler
+has been shown not scalable to many-core architectures [26].
+Hence, we need to enhance existing matrix-blocking schemes
+to scale to the many cores on GPUs.
+
+3. SINGLE GPU IMPLEMENTATION
+
+This section presents how cuMF SGD solves MF with one
+GPU. We pre-assume that all required data resides in GPU
+device memory. We discuss multi-GPU implementation in
+
+4
+
+Figure 6: The exemplify code of computation part of cuMF SGD, where k = 64. The used optimization
+techniques are highlighted.
+
+Half-precision. As addressed before, SGD is memory
+bound. Most of the memory bandwidth is spent on the
+read/write to the feature matrices. Recently, GPU archi-
+tectures support the storage of half-precision (2 bytes vs. 4
+bytes of single-precision) and fast transformation between
+ﬂoating point and half-precision. In practice, after parame-
+ter scaling, half-precision is precise enough to store the fea-
+ture matrices and do not incur accuracy loss. CuMF SGD
+uses half-precision to store feature matrices, which halves
+the memory bandwidth need when accessing feature matri-
+ces.
+
+3.2 Workload Scheduling
+
+3.2.1
+
+Scalability issue of global scheduling
+
+The original SGD algorithm is serial, with samples in the
+rating matrix picked up randomly and updated in sequence.
+To exploit parallelism, a workload scheduling policy that
+assigns tasks to parallel workers becomes necessary. We
+start from investigating the existing CPU-based schedul-
+ing policies. Speciﬁcally, we select a representative system
+LIBMF [5], a shared memory SGD solution to MF. LIBMF
+proposes a novel workload scheduling policy which success-
+fully solves the load imbalance problem and achieve high ef-
+ﬁciency. As shown in Figure 7(a), LIBMF divides the rating
+matrix to several blocks and uses a global scheduling table
+to manage the parallel workers. Whenever a worker is free,
+an idle independent block is scheduled to it. The process
+is repeated until convergence. However, we and others [26]
+observe that LIBMF faces scalability issues because of
+the global scheduling table it uses.
+
+Figure 7(b) shows a scalability study of LIBMF. LIBMF-
+GPU is a GPU version of LIBMF that combines the work-
+load scheduling policy of LIBMF and our GPU computation
+implementation described in Section 3.1. We use SGD up-
+dates per second as the performance metric:
+
+#U pdates/s =
+
+#Iterations × #Samples
+Elapsed T ime
+
+where #Iterations, #Samples, Elapsed T ime indicate num-
+ber of iterations, number of non-zero samples in the input
+matrix R, and elapsed time in seconds, respectively.
+
+Evaluations show that the performance of LIBMF satu-
+rates around 30 concurrent workers (CPU threads), which
+is consistent with the previous study [26]. We perform some
+GPU-speciﬁc optimization techniques when implementing
+
+LIBMF-GPU, however, it still can only scale to 240 thread
+blocks, much lower than the hardware limit(768 thread blocks).
+The reason why LIBMF cannot scale to many parallel work-
+ers is that, it uses a global scheduling table to manage all
+parallel workers.
+
+At each time, only one parallel worker can access the table
+and it is also time consuming to ﬁnd a free block to assign the
+work to. Therefore, when the number of workers increase,
+the waiting time also increases. As the number of worker
+grows, the waiting time becomes dominating. This shows
+that, cuMF SGD can not simply re-use existing schedul-
+ing policies. To overcome this scheduling overhead, we pro-
+pose two GPU-speciﬁc scheduling schemes, batch-Hogwild!
+and Wavefront-update. Batch-Hogwild! avoids block-based
+scheduling and improves the cache eﬃciency by process sam-
+ples in batch. Wavefront-update is still block-based, but
+only requires a local look-up instead of the expensive global
+look-up in LIBMF.
+
+Figure 7:
+(a) LIBMF uses a centralized table to
+manage parallel workers. (b) LIBMF scales to only
+30 CPU threads and 240 GPU thread blocks.
+
+3.2.2 Batch-Hogwild!
+
+We propose batch-Hogwild!, a variant of Hogwild! [11]
+is eﬃcient as its
+with better cache eﬃciency. Hogwild!
+lock-free scheme incurs low scheduling overhead. It is not
+eﬃcient, however, in terms of data locality [5].
+In vanilla
+Hogwild!, each parallel worker randomly selects one sample
+from the rating matrix at each step. After each update, Hog-
+wild! may not access the consecutive samples in the rating
+matrix and corresponding rows and columns in the feature
+matrices during a long time interval, leading to low cache
+eﬃciency. As discussed in Section 3.1, we carefully align the
+
+5
+
+memory access to feature matrices to achieve perfect mem-
+ory coalescing and the high memory bandwidth on GPUs
+makes accessing feature matrices no longer a performance
+bottleneck. To accelerate the access to rating matrix, we
+exploit the spatial data locality using L1 data cache. We let
+each parallel worker, instead of fetch one sample randomly
+at a time, fetches f consecutive samples and update them
+serially. Note that these samples are consecutive in terms
+of their memory storage; because we shuﬄe samples, they
+are still random in terms of their coordinates in R. By do-
+ing so, the data locality is fully exploited. Consider the L1
+cache line size is 128 bytes and the size of each sample is 12
+bytes (one ﬂoating point and two integers), f > 128/12 is
+enough to exploit the locality. We evaluate diﬀerent values
+of f and ﬁnd that they yield similar beneﬁt. Therefore we
+choose f = 256 without loss of generality.
+
+Figure 8: Wavefront-update. Each parallel worker
+is assigned to a row and pre-randomize its column
+update sequence. E.g., when Worker 3 completes
+Block 3 in Wave 1, it releases Column 4 such that
+Worker 1 can start Block 5 in Wave 2.
+
+3.2.3 Wavefront-update
+
+As discussed, existing scheduling schemes [5, 27] impose
+a global synchronization, where all workers look up a global
+table to ﬁnd both row and column coordinates to up-
+date. This is expensive and has been shown not scalable to
+the hundreds of workers on GPUs. To overcome this, we
+propose wavefront-update, a light-weight scheme that locks
+and look up columns only.
+
+We explain the idea of wavefront-update using Figure 8.
+We use four parallel works to process an R which is par-
+titioned into 4 × 8 blocks. Each worker is assigned to a
+row in this 4 × 8 grid, and each generates a permutation
+of {1, 2, 3, ..., 7, 8} as its column update sequence. By this
+means, an epoch is conducted in eight waves given this se-
+quence.
+In each wave, one worker update one block, and
+workers do not update blocks in the same column. Assume
+Worker 1 has the sequence deﬁned as {2, 4, ...} and Workder
+3 has sequence {4, 6, ...}. With this sequence, Worker 1 up-
+dates Block 1 in wave 1 and Block 5 in wave 2. To avoid
+conﬂicts, we propose a light-weight synchronization scheme
+between waves using the column lock array. As shown the
+ﬁgure, we use an array to indicate the status of each col-
+umn. Before a worker moves to next wave, it checks the
+status of the next column deﬁned in its sequence. For ex-
+ample, after Worker 1 ﬁnishes Block 1, it needs to check
+the status of column 4 and does not need to care about
+other columns’ status. When Work 3 ﬁnishes Block 3 and
+releases column 4, Worker 1 is allowed to move to wave 2.
+There are two main beneﬁts by doing so: (1) reduce the
+two-dimension look-up table in [5, 27] to an one-dimension
+array, (2) minimize the workload imbalance problem, as a
+
+worker can start the next block earlier compared to waiting
+for all other workers to ﬁnish.
+
+Figure 9:
+Performance Comparison of batch-
+Hogwild! and wavefront-update on Netﬂix data set.
+Both techniques scale much better than LIBMF.
+
+3.2.4 Evaluation of scheduling schemes
+
+We evaluate both techniques in terms of performance and
+convergence speed using the Netﬂix data set and the Maxwell
+platform3. We use metric #U pdates/s to quantitative the
+performance. Figure 9(a) shows the scalability of batch-
+Hogwild! and Wavefront-update with diﬀerent number of
+parallel workers (i.e., thread blocks). When increasing the
+number of parallel workers, both techniques achieve near-
+linear scalability. When the number of parallel workers hits
+the hardware limit (768) of the Maxwell GPU, both tech-
+niques achieve ∼0.27 billion updates per second, which is 2.5
+times of LIBMF. Therefore, we conclude that our proposed
+solutions can perfectly solve the scalability problem of the
+scheduling policy and fully exploit the equipped hardware
+resources on GPUs. We also evaluate the convergence speed
+of both techniques. We use the root mean square root error
+on the standard test data set as the indication of conver-
+gence. Figure 9(b) shows the decrease of Test RMSE in iter-
+ations. Overall, batch-Hogwild! converges a little bit faster
+than Wavefront-update. The reason is, batch-Hogwild! en-
+forces more randomness in update sequence, compared with
+the block-based wavefront-update. Based on this observa-
+tion, we use batch-Hogwild! as the default scheme on one
+GPU.
+
+4. SCALE TO LARGE DATA SETS
+
+Section 3 presents how to solve MF in a single GPU,
+assuming the rating matrix and feature matrices fully re-
+side in GPU memory. However, the limited GPU memory
+capacity [34] prevents cuMF SGD from solving large scale
+problems. For example, NVIDIA TITAN X GPU has 12
+GB device memory that can only store 1 billion samples
+(one sample needs one ﬂoat and two integers). Nowadays,
+real-world problems may have 1011 samples [6]. Techniques
+such as Uniﬁed Virtual Memory [28] allow GPU to use CPU
+memory but with high overhead. Consider these factors,
+to solve large-scale MF problems that can not ﬁt into one
+GPU’s device memory, we need to partition the data sets
+and stage the partitions to GPUs in batches. Moreover,
+We should overlap data transfer with computation to alle-
+viate the delay caused by slow CPU-GPU memory transfer.
+Please note that, the partitions can be processed by one or
+multiple GPUs.
+
+Details of the data set and platform are presented in Section 5.
+
+3
+
+6
+
+Figure 10: (a) Multiple GPUs solution of cuMF SGD, where the rating matrix is partitioned and each
+partition can ﬁt into a GPU’s device memory. (b) Optimizing the multi-GPU solution by overlapping memory
+transfer with computation.
+
+4.1 Partition to Multiple GPUs
+
+Figure 10 shows our proposed multiple GPUs solution.
+The main idea is to divide the rating matrix R into multiple
+blocks; each block is small enough to ﬁt into a GPU’s device
+memory such that independent blocks can update concur-
+rently on diﬀerent GPUs. The multiple GPU solution works
+as follows,
+
+1. Divide the rating matrix R into i × j blocks. Mean-
+while, divide feature matrix p into i segments and fea-
+ture matrix q into j segments accordingly.
+
+2. When a GPU is idle, randomly select one matrix block
+from those independent blocks and dispatch it to the
+GPU.
+
+3. Transfer the matrix block and corresponding feature
+sub-matrices p and q to the GPU. Then update the
+matrix block using the single GPU implementation dis-
+cussed in Section 3. After the update, transfer p and
+q back to CPU.
+
+4. Iterate from 2 until convergence or the given number
+
+of iterations is reached.
+
+We further explain the proposed scheme using the exam-
+ple shown in Figure 10(a). In Step 1, we divide R into 4 × 4
+blocks and use two GPUs. In Step 2, we send block R2 to
+GPU 0 and R11 to GPU 1. Again, consider the nature of
+MF, updating R2 only touches sub-matrices p1 & q2 while
+updating R11 only touches p3 & q3. Hence, GPU 0 only
+needs to store R2, p1, and q2 in its device memory while
+GPU 1 only needs to store R11, p3, and q3. By doing so, the
+problem is divided and conquered by multiple GPUs. After
+deciding the block scheduling order, cuMF SGD transfers
+p1, q2, R2 to GPU 0 and p3, q3, R11 to GPU 1, then per-
+forms the computation on two GPUs in parallel. The GPU
+side computation follows the rules we discussed in Section 3.
+After ﬁnishing the computation, the updated p1, q2, p3, and
+q3 are transferred back to CPU memory. Note that we don’t
+have to transfer R2 or R11 back to CPU memory as they
+are read-only.
+
+Scalability problem. We mentioned LIBMF faces scal-
+ability issue, as the scheduling overhead increases quickly
+with the number of workers [26]. Our multiple-GPU schedul-
+ing scheme has similar complexity with that of LIBMF.
+However, it does not face the same scalability issue as we
+only need to schedule to a few GPUs instead of hundreds of
+workers.
+
+4.2 Overlap Data Transfer and Compute
+
+GPUs’ memory bandwidth are much larger than the CPU-
+GPU memory transfer bandwidth. For example, NVIDIA
+
+TITAN X GPUs provide 360 GB/s device memory band-
+width while the CPU-GPU memory bandwidth is only ∼16
+GB/s (PCIe v3 16x). In single GPU implementation, CPU-
+GPU memory transfer only happens at the start and end
+of MF, and therefore not dominant. However, when the
+data set can not ﬁt into the GPU memory, memory trans-
+fer happens frequently and has higher impact on the overall
+performance.
+
+Given the memory transfer overhead, we overlap the mem-
+ory transfers and computation when solving large problems,
+as shown in Figure 10(b). Due to space limitation , we only
+plot one GPU. The key idea is, at the block scheduling time,
+instead of randomly selecting one independent block for the
+GPU, the optimized technique randomly selects multiple
+blocks at a time. Those blocks are pipelined to overlap the
+memory transfer and computation: we schedule two blocks
+to GPU 0, and overlap the memory transfer of the second
+block (R8) with the computation of the ﬁrst block (R2).
+Note that the two blocks scheduled to one GPU do not need
+to be independent as they are updated in serial; meanwhile,
+blocks scheduled to diﬀerent GPUs have to be independent
+with each other to avoid conﬂicts. By doing so, we can re-
+duce the overhead of slow CPU-GPU memory transfer and
+improve the overall performance.
+
+Discussion. Allocating more blocks to one GPU would
+yield more performance beneﬁt as more memory/computation
+overlapping can be achieved. However, the number of avail-
+able blocks is limited by how do we divide the rating matrix
+R. Consider we divide R to i × i and we have two GPUs
+running in parallel, the number of blocks per GPU cannot
+be more than i/2. In practice, i is determined by the size
+of the rating matrix R and the available hardware resources
+on the GPU. We will discuss it in Section 5.5.
+Implementation Details
+4.3
+
+Multiple GPUs management. We implement it using
+multiple CPU threads within one process. Within the pro-
+cess, there is one host thread and multiple worker threads,
+where each GPU is bound to one worker thread. The host
+thread manages the workload scheduling and informs worker
+threads of the scheduling decision. Each worker thread then
+starts data transfer and launches compute kernels on a GPU.
+Overlapping. Each worker thread is responsible to over-
+lap the computation and CPU-GPU memory transfers. We
+use CUDA streams to achieve this. A stream contains a list
+of GPU commands that are executed in serial, and com-
+mands in diﬀerent streams are executed in parallel if hard-
+ware resources permit. Each worker thread uses three streams
+that manage CPU-GPU memory transfer, GPU-CPU mem-
+ory transfer, and GPU kernel launch, respectively.
+
+7
+
+• What is the implication of using diﬀerent generations
+
+art approaches.
+
+of GPUs? (Section 5.3)
+
+5. EXPERIMENTS
+
+We implement cuMF SGD using CUDA C (source code at
+http://github.com/cumf/cumf_sgd/), evaluate its perfor-
+mance on public data sets, and demonstrate its advantage
+in terms of performance and cost. Section 5.1 introduces
+the experimental environment. The following experiments
+are designed to answer these questions:
+
+• Compared with state-of-the-art SGD-based approaches
+on CPUs [7, 10], is cuMF SGD better and why? (Sec-
+tion 5.2)
+
+• Compared with the ALS-based GPU library cuMF ALS
+that we published earlier [6], what is the advantage of
+cuMF SGD? (Section 5.4)
+
+• Parallelizing SGD is always tricky and may lead to
+converge problems. What are the factors impacting
+parallelizing SGD? (Section 5.5)
+
+• When scale up to multiple GPUs, is cuMF SGD still
+
+eﬃcient? (Section 5.6)
+
+5.1 Experimental Setup
+
+Platform. We evaluate cuMF SGD on heterogeneous
+platforms with both CPU and GPUs. Table 1 shows the
+conﬁguration of the two servers used in experiments.
+
+Table 1: Conﬁguration of the Maxwell [19] and Pas-
+cal [20] Platform.
+
+Maxwell Platform
+
+CPU
+
+GPU
+
+CPU
+
+GPU
+
+12-core Intel Xeon CPU E5-2670*2 (up to 48 threads),
+512 GB memory
+TITAN X GPU*4, per GPU: 24 SMs, up to 768 thread
+blocks, 12 GB device memory.
+
+Pascal Platform
+
+2*10 PowerNV 8 processors with SMT 8 and NVLink.
+Tesla P100 GPU*4, per GPU: 56 SMs, up to 1792 thread
+blocks, 16 GB device memory.
+
+Data sets. We use three public data sets: Netﬂix, Ya-
+hoo!Music, and Hugewiki. Details of them are shown in Ta-
+ble 2. Netﬂix and Yahoo!Music come with a test set but
+Hugewiki does not. We randomly sample and extract out
+1% of the data set for testing purpose.
+
+Table 2: Details of data sets used.
+
+Dataset
+m
+n
+k
+T rain Set
+T est Set
+
+Netﬂix
+480,190
+17,771
+128
+99,072,112
+1,408,395
+
+Yahoo!Music
+1,000,990
+624,961
+128
+252,800,275
+4,003,960
+
+Hugewiki
+50,082,604
+39,781
+128
+3,069,817,980
+31,327,899
+
+Parameter. As mentioned in the introduction, this pa-
+per focus on system-level but not algorithmic-level optimiza-
+tion. Therefore, we did not spend much eﬀort in parameter
+turning. Instead, we use the parameters adopted by earlier
+work [6, 10, 5, 7]. For learning rate, we adopt the learning
+rate scheduling techniques used by Yun et al. [10], where the
+learning rate st at epoch t is monotonically reduced in the
+following routine:
+
+st =
+
+α
+1 + β · t1.5
+
+α is the given initial learning rate and β is another given
+parameter. The parameters used by cuMF SGD are listed
+in Table 3.
+
+8
+
+Table 3: Used parameters for each dataset.
+
+Dataset
+Netﬂix
+Yahoo!Music
+Hugewiki
+
+λ
+0.05
+1.0
+0.03
+
+α
+0.08
+0.08
+0.08
+
+β
+0.3
+0.2
+0.3
+
+5.2 Comparison of SGD approaches
+
+We compare cuMF SGD with the following state-of-the-
+
+• LIBMF [5]. LIBMF is a representative blocking-based
+solution on shared-memory systems. Its main design
+purpose is to balance the workload across CPU threads
+and accelerate the memory access. It leverages SSE in-
+structions and a novel learning rate schedule to speed
+up the convergence [7].
+
+We exhaustively evaluate all possible parallel param-
+eters on the Maxwell platform and select the optimal
+one. For example, we use 40 CPU threads and divide
+the input rating matrix R into 100 × 100 blocks; we
+set its initial learning rate as 0.1.
+
+• NOMAD [10]. NOMAD is a representative distributed
+matrix factorization solution. It uses a 64-node HPC
+cluster to solve MF. It proposes a decentralized schedul-
+ing policy to reduce the synchronization overhead and
+discusses how to reduce the inter-node communication.
+We present the best results presented in the original
+paper, i.e., using 32 nodes for Netﬂix and Yahoo!Music
+data sets and using all 64 nodes for Hugewiki data set
+on the HPC cluster.
+
+• CuMF SGD. We evaluate cuMF SGD on both Maxwell
+and Pascal platforms, with all three data sets. We
+name the results on Maxwell as cuMF SGD-M and
+those on Pascal as cuMF SGD-P. We use one GPU
+in this subsection. The number of parallel workers
+(thread blocks) is set as the maximum of the corre-
+sponding GPU architecture (768 on Maxwell platform
+and 1792 on Pascal platform). As Hugewiki can not
+ﬁt into one GPU’s memory, we divide it into 64 × 1
+blocks and at each scheduling, we schedule 8 blocks to
+overlap memory transfer and computation.
+
+Figure 11 shows the test RMSE w.r.t. the training time.
+Table 4 summarizes the training time required to converge
+to a reasonable RMSE (0.92, 22.0, and 0.52 for Netﬂix, Ya-
+hoo!Music, and Hugewki, respectively). Results show that
+with only one GPU, cuMF SGD-P and cuMF SGD-
+M perform much better (3.1X to 28.2X) on all data
+sets compared to all competitors, including NOMAD
+on a 64-node HPC cluster. In the following we analyze the
+reasons.
+
+Table 4: Training time speedup normalized by
+LIBMF.
+
+Data set
+LIBMF
+NOMAD
+CuMF SGD-M
+CuMF SGD-P
+
+Netﬂix
+23.0s
+9.6s(2.4X)
+7.5s(3.1X)
+3.3s(7.0X)
+
+Yahoo!Music
+37.9s
+108.7s(0.35X)
+8.8s(4.3X)
+3.8s(10.0X)
+
+Hugewiki
+3020.7s
+459.1s(6.6X)
+442.3s(6.8X)
+107.0s(28.2X)
+
+Figure 11: Test RMSE over training time on three data sets. CuMF SGD converges faster than all other
+approaches with only one GPU card.
+
+bounded and data communication happens frequently be-
+tween parallel workers. When NOMAD distributes parallel
+workers to diﬀerent nodes, the network bandwidth which is
+much less than intra-node communication, becomes the bot-
+tleneck. Consequently, NOMAD achieves suboptimal scal-
+ability when scale from single node to multiple nodes, es-
+pecially for small data sets. For example, on Yahoo!Music,
+NOMAD performs even worse than LIBMF that uses only
+one machine.
+
+NOMAD (on a 64-node HPC cluster) has similar perfor-
+mance with cuMF SGD-M on Hugewiki, while it is much
+slower than cuMF SGD-P. Obviously, cuMF SGD is not only
+faster, using a single CPU card, it is also more cost-eﬃcient.
+
+Figure 14: Updates-per-second and achieved mem-
+ory bandwidth cuMF SGD on Maxwell and Pascal,
+using the Netﬂix data set. CuMF SGD performs
+better on the more recent Pascal platform.
+
+5.3
+
+Implication of GPU Architectures
+
+We have evaluated cuMF SGD on the two current gen-
+erations of GPUs: Maxwell and Pascal. We believe that
+cuMF SGD is able to scale to future GPU architectures
+with minor tuning eﬀort.
+In this section, we explain the
+performance gap between Maxwell and Pascal in three as-
+pects: computation resources, oﬀ-chip memory bandwidth,
+and CPU-GPU memory bandwidth.
+
+Computation resources. We show the SGD updates-
+per-second metric of two platforms with diﬀerent number of
+parallel workers using Netﬂix in Figure 14(a). Results show
+that the Pascal platform scales to more parallel workers and
+achieves much higher #updates/s than Maxwell. This is
+because the Maxwell platform has 24 streaming multipro-
+cessors (SMs) within each GPU, with each SM allowing up
+to 32 parallel workers (thread blocks). Hence, one Maxwell
+GPU allows up to 768 parallel workers. Meanwhile, the Pas-
+cal GPU used has 56 SMs and allows 32 thread blocks on
+each SM. Hence, a Pascal GPU allows up to 1792 parallel
+
+Figure 12: Updates per second and achieved
+memory bandwidth of LIBMF, cuMF SGD-M, and
+cuMF SGD-P. The achieved memory bandwidth ex-
+plains the advantage of cuMF SGD.
+
+Comparison with LIBMF. As shown in Figure 11 and
+Table 4, cuMF SGD outperforms LIBMF on all data sets,
+on both Maxwell and Pascal. More precisely, cuMF SGD-
+M is 3.1X - 6.8X as fast as LIBMF and cuMF SGD-P is
+7.0X - 28.2X as fast. CuMF SGD outperforms LIBMF be-
+cause it can do more updates per second, as shown in Fig-
+ure 12(a). We already mentioned that that matrix factor-
+ization is memory bound; LIBMF is also aware of that and
+strives to keep all frequently used data in the CPU cache.
+However, the limited cache capacity on a single CPU makes
+LIMBF suboptimal in large data sets. As shown in Fig-
+ure 12(b), LIBMF achieves an eﬀective memory bandwidth
+of 194 GB/s4 on the Netﬂix data set (with 99M samples)
+– close to cuMF SGD-M. However its achieved bandwidth
+drops almost by half, to 106 GB/s on the larger Hugewiki
+data set (with 3.1B samples) – while cuMF SGD achieves
+similar bandwidth in all data sets.
+
+On the scheduling policy of LIBMF. Simply porting LIBMF
+
+to GPUs leads to resource under-utilization due to the scal-
+ability of it scheduling policy (recall Figure 7). In contrast,
+the workload scheduling policy and memory/computation
+pattern of cuMF SGD are speciﬁcally designed to fully ex-
+ploit the computation and memory resources on GPUs. Hence,
+as shown in Figure 12 (b), cuMF SGD achieves much higher
+bandwidth than LIBMF. Moreover, cuMF SGD uses half-
+precision (2 bytes for a ﬂoat number) to store feature ma-
+trices. As a result, it can perform twice updates as LIBMF
+with the same bandwidth consumption.
+
+Compared with NOMAD. As presented in [10], NO-
+MAD uses 32 nodes for Netﬂix and Yahoo!Music and 64
+HPC nodes for Hugewiki. Despite of the tremendous hard-
+ware resources, NOMAD is still outperformed by cuMF SGD
+on all data sets. As observed in Section 1, MF is a memory
+
+4
+
+The achieved memory bandwidth measures the data processed by
+the compute units per second, and can be higher than the theoretical
+oﬀ-chip memory bandwidth thanks to the cache eﬀect.
+
+9
+
+Figure 13: CuMF SGD vs. cuMF ALS. With one GPU, CuMF SGD converges faster than cuMF ALS-1
+(one GPU) and similar to cuMF ALS-4 (four GPUs).
+
+CPU-GPU memory bandwidth. Netﬂix and Yahoo!Music
+
+5.5.1 Hogwild!
+
+workers, which is 2.3 times of that of Maxwell GPU. Over-
+all, a Pascal GPU is more powerful than a Maxwell GPU in
+term of the amount of computation resources.
+
+Oﬀ-chip memory bandwidth. As we discussed before,
+SGD is memory bound. Optimized for throughput, GPUs
+are able to overlap memory access and computation by fast
+context switch among parallel workers [28]. When there are
+enough parallel workers running on GPUs, long memory la-
+tencies can be hidden, which is exactly what happens with
+cuMF SGD. In this scenario, memory bandwidth, instead of
+memory latency, becomes the limitation of the performance.
+Pascal platforms provides twice as much theoretical peak
+oﬀ-chip memory bandwidth (780 GB/s) as Maxwell plat-
+forms(360 GB/s). Figure 14(b) shows the achieved memory
+bandwidth on two platforms with diﬀerent number of par-
+allel workers. On Maxwell and Pascal, cuMF SGD achieves
+up to 266 GB/s and 567 GB/s, respectively.
+
+data sets are small enough to ﬁt into the GPU device mem-
+ory. For Hugewiki, memory transfer occurs multiple times
+as the data cannot ﬁt into GPU device memory.
+In Sec-
+tion 4.2, we propose to overlap data transfer with computa-
+tion. Despite of this optimization, the CPU-GPU memory
+bandwidth still has noticeable impact on the overall perfor-
+mance as the perfect overlapping cannot be achieved. On
+the Maxwell platform, the memory transfer between CPU
+and GPU is via PCIe v3 16x with 16 GB/s bandwidth
+(we observe that on average, the achieved bandwidth is 5.5
+GB/s). The very recent Pascal platform is with NVLink [23]
+that can provide 40 GB/s in theory (we observe an av-
+erage 29.1 GB/s CPU-GPU memory transfer bandwidth,
+which is 5.3X as that on Maxwell). This also explains why
+cuMF SGD achieves much more speedup on Hugewiki us-
+ing Pascal platform (28.2X) than that on Maxwell platform
+(6.8X).
+
+5.4 Comparison with cuMF_ALS
+
+Our earlier work cuMF ALS [6] represents the state-of-
+art ALS-based matrix factorization solution on GPUs. We
+use one GPU for cuMF SGD, and one and four GPUs for
+cuMF ALS. Figure 13 compares their performance on three
+data sets on Maxwell. We observe that cuMF SGD is faster
+than cuMF ALS-1 and achieves similar performance with
+cuMF ALS-4 with only one GPU.
+
+It expected that cuMF SGD is faster than cuMF ALS,
+with the following reason. Each epoch of SGD needs mem-
+ory access of O(N ∗ k) and computation of O(N ∗ k). Each
+epoch of ALS needs memory access of O(N ∗ k) and com-
+putation of O(N ∗ k2 + (m + n) ∗ k3). ALS’s epochs run
+slower due to its much more intensive computation. Al-
+
+though ALS needs fewer epochs to coverage, as a whole
+it converges slower. Despite the fact that cuMF ALS is
+slower than cuMF SGD, we still maintain both solutions
+at https://github.com/cuMF/ because they serve diﬀerent
+purposes: SGD converges fast and easy to do incremental
+update, while ALS is easy to parallelize and is able to deal
+with non-sparse rating matrices [1].
+
+5.5 Convergence Analysis
+
+The original SGD algorithm is serial. To speed it up,
+we discuss how to parallelize it on one GPU in Section 3.2
+and on multiple GPUs in Section 4.1. It is well-known that
+SGD parallelization may have subtle implications on conver-
+gence [5, 10]. In the context of matrix factorization, the im-
+plication varies on the two schemes proposed in Section 3.2:
+Hogwild! and matrix-blocking.
+
+For one GPU, Section 3.2.2 proposes the batch-Hogwild!
+scheme to partition work . As a vectorized version of Hog-
+wild!, batch-Hogwild!
+inherits the limitation of Hogwild!.
+Given a rating matrix of m × n and s parallel workers, con-
+vergence is ensured only when the following condition satis-
+ﬁed [11]:
+
+s (cid:28) min(m, n)
+
+For multiple GPUs, Section 4 proposes to ﬁrst divide the
+rating matrix R into i × j blocks and process one block on
+one GPU in parallel if possible.
+In this case, the above
+condition needs to change to:
+
+s (cid:28) min((cid:98)m/i(cid:99), (cid:98)n/j(cid:99))
+
+Our empirical study on Hugewiki data set shows that, s
+needs to be < 1/20 ∗ min((cid:98)m/i(cid:99), (cid:98)n/j(cid:99)) to converge. We
+validated that, Hugewiki data set has min(m, n) = 40k
+and we choose s = 768; convergence is achieved when j <
+40k/20/768 ≈ 2, and fails when j = 4. We believe this is a
+limitation for all Hogwild!-style solutions.
+
+5.5.2 Matrix-blocking
+
+The purpose of matrix-blocking is to avoid conﬂicts be-
+tween parallel workers. However, we observe that matrix-
+blocking can have negative impact on convergence. Fig-
+ure 15 illustrates the the convergence speed of LIBMF on
+Netﬂix data set with diﬀerent parameters.
+In this study,
+we ﬁx the number of parallel workers s = 40; without loss
+of generality, we divide R into i × i blocks and vary the
+value of i. Figure 15 shows that when i is less than or close
+to s, convergence speed is much slower or even cannot be
+achieved. We have similar observations on other data sets
+
+10
+
+and using cuMF SGD. We brieﬂy explain the reason with a
+simple example shown in Figure 16.
+
+Figure 15: Convergence speed of LIBMF on Netﬂix.
+We ﬁx #parallel-workers s = 40 and vary value i to
+partition to i × i blocks.
+
+In Figure 16, we divide the rating matrix into 2 × 2 blocks
+and use 2 parallel workers.
+In theory, 4 blocks can have
+4 × 3 × 2 × 1 = 24 possible update orders. We also show all
+update orders in Figure 16. However, only orders 1∼8 out of
+the total 24 are feasible so as to avoid update conﬂicts. For
+example, when Block 1 is issued to one worker, only Block
+4 can be issued to another worker. Hence, Blocks 2 and 3
+cannot be updated between 1 and 4, which precludes order
+9∼12. This demonstrated that when s ≥ i, all independent
+blocks have to be updated concurrently to make all work-
+ers busy, which enforces certain update order constraints
+and hurts the randomness. As a consequence, convergence
+speed can deteriorate. In practice, when cuMF SGD uses
+two GPUs, R should at least be divided into 4 × 4 blocks.
+
+Figure 16: A simple example to demonstrate the
+limitation of matrix blocking. The rating matrix
+is divided into 2 × 2 blocks and updated using two
+parallel workers.
+
+5.6 Scale Up to Multiple GPUs
+
+System wise, cuMF SGD is designed to scale to multiple
+GPUs. However, algorithmic wise, the scaling is restricted
+by factors such as problem dimension and number of paral-
+lel workers, as discussed earlier in Section 5.5. Among the
+three data sets used in this paper, Netﬂix and Hugewiki have
+very small n(20k, 40k, receptively), preventing cuMF SGD
+from solving them on multiple GPUs. In comparison, Ya-
+hoo!Music can be solved on multiple GPUs as the dimension
+of it R is 1M × 625k. We divide its R into 8 × 8 blocks and
+run it with two Pascal GPUs. Figure 17 shows the conver-
+gence speed. With 2 Pascal GPUs, cuMF SGD takes 2.5s
+to converge to RMSE 22, which is 1.5X as fast as 1 Pascal
+GPU (3.8s). The reason behind this sub-linear scalability
+is that, the multi-GPU cuMF SGD needs to spend time on
+CPU-GPU memory transfer so as to synchronize two GPUs.
+
+6. RELATED WORK
+
+Algorithms. SGD has been widely used to solve matrix
+factorization [1]. Serial SGD can be parallelized to achieve
+better performance. ALS is naturally easy to parallelize and
+
+11
+
+Figure 17: Convergence of cuMF SGD on Ya-
+hoo!Music: two Pascal GPUs is 1.5X as fast as one.
+
+it can also been used in dense matrix factorization. Coordi-
+nate descent is another algorithm to solve matrix factoriza-
+tion [9, 35]. It updates the feature matrix along one coordi-
+nate direction in each step. Our earlier work [6] focuses on
+ALS algorithm.
+
+Parallel SGD solutions have been discussed in multi-
+core [5, 7, 36], multi-node [10, 37], MapReduce [27, 38]
+and parameter-servers [39, 40] settings. Existing works are
+mostly inspired by Hogwild! [11] that allows lock-free up-
+date, or matrix-blocking that partitions to avoid conﬂicts,
+or a combination of them. LIBMF [5, 7] is a representa-
+tive shared-memory multi-core system. Evaluations have
+shown that it outperforms all previous approaches with one
+machine. Although it has been optimized for cache eﬃ-
+ciency, it is still not eﬃcient at processing large scale data
+sets. Moreover, the high complexity of its scheduling policy
+makes it infeasible to scale to many cores. NOMAD [10]
+partitions the data on HPC clusters to improve the cache
+performance. At the meantime, they propose to minimize
+the communication overhead. Compared with LIBMF, it
+has similar performance on one machine and is able to scale
+to 64 nodes.
+
+Parallelization is also used in coordinate descent [9]. Com-
+pared with SGD, coordinate descent has lower overhead and
+runs faster at the ﬁrst few epochs of training. However, due
+to the algorithmic limitation, coordinate descent is prone to
+reach local optima [5] in the later epochs of training.
+
+Compared with CGD and SGD, ALS is inherently easy
+to parallel, ALS based parallel solutions are widely dis-
+cussed [41, 42, 2, 15, 43]. Our earlier work, cuMF ALS [6]
+focuses on optimizing ALS to matrix factorization on GPUs.
+As ALS algorithm is more compute intensive, it runs slower
+than cuMF SGD.
+
+GPU solutions. Prior to our work,
+
+[44] applies Re-
+[45]
+stricted Boltzmann Machines on GPUs to solve MF.
+implements both SGD and ALS on GPU to solve MF. In
+contrast, cuMF SGD outperforms them because we opti-
+mize both memory access and workload scheduling.
+
+7. CONCLUSION
+
+Matrix factorization is widely used in recommender sys-
+tems and other applications. SGD-based MF is limited by
+memory bandwidth which single and multi-GPU systems
+cannot eﬃciently provision. We propose a GPU-based so-
+lution, by observing that GPUs oﬀers abundant memory
+bandwidth and can enjoy fast intra-node connection. We
+design workload partition and schedule schemes to dispatch
+tasks insides a GPU and across GPUs, without impacting
+the randomness required by SGD. We also develop highly-
+optimized GPU kernels for individual SGD updates. With
+only one Maxwell or Pascal GPU, cuMF SGD runs 3.1X-
+28.2X as fast compared with state-of-art CPU solutions on
+
+[3] J. Pennington, R. Socher, and C. D. Manning, “Glove: Global
+
+[27] R. Gemulla, E. Nijkamp, P. J. Haas, and Y. Sismanis,
+
+[9] H.-F. Yu, C.-J. Hsieh, S. Si, and I. Dhillon, “Scalable
+
+[33] J. Lai and A. Seznec, “Performance upper bound analysis and
+
+1-64 CPU nodes. Evaluations also show that cuMF SGD
+scales well on multiple GPUs in large data sets.
+
+8. REFERENCES
+
+[1] Y. Koren, R. Bell, and C. Volinsky, “Matrix factorization
+
+techniques for recommender systems,” Computer.
+[2] “Recommending items to more than a billion people..”
+https://code.facebook.com/posts/861999383875667/
+recommending-items-to-more-than-a-billion-people/.
+
+vectors for word representation.,” in EMNLP, 2014.
+[4] M. Sarwat, Database Management System Support for
+
+Collaborative Filtering Recommender Systems. PhD thesis,
+UNIVERSITY OF MINNESOTA, 2014.
+
+[5] W.-S. Chin, Y. Zhuang, Y.-C. Juan, and C.-J. Lin, “A fast
+
+parallel stochastic gradient method for matrix factorization in
+shared memory systems,” ACM Transactions on Intelligent
+Systems and Technology (TIST), 2015.
+
+[6] W. Tan, L. Cao, and L. Fong, “Faster and cheaper:
+
+Parallelizing large-scale matrix factorization on gpus,” in
+Proceedings of the 25th ACM International Symposium on
+High-Performance Parallel and Distributed Computing,
+HPDC ’16, 2016.
+
+[7] W.-S. Chin, Y. Zhuang, Y.-C. Juan, and C.-J. Lin, “A
+
+learning-rate schedule for stochastic gradient methods to
+matrix factorization,” in Paciﬁc-Asia Conference on
+Knowledge Discovery and Data Mining, Springer, 2015.
+[8] C. Teﬂioudi, F. Makari, and R. Gemulla, “Distributed matrix
+
+completion,” in 2012 IEEE 12th International Conference on
+Data Mining, IEEE, 2012.
+
+coordinate descent approaches to parallel matrix factorization
+for recommender systems,” in 2012 IEEE 12th International
+Conference on Data Mining, IEEE, 2012.
+
+[10] H. Yun, H.-F. Yu, C.-J. Hsieh, S. V. N. Vishwanathan, and
+I. Dhillon, “Nomad: Non-locking, stochastic multi-machine
+algorithm for asynchronous and decentralized matrix
+completion,” Proc. VLDB Endow., 2014.
+
+[11] B. Recht, C. Re, S. Wright, and F. Niu, “Hogwild: A lock-free
+approach to parallelizing stochastic gradient descent,” in
+Advances in Neural Information Processing Systems,
+pp. 693–701, 2011.
+
+[12] Z. Liu, Y.-X. Wang, and A. Smola, “Fast diﬀerentially private
+
+matrix factorization,” in Proceedings of the 9th ACM
+Conference on Recommender Systems, RecSys’15, 2015.
+[13] S. Blanas, Y. Li, and J. M. Patel, “Design and evaluation of
+
+main memory hash join algorithms for multi-core cpus,” in
+Proceedings of the 2011 ACM SIGMOD International
+Conference on Management of Data, SIGMOD ’11, 2011.
+[14] F. Yang, J. Li, and J. Cheng, “Husky: Towards a more eﬃcient
+and expressive distributed computing framework,” Proceedings
+of the VLDB Endowment, 2016.
+
+[15] Y. Low, D. Bickson, J. Gonzalez, C. Guestrin, A. Kyrola, and
+J. M. Hellerstein, “Distributed graphlab: a framework for
+machine learning and data mining in the cloud,” Proceedings of
+the VLDB Endowment, 2012.
+
+[16] K. S. Bøgh, S. Chester, and I. Assent, “Work-eﬃcient parallel
+skyline computation for the gpu,” Proc. VLDB Endow., 2015.
+
+[17] K. Zhang, K. Wang, Y. Yuan, L. Guo, R. Lee, and X. Zhang,
+“Mega-kv: a case for gpus to maximize the throughput of
+in-memory key-value stores,” Proceedings of the VLDB
+Endowment, 2015.
+
+[18] K. Wang, K. Zhang, Y. Yuan, S. Ma, R. Lee, X. Ding, and
+
+X. Zhang, “Concurrent analytical query processing with gpus,”
+Proceedings of the VLDB Endowment, 2014.
+
+[19] “NVIDIA Maxwell Architecture ..”
+
+https://developer.nvidia.com/maxwell-compute-architecture.
+
+[20] “NVIDIA Pascal Architecture ..”
+
+http://www.geforce.com/hardware/10series/architecture.
+
+[21] E. A. Sitaridi and K. A. Ross, “Gpu-accelerated string
+
+matching for database applications,” The VLDB Journal, 2016.
+[22] J. Zhou, Q. Guo, H. Jagadish, W. Luan, A. K. Tung, Y. Yang,
+and Y. Zheng, “Generic inverted index on the gpu,” arXiv
+preprint arXiv:1603.08390, 2016.
+
+[23] “NVIDIA NVLink.”
+
+http://www.nvidia.com/object/nvlink.html.
+
+[24] Y. Yang, P. Xiang, J. Kong, and H. Zhou, “A gpgpu compiler
+for memory optimization and parallelism management,” in
+
+Proceedings of the 31st ACM SIGPLAN Conference on
+Programming Language Design and Implementation, PLDI
+’10, (New York, NY, USA), pp. 86–97, ACM, 2010.
+
+[25] B. Zhao, Q. Luo, and C. Wu, “Parallelizing astronomical source
+extraction on the gpu,” in eScience (eScience), 2013 IEEE
+9th International Conference on, 2013.
+
+[26] Y. Nishioka and K. Taura, “Scalable task-parallel sgd on
+
+matrix factorization in multicore architectures,” in Proceedings
+of the 2015 IEEE International Parallel and Distributed
+Processing Symposium Workshop, IPDPSW ’15, (Washington,
+DC, USA), pp. 1178–1184, IEEE Computer Society, 2015.
+
+“Large-scale matrix factorization with distributed stochastic
+gradient descent,” in Proceedings of the 17th ACM SIGKDD
+international conference on Knowledge discovery and data
+mining, ACM, 2011.
+
+[28] “NVIDIA CUDA programming guide..”
+
+http://docs.nvidia.com/cuda/cuda-c-programming-guide.
+[29] D. Song and S. Chen, “Exploiting simd for complex numerical
+predicates,” in 2016 IEEE 32nd International Conference on
+Data Engineering Workshops (ICDEW), 2016.
+
+[30] X. Xie, Y. Liang, G. Sun, and D. Chen, “An eﬃcient compiler
+framework for cache bypassing on gpus,” in IEEE/ACM
+International Conference on Computer-Aided Design, 2013.
+
+[31] Y. Yang, P. Xiang, J. Kong, and H. Zhou, “A GPGPU compiler
+for memory optimization and parallelism management,” in
+2010 ACM SIGPLAN Conference on Programming Language
+Design and Implementation, PLDI ’10, pp. 86–97, 2010.
+[32] C. del Mundo and W.-c. Feng, “Enabling eﬃcient intra-warp
+
+communication for fourier transforms in a many-core
+architecture,” in Supercomputing, 2013. Proceedings of the
+2013 ACM/IEEE International Conference on, 2013.
+
+optimization of sgemm on fermi and kepler gpus,” in
+Proceedings of the 2013 IEEE/ACM International Symposium
+on Code Generation and Optimization(CGO), 2013.
+
+[34] S. Ryoo, C. I. Rodrigues, S. S. Baghsorkhi, S. S. Stone, D. B.
+Kirk, and W.-m. W. Hwu, “Optimization principles and
+application performance evaluation of a multithreaded gpu
+using cuda,” in Proceedings of the 13th ACM SIGPLAN
+Symposium on Principles and Practice of Parallel
+Programming, PPoPP ’08, 2008.
+
+[35] C.-J. Hsieh and I. S. Dhillon, “Fast coordinate descent methods
+
+with variable selection for non-negative matrix factorization,”
+in Proceedings of the 17th ACM SIGKDD international
+conference on Knowledge discovery and data mining, ACM,
+2011.
+
+[36] J. Oh, W.-S. Han, H. Yu, and X. Jiang, “Fast and robust
+
+parallel sgd matrix factorization,” in Proceedings of the 21th
+ACM SIGKDD International Conference on Knowledge
+Discovery and Data Mining, ACM, 2015.
+
+[37] C. Teﬂioudi, F. Makari, and R. Gemulla, “Distributed matrix
+
+completion,” in IEEE 12th International Conference on Data
+Mining, IEEE, 2012.
+
+[38] B. Li, S. Tata, and Y. Sismanis, “Sparkler: supporting
+
+large-scale matrix factorization,” in Proceedings of the 16th
+International Conference on Extending Database Technology,
+ACM, 2013.
+
+[39] S. Schelter, V. Satuluri, and R. Zadeh, “Factorbird-a parameter
+server approach to distributed matrix factorization,” arXiv
+preprint arXiv:1411.0602, 2014.
+
+[40] H. Cui, J. Cipar, Q. Ho, J. K. Kim, S. Lee, A. Kumar, J. Wei,
+W. Dai, G. R. Ganger, P. B. Gibbons, et al., “Exploiting
+bounded staleness to speed up big data analytics,” in USENIX
+Annual Technical Conference (USENIX ATC), 2014.
+[41] X. Meng, J. Bradley, B. Yuvaz, E. Sparks, S. Venkataraman,
+
+D. Liu, J. Freeman, D. Tsai, M. Amde, S. Owen, et al., “Mllib:
+Machine learning in apache spark,” JMLR, 2016.
+
+[42] Y. Zhou, D. Wilkinson, R. Schreiber, and R. Pan, “Large-scale
+
+parallel collaborative ﬁltering for the netﬂix prize,” in
+International Conference on Algorithmic Applications in
+Management, Springer, 2008.
+
+[43] M. Gates, H. Anzt, J. Kurzak, and J. Dongarra, “Accelerating
+
+collaborative ﬁltering using concepts from high performance
+computing,” in Big Data, 2015 IEEE International
+Conference on, 2015.
+
+[44] X. Cai, Z. Xu, G. Lai, C. Wu, and X. Lin, “Gpu-accelerated
+restricted boltzmann machine for collaborative ﬁltering,” in
+International Conference on Algorithms and Architectures for
+Parallel Processing, Springer, 2012.
+
+12
+
+[45] D. Zastrau and S. Edelkamp, “Stochastic gradient descent with
+gpgpu,” in Annual Conference on Artiﬁcial Intelligence,
+Springer, 2012.
+
+13
+

@@ -1,0 +1,2128 @@
+9
+1
+0
+2
+ 
+b
+e
+F
+ 
+7
+ 
+ 
+]
+L
+M
+
+.
+t
+a
+t
+s
+[
+ 
+ 
+3
+v
+4
+1
+8
+1
+0
+.
+3
+0
+8
+1
+:
+v
+i
+X
+r
+a
+
+Norm matters: efﬁcient and accurate normalization
+schemes in deep networks
+
+Elad Hoffer1∗, Ron Banner2∗, Itay Golan1∗, Daniel Soudry1
+{elad.hoffer, itaygolan, daniel.soudry}@gmail.com
+{ron.banner}@intel.com
+
+(1) Technion - Israel Institute of Technology, Haifa, Israel
+(2) Intel - Artiﬁcial Intelligence Products Group (AIPG)
+
+Abstract
+
+Over the past few years, Batch-Normalization has been commonly used in deep
+networks, allowing faster training and high performance for a wide variety of
+applications. However, the reasons behind its merits remained unanswered, with
+several shortcomings that hindered its use for certain tasks. In this work, we present
+a novel view on the purpose and function of normalization methods and weight-
+decay, as tools to decouple weights’ norm from the underlying optimized objective.
+This property highlights the connection between practices such as normalization,
+weight decay and learning-rate adjustments. We suggest several alternatives to the
+widely used L2 batch-norm, using normalization in L1 and L∞ spaces that can
+substantially improve numerical stability in low-precision implementations as well
+as provide computational and memory beneﬁts. We demonstrate that such methods
+enable the ﬁrst batch-norm alternative to work for half-precision implementations.
+Finally, we suggest a modiﬁcation to weight-normalization, which improves its
+performance on large-scale tasks. 2
+
+1
+
+Introduction
+
+Deep neural networks are known to beneﬁt from normalization between consecutive layers. This
+was made noticeable with the introduction of Batch-Normalization (BN) [19], which normalizes
+the output of each layer to have zero mean and unit variance for each channel across the training
+batch. This idea was later developed to act across channels instead of the batch dimension in Layer-
+normalization [2] and improved in certain tasks with methods such as Batch-Renormalization [18],
+Instance-normalization [35] and Group-Normalization [40]. In addition, normalization methods are
+also applied to the layer parameters instead of their outputs. Methods such as Weight-Normalization
+[27], and Normalization-Propagation [1] targeted the layer weights by normalizing their per-channel
+norm to have a ﬁxed value. Instead of explicit normalization, effort was also made to enable self-
+normalization by adapting activation function so that intermediate activations will converge towards
+zero-mean and unit variance [21].
+
+1.1
+
+Issues with current normalization methods
+
+Batch-normalization, despite its merits, suffers from several issues, as pointed out by previous work
+[27, 18, 1]. These issues are not yet solved in current normalization methods.
+
+∗Equal contribution
+2Source code is available at https://github.com/eladhoffer/norm_matters
+
+32nd Conference on Neural Information Processing Systems (NeurIPS 2018), Montréal, Canada.
+
+Interplay with other regularization mechanisms. Batch normalization typically improves gener-
+alization performance and is therefore considered a regularization mechanism. Other regularization
+mechanisms are typically used in conjunction. For example, weight decay, also known as L2 regular-
+ization, is a common method which adds a penalty proportional to the weights’ norm. Weight decay
+was proven to improve generalization in various problems [24, 5, 4], but, so far, not for non-linear
+deep neural networks. There, [42] performed an extensive set of experiments on regularization and
+concluded that explicit regularization, such as weight decay, may improve generalization performance,
+but is neither necessary nor, by itself, sufﬁcient for reducing generalization error. Therefore, it is
+not clear how weight decay interacts with BN, or if weight decay is even really necessary given that
+batch norm already constrains the output norms [16]).
+
+Task-speciﬁc limitations. A key assumption in BN is the independence between samples appearing
+in each batch. While this assumption seems to hold for most convolutional networks used to classify
+images in conventional datasets, it falls short when employed in domains with strong correlations
+between samples, such as time-series prediction, reinforcement learning, and generative modeling.
+For example, BN requires modiﬁcations to work in recurrent networks [6], for which alternatives such
+as weight-normalization [27] and layer-normalization [2] were explicitly devised, without reaching
+the success and wide adoption of BN. Another example is Generative adversarial networks, which
+are also noted to suffer from the common form of BN. GAN training with BN proved unstable in
+some cases, decreasing the quality of the trained model [28]. Instead, it was replaced with virtual-BN
+[28], weight-norm [41] and spectral normalization [34]. Also, BN may be harmful even in plain
+classiﬁcation tasks, when using unbalanced classes, or correlated instances. In addition, while BN is
+deﬁned for the training phase of the models, it requires a running estimate for the evaluation phase
+– causing a noticeable difference between the two [19]. This shortcoming was addressed later by
+batch-renormalization [18], yet still requiring the original BN at the early steps of training.
+
+Computational costs. From the computational perspective, BN is signiﬁcant in modern neural
+networks, as it requires several ﬂoating point operations across the activation of the entire batch for
+every layer in the network. Previous analysis by Gitman & Ginsburg [11] measured BN to constitute
+up to 24% of the computation time needed for the entire model. It is also not easily parallelized, as it
+is usually memory-bound on currently employed hardware. In addition, the operation requires saving
+the pre-normalized activations for back-propagation in the general case [26], thus using roughly twice
+the memory as a non-BN network in the training phase. Other methods, such as Weight-Normalization
+[27] have a much smaller computational cost but typically achieve signiﬁcantly lower accuracy when
+used in large-scale tasks such as ImageNet [11].
+
+Numerical precision. As the use of deep learning continues to evolve, the interest in low-precision
+training and inference increases [17, 38]. Optimized hardware was designed to leverage beneﬁts
+of low-precision arithmetic and memory operations, with the promise of better, more efﬁcient
+implementations [22]. Although most mathematical operations employed in neural-networks are
+known to be robust to low-precision and quantized values, the current normalization methods are
+notably not suited for these cases. As far as we know, this has remained an unanswered issue,
+with no suggested alternatives. Speciﬁcally, all normalization methods, including BN, use an L2
+normalization (variance computation) to control the activation scale for each layer. The operation
+requires a sum of power-of-two ﬂoating point variables, a square-root function, and a reciprocal
+operation. All of these require both high-precision to avoid zero variance, and a large range to avoid
+overﬂow when adding large numbers. This makes BN an operation that is not easily adapted to
+low-precision implementations. Using norm spaces other than L2 can alleviate these problems, as we
+shall see later.
+
+1.2 Contributions
+
+In this paper we make the following contributions, to address the issues explained in the previous
+section:
+
+• We ﬁnd the mechanism through which weight decay before BN affects learning dynamics:
+we demonstrate that by adjusting the learning rate or normalization method we can exactly
+mimic the effect of weight decay on the learning dynamics. We suggest this happens since
+
+2
+
+certain normalization methods, such as a BN, disentangle the effect of weight vector norm
+on the following activation layers.
+
+• We show that we can replace the standard L2 BN with certain L1 and L∞ based variations
+of BN, which do not harm accuracy (on CIFAR and ImageNet) and even somewhat improve
+training speed. Importantly, we demonstrate that such norms can work well with low
+precision (16bit), while L2 does not. Notably, for these normalization schemes to work well,
+precise scale adjustment is required, which can be approximated analytically.
+
+• We show that by bounding the norm in a weight-normalization scheme, we can signiﬁcantly
+improve its performance in convnets (on ImageNet), and improve baseline performance in
+LSTMs (on WMT14 de-en). This method can alleviate several task-speciﬁc limitations of
+BN, and reduce its computational and memory costs (e.g., allowing to work with signiﬁcantly
+larger batch sizes). Importantly, for the method to work well, we need to carefully choose
+the scale of the weights using the scale of the initialization.
+
+Together, these ﬁndings emphasize that the learning dynamics in neural networks are very sensitive to
+the norms of the weights. Therefore, it is an important goal for future research to search for precise
+and theoretically justiﬁable methods to adjust the scale for these norms.
+
+2 Consequences of the scale invariance of Batch-Normalization
+
+When BN is applied after a linear layer, it is well known that the output is invariant to the channel
+weight vector norm. Speciﬁcally, denoting a channel weight vector with w and ˆw = w/(cid:107)w(cid:107)2, channel
+input as x and BN for batch-norm, we have
+
+BN ((cid:107)w(cid:107)2 ˆwx) = BN ( ˆwx).
+
+This invariance to the weight vector norm means that a BN applied after a layer renders its norm
+irrelevant to the inputs of consecutive layers. The same can be easily shown for the per-channel
+weights of a convolutional layer. The gradient in such case is scaled by 1/(cid:107)w(cid:107)2:
+∂BN((cid:107)w(cid:107)2 ˆwx)
+∂((cid:107)w(cid:107)2 ˆw)
+
+∂BN( ˆwx)
+∂( ˆw)
+
+1
+(cid:107)w(cid:107)2
+
+(2)
+
+=
+
+.
+
+When a layer is rescaling invariant, the key feature of the weight vector is its direction.
+
+During training, the weights are typically incremented through some variant of stochastic gradient
+descent, according to the gradient of the loss at mini-batch t, with learning rate η
+
+wt+1 = wt − η∇Lt (wt) .
+
+Claim. During training, the weight direction ˆwt = wt/(cid:107)wt(cid:107)2 is updated according to
+
+ˆwt+1 = ˆwt − η (cid:107)wt(cid:107)−2 (cid:0)I − ˆwt ˆw(cid:62)
+
+(cid:1) ∇L ( ˆwt) + O (cid:0)η2(cid:1)
+
+t
+
+(1)
+
+(3)
+
+Proof. Denote ρt = (cid:107)wt(cid:107)2. Note that, from eqs. 2 and 3 we have
+
+t+1 = ρ2
+ρ2
+
+t − 2η ˆw(cid:62)
+
+t ∇L ( ˆwt) + η2ρ−2
+
+t (cid:107)∇L ( ˆwt)(cid:107)2
+
+and therefore
+
+(cid:113)
+
+ρt+1 = ρt
+
+1 − 2ηρ−2
+t ˆw(cid:62)
+
+t ∇L ( ˆwt) + η2ρ−4
+
+t ˆw(cid:62)
+t ∇L ( ˆwt) + O (cid:0)η2(cid:1) .
+
+= ρt − ηρ−1
+
+t (cid:107)∇L ( ˆwt)(cid:107)2
+
+Additionally, from eq. 3 we have
+
+and therefore, from eq. 2,
+
+ρt+1 ˆwt+1 = ρt ˆwt − η∇L ( ˆwtρt)
+
+ˆwt+1 =
+
+ρt
+ˆwt − η
+ρt+1
+= (cid:0)1 + ηρ−2
+= ˆwt − ηρ−2
+
+1
+∇L ( ˆwt)
+ρt+1ρt
+t ∇L ( ˆwt)(cid:1) ˆwt − ηρ−2
+(cid:0)I − ˆwt ˆw(cid:62)
+
+t ˆw(cid:62)
+
+t
+
+t
+
+(cid:1) ∇L ( ˆwt) + O (cid:0)η2(cid:1) ,
+
+t ∇L ( ˆwt) + O (cid:0)η2(cid:1)
+
+3
+
+which proves the claim. (cid:3)
+
+Therefore, the step size of the weight direction is approximately proportional to
+
+ˆwt+1 − ˆwt ∝
+
+η
+(cid:107)wt(cid:107)2
+2
+
+.
+
+(4)
+
+in the case of linear layer followed by BN, and for small learning rate η. Note that a similar conclusion
+was reached by van Laarhoven [36], who implicitly assumed ||wt+1|| = ||wt||, though this is only
+approximately true. Here we show this conclusion is still true without such an assumption. This
+analysis continues to hold for non-linear functions that do not affect scale, such as the commonly
+used ReLU function. In addition, although stated for the case of vanilla SGD, similar argument can
+be made for adaptive methods such as Adagrad [9] or Adam [20].
+
+3 Connection between weight-decay, learning rate and normalization
+
+We claim that when using batch-norm (BN), weight decay (WD) improves optimization only by
+ﬁxing the norm to a small range of values, leading to a more stable step size for the weight direction
+(“effective step size”). Fixing the norm allows better control over the effective step size through the
+learning rate η. Without WD, the norm grows unbounded [33], resulting in a decreased effective step
+size, although the learning rate hyper-parameter remains unchanged.
+
+We show empirically that the accuracy gained by us-
+ing WD can be achieved without it, only by adjusting
+the learning rate. Given statistics on norms of each
+channel from a training with WD and BN, similar
+results can be achieved without WD by mimicking
+the effective step size using the following correction
+on the learning rate:
+
+ˆηCorrection = η
+
+(5)
+
+(cid:107)w(cid:107)2
+2
+(cid:107)w[WD on](cid:107)2
+
+2
+
+where w is the weights’ vector of a single channel,
+and w[WD on] is the weights’ vector of the correspond-
+ing channel in a training with WD. This correction
+requires access to the norms of a training with WD,
+hence it is not a practical method to replace WD but
+just a tool to demonstrate our claim on the connection
+between weights’ norm, WD and step size.
+
+Figure 1: The connection between norm,
+effective step size and weight decay. WD
+on/WD off was trained with/without weight
+decay respectively. WD off correction was
+trained without weight decay but with LR
+correction as presented in Eq. 5. LR sched
+replaced with Norm sched is based on WD
+on norms but replacing LR scheduling with
+norm scheduling. (VGG11, CIFAR-10)
+
+We conducted multiple experiments on CIFAR-10
+[23] to show this connection. Figure 1 reports the test
+accuracy during the training of all experiments. We
+were able to show that WD results can be mimicked
+with step size adjustments using the correction for-
+mula from Eq. 5. In another experiment, we replaced
+the learning rate scheduling with norm scheduling.
+To do so, after every gradient descent step we normal-
+ized the norm of each convolution layer channel to
+be the same as the norm of the corresponding channel in training with WD and keep the learning
+rate constant. When learning rate is multiplied by 0.1 in the WD training, we instead multiply the
+. As expected, when
+norm by
+
+10, leading to an effective step size of
+
+√
+
+√
+
+η
+
+102 = 0.1
+
+η
+(cid:107)WWD on(cid:107)2
+2
+
+(cid:107)WWD on(cid:107)2
+2
+
+applying the correction on step-size or replacing learning rate scheduling with norm scheduling, the
+accuracy is similar to the training with WD throughout the learning process, suggesting that WD
+affects the training process only indirectly, by modulating the learning rate. Implementation details
+appear in supplementary material.
+
+4
+
+4 Alternative Lp metrics for batch norm
+
+We suggested above that the main function of BN is to neutralize the effect of the preceding layer’s
+weights. If this hypothesis is true, then other operations might be able to replace BN, as long as they
+remain similarly scale invariant (as in eq. (1)) — and if we keep the same scale as BN. Following
+this reasoning, we next aim to replace the use of L2 norm with scale-invariant alternatives which are
+more appealing computationally and for low-precision implementations.
+
+Batch normalization aims at regularizing the input so that sum of deviations from the mean would
+be standardized according to the Euclidean L2 norm metric. For a layer with d−dimensional input
+x = (x(1), x(2), ..., x(d)), L2 batch norm normalizes each dimension
+
+ˆx(k) =
+
+x(k) − µk
+(cid:112)Var[x(k)]
+
+,
+
+(6)
+
+(7)
+
+where µk is the expectation over x(k), n is the batch size and Var[x(k)] = 1
+
+n ||x(k) − µk||2
+2.
+
+(cid:112)Var[x(k)] is often signiﬁcant with non-negligible overheads on
+The computation toll induced by
+memory and energy consumption. In addition, as the above variance computation involves sums
+of squares, the quantization of the L2 batch norm for training on optimized hardware can lead to
+numerical instability as well as to arithmetic overﬂows when dealing with large values.
+In this section, we suggest alternative Lp metrics for BN. We focus on the L1 and L∞ due to their
+appealing speed and memory computations. In our simulations, we were able to train models faster
+and with fewer GPUs using the above normalizations. Strikingly, by proper adjustments of these
+normalizations, we were able to train various complicated models without hurting the classiﬁcation
+performance. We begin with the L1-norm metric.
+
+4.1 L1 batch norm.
+
+For a layer with d−dimensional input x = (x(1), x(2), ..., x(d)), L1 batch normalization normalize
+each dimension
+
+ˆx(k) =
+
+x(k) − µk
+CL1 · ||x(k) − µk||1/n
+
+where µk is the expectation over x(k), n is the batch size and CL1 = (cid:112)
+π/2 is a normalization term.
+Unlike traditional L2 batch normalization that computes the average squared deviation from the mean
+(variance), L1 batch normalization computes only the average absolute deviation from the mean. This
+has two major advantages. First, L1 batch normalization eliminates the computational efforts required
+for the square and square root operations. Second, as the square of an n-bit number is generally of 2n
+bits, the absence of these square computations makes it much more suitable for low-precision training
+that has been recognized to drastically reduce memory size and power consumption on dedicated
+deep learning hardware [7].
+As can be seen in equation 7, the L1 batch normalization quantiﬁes the variability with the normal-
+ized average absolute deviation CL1 · ||x(k) − µk||1/n. To calculate an appropriate value for the
+constant CL1, we assume the input x(k) follows Gaussian distribution N (µk, σ2). This is a common
+approximation (e.g., Soudry et al. [32]), based on the fact that the neural input x(k) is a sum of many
+inputs, so we expect it to be approximately Gaussian from the central limit theorem. In this case,
+ˆx(k) = (x(k) − µk) follows the distribution N (0, σ2). Therefore, for each example ˆx(k)
+i ∈ ˆx(k) it
+|) = σ · (cid:112)2/π. Accord-
+holds that |ˆx(k)
+| follows a half-normal distribution with expectation E(|ˆx(k)
+ingly, the expected L1 variability measure is related to the traditional standard deviation measure σ
+normally used with batch normalization as follows:
+
+i
+
+i
+
+(cid:20) CL1
+n
+
+E
+
+· ||x(k) − µk||1
+
+=
+
+E[|ˆx(k)
+i
+
+|] = σ.
+
+(cid:21)
+
+(cid:112)
+
+π/2
+n
+
+·
+
+n
+(cid:88)
+
+i=1
+
+Figure 2 presents the validation accuracy of ResNet-18 and ResNet-50 on ImageNet using L1 and
+L2 batch norms. While the use of L1 batch norm is more efﬁcient in terms of resource usage,
+
+5
+
+power, and speed, they both share the same classiﬁcation accuracy. We additionally veriﬁed L1
+layer-normalization to work on Transformer architecture [37]. Using an L1 layer-norm we achieved a
+ﬁnal perplexity of 5.2 vs. 5.1 for original L2 layer-norm using the base model on the WMT14 dataset.
+We note the importance of CL1 to the performance of L1 normalization method. For example, using
+CL1 helps the network to reach 20% validation error more than twice faster than an equivalent
+conﬁguration without this normalization term. With CL1 the network converges at the same rate and
+to the same accuracy as L2 batch norm. It is somewhat surprising that this constant can have such
+an impact on performance, considering the fact that it is so close to one (CL1 = (cid:112)
+π/2 ≈ 1.25). A
+demonstration of this effect can be found in the supplementary material (Figure 1).
+We also note that the use of L1 norm improved both running time and memory consumption for
+models we tested. These beneﬁts can be attributed to the fact that absolute-value operation is
+computationally more efﬁcient compared to the costly square and sqrt operations. Additionally, the
+derivative of |x| is the operation sign(x). Therefore, in order to compute the gradients, we only need
+to cache the sign of the values (not the actual values), allowing for substantial memory savings.
+
+4.2 L∞ batch norm
+
+Another alternative measure for variability that avoids the discussed limitations of the traditional
+L2 batch norm is the maximum absolute deviation. For a layer with d−dimensional input x =
+(x(1), x(2), ..., x(d)), L∞ batch normalization normalize each dimension
+
+ˆx(k) =
+
+x(k) − µk
+CL∞ (n) · ||x(k) − µk||∞
+
+,
+
+(8)
+
+where µk is the expectation over x(k), n is batch size and CL∞ (n) is computed similarly to CL1(n)
+(derivation appears in appendix).
+
+While normalizing according to the maximum absolute deviation offers a major performance advan-
+tage, we found it somewhat less robust to noise compared to L1 and L2 normalization.
+
+By replacing the maximum absolute deviation with the mean of ten largest deviations, we were able
+to make normalization much more robust to outliers. Formally, let sn be the n-th largest value in S,
+we deﬁne Top(k) as follows
+
+Top(k) =
+
+|sn|
+
+1
+k
+
+k
+(cid:88)
+
+n=1
+
+Given a batch of size n, the notion of Top(k) generalizes L1 and L∞ metrics. Indeed, L∞ is precisely
+Top(1) while L1 is by deﬁnition equivalent to Top(n). As we could not ﬁnd a closed-form expression
+for the normalization term CTopK(n), we approximated it as a linear interpolation between CL1
+and CL∞(n). As can be seen in ﬁgure 2, the use of Top(10) was sufﬁcient to close the gap to L2
+performance. For further details on Top(10) implementation, see our code.
+
+4.3 Batch norm at half precision
+
+Due to numerical issues, prior attempts to train neural networks at low precision had to leave batch
+norm operations at full precision (ﬂoat 32) as described by Micikevicius et al. [25], Das et al. [8],
+thus enabling only mixed precision training. This effectively means that low precision hardware still
+needs to support full precision data types. The sensitivity of BN to low precision operations can be
+attributed to both the numerical operations of square and square-root used, as well as the possible
+overﬂow of the sum of many large positive values. To overcome this overﬂow, we may further require
+a wide accumulator with full precision.
+We provide evidence that by using L1 arithmetic, batch normalization can also be quantized to half
+precision with no apparent effect on validation accuracy, as can be seen in ﬁgure 3. Using the standard
+L2 BN in low-precision leads to overﬂow and signiﬁcant quantization noise that quickly deteriorate
+the whole training process, while L1 BN allows training with no visible loss of accuracy.
+
+As far as we know, our work is the ﬁrst to demonstrate a viable alternative to BN in half-precision
+accuracy. We also note that the usage of L∞ BN or its Top(k) relaxation, may further help low-
+
+6
+
+Figure 2: Classiﬁcation error with L2 batch norm
+(baseline) and L1, L∞ and Top(10) alternatives
+for ResNet-18 and ResNet-50 on ImageNet. Com-
+pared to the baselines, L1 and Top(10) normaliza-
+tions reached similar ﬁnal accuracy (difference <
+0.2%), while L∞ had a lower accuracy, by 3%.
+
+Figure 3: L1 BN is more robust to quantization
+noise compared to L2 BN as demonstrated for
+ResNet18 on ImageNet. The half precision run
+of L2 BN was clearly diverging, even when done
+with a high precision accumulator, and we stopped
+the run before termination at epoch 20.
+
+precision implementations by signiﬁcantly lowering the extent of the reduction operation (as only k
+numbers need to be summed).
+
+5
+
+Improving weight normalization
+
+5.1 The advantages and disadvantages of weight normalization
+
+Trying to address several of the limitations of BN, Salimans & Kingma [27] suggested weight
+normalization as its replacement. As weight-norm requires an L2 normalization over the output
+channels of the weight matrix, it alleviates both computational and task-speciﬁc shortcomings of BN,
+ensuring no dependency on the current batch of sample activations within a layer.
+
+While this alternative works well for small-scale problems, as demonstrated in the original work, it
+was noted by Gitman & Ginsburg [11] to fall short in large-scale usage. For example, in the ImageNet
+classiﬁcation task, weight-norm exhibited unstable convergence and signiﬁcantly lower performance
+(67% accuracy on ResNet50 vs. 75% for original).
+
+An additional modiﬁcation of weight-norm called "normalization propagation" [1] adds additional
+multiplicative and additive corrections to address the change of activation distribution introduced
+by the ReLU non-linearity used between layers in the network. These modiﬁcations are not trivially
+applied to architectures with complex structure elements such as residual connections [14].
+
+So far, we’ve demonstrated that the key to the performance of normalization techniques lies in their
+property to neutralize the effect of weight’s norm. Next, we will use this reasoning to overcome the
+shortcoming of weight-norm.
+
+5.2 Norm bounded weight-normalization
+
+We return to the original parametrization suggested for weight norm, for a given initialized weight
+matrix V with N output channels:
+
+where wi is a parameterized weight for the ith output channel, composed from an L2 normalized
+vector vi and scalar gi.
+Weight-norm successfully normalized each output channel’s weights to reside on the L2 sphere.
+However, it allowed the weights scale to change freely through the scalar gi. Following reasoning
+presented earlier in this work, we wish to make the weight’s norm completely disjoint from its values.
+
+wi = gi
+
+vi
+(cid:107)vi(cid:107)2
+
+,
+
+7
+
+We can achieve this by keeping the norm ﬁxed as follows:
+
+wi = ρ
+
+vi
+(cid:107)vi(cid:107)2
+
+,
+
+where ρ is a ﬁxed scalar for each layer that is determined by its size (number of input and output
+channels). A simple choice for ρ is by the initial norm of the weights, e.g ρ = (cid:107)V (cid:107)(t=0)
+N , thus
+employing the various successful heuristics used to initialize modern networks [12, 13]. We also note
+that when using non-linearity with no scale sensitivity (e.g ReLU), these ρ constants can be instead
+incorporated into only the ﬁnal classiﬁer’s weights and biases throughout the network.
+
+√
+/
+
+F
+
+Previous works demonstrated that weight-normalized networks converge faster when augmented with
+mean only batch normalization. We follow this regime, although noting that similar ﬁnal accuracy
+can be achieved without mean normalization but at the cost of slower convergence, or with the use of
+zero-mean preserving activation functions [10].
+
+After this modiﬁcation, we now ﬁnd that weight-norm can be improved substantially, solving the stabil-
+ity issues for large-scale task observed by Gitman & Ginsburg [11] and achieving comparable accuracy
+(although still behind BN). Results on Imagenet using Resnet50 are described in Figure 4, using the
+original settings and training regime [14]. We believe the still apparent margin between the two meth-
+ods can be further decreased using hyper-parameter tuning, such as a modiﬁed learning rate schedule.
+It is also interesting to observe BWN’s effect in re-
+current networks, where BN is not easily applicable
+[6]. We compare weight-norm vs. the common im-
+plementation (with layer-norm) of an attention-based
+LSTM model on the WMT14 en-de translation task
+[3]. The model consists of 2 LSTM cells for both
+encoder and decoder, with an attention mechanism.
+We also compared BWN on the Transformer archi-
+tecture [37] to replace layer-norm, again achieving
+comparable ﬁnal performance (26.5 vs. 27.3 BLEU
+score on the original base model). Both sequence-
+to-sequence models were tested using beam-search
+decoding with a beam size of 4 and length penalty of
+0.6. Additional results for BWN can be found in the
+supplementary material (Figure 2 and Table 1).
+
+5.3 Lp weight normalization
+
+As we did for BN, we can consider weight-
+normalization over norms other than L2 such that
+
+wi = ρ
+
+vi
+(cid:107)vi(cid:107)p
+
+, ρ = (cid:107)V (cid:107)(t=0)
+
+/N 1/p,
+
+p
+
+Figure 4: Comparison between batch-norm
+(BN), weight-norm (WN) and bounded-
+weight-norm (WN) on ResNet50, ImageNet.
+For weight-norm, we show the ﬁnal results
+from [11]. Our implementation of WN here
+could not converge (similar convergence is-
+sues were reported by [11]). Final accuracy:
+BN - 75.3%, WN 67%, and BWN - 73.8%.
+
+where computing the constant ρ over desired (vector)
+norm will ensure proper scaling that was required in
+the BN case. We ﬁnd that similarly to BN, the L1 norm can serve as an alternative to original L2
+weight-norm, where using L∞ cause a noticeable degradation when using its proper form (top-1
+absolute maximum).
+
+6 Discussion
+
+In this work, we analyzed common normalization techniques used in deep learning models, with
+BN as their prime representative. We considered a novel perspective on the role of these methods,
+as tools to decouple the weights’ norm from training objective. This perspective allowed us to
+re-evaluate the necessity of regularization methods such as weight decay, and to suggest new methods
+for normalization, targeting the computational, numerical and task-speciﬁc deﬁciencies of current
+techniques.
+Speciﬁcally, we showed that the use of L1 and L∞-based normalization schemes could provide
+similar results to the standard BN while allowing low-precision computation. Such methods can
+
+8
+
+be easily implemented and deployed to serve in current and future network architectures, low-
+precision devices. A similar L1 normalization scheme to ours was recently introduced by Wu et al.
+[39], appearing in parallel to us (within a week). In contrast to Wu et al. [39], we found that the
+CL1 normalization constant is crucial for achieving the same performance as L2 (see Figure 1 in
+supplementary). We additionally demonstrated the beneﬁts of L1 normalization: it allowed us to
+perform BN in half-precision ﬂoating-point, which was noted to fail in previous works [25, 8] and
+required full and mixed precision hardware.
+
+Moreover, we suggested a bounded weight normalization method, which achieves improved results
+on large-scale tasks (ImageNet) and is nearly comparable with BN. Such a weight normalization
+scheme improves computational costs and can enable improved learning in tasks that were not suited
+for previous methods such as reinforcement-learning and temporal modeling.
+
+We further suggest that insights gained from our ﬁndings can have an additional impact on the way
+neural networks are devised and trained. As previous works demonstrated, a strong connection
+appears between the batch-size used and the optimal learning rate regime [15, 31] and between
+the weight-decay factor and learning-rate [36]. We deepen this connection and suggest that all of
+these factors, including the effective norm (or temperature), are mutually affecting one another. It is
+plausible, given our results, that some (or all) of these hyper-parameters can be ﬁxed given another,
+which can potentially ease the design and training of modern models.
+
+Acknowledgments
+
+References
+
+2016.
+
+This research was supported by the Israel Science Foundation (grant No. 31/1031), and by the Taub
+foundation. A Titan Xp used for this research was donated by the NVIDIA Corporation.
+
+[1] Arpit, D., Zhou, Y., Kota, B., and Govindaraju, V. Normalization propagation: A parametric
+technique for removing internal covariate shift in deep networks. In International Conference
+on Machine Learning, pp. 1168–1176, 2016.
+
+[2] Ba, J. L., Kiros, J. R., and Hinton, G. E. Layer normalization. arXiv preprint arXiv:1607.06450,
+
+[3] Bahdanau, D., Cho, K., and Bengio, Y. Neural machine translation by jointly learning to align
+
+and translate. arXiv preprint arXiv:1409.0473, 2014.
+
+[4] Bös, S. Optimal weight decay in a perceptron. In International Conference on Artiﬁcial Neural
+
+Networks, pp. 551–556. Springer, 1996.
+
+[5] Bos, S. and Chug, E. Using weight decay to optimize the generalization ability of a perceptron.
+In Neural Networks, 1996., IEEE International Conference on, volume 1, pp. 241–246. IEEE,
+1996.
+
+[6] Cooijmans, T., Ballas, N., Laurent, C., Gülçehre, Ç., and Courville, A. Recurrent batch
+
+normalization. arXiv preprint arXiv:1603.09025, 2016.
+
+[7] Courbariaux, M., Bengio, Y., and David, J.-P. Training deep neural networks with low precision
+
+multiplications. arXiv preprint arXiv:1412.7024, 2014.
+
+[8] Das, D., Mellempudi, N., Mudigere, D., et al. Mixed precision training of convolutional neural
+
+networks using integer operations. arXiv preprint arXiv:1802.00930, 2018.
+
+[9] Duchi, J., Hazan, E., and Singer, Y. Adaptive subgradient methods for online learning and
+stochastic optimization. Journal of Machine Learning Research, 12(Jul):2121–2159, 2011.
+
+[10] Eidnes, L. and Nøkland, A. Shifting mean activation towards zero with bipolar activation
+
+functions. arXiv preprint arXiv:1709.04054, 2017.
+
+[11] Gitman, I. and Ginsburg, B. Comparison of batch normalization and weight normalization
+
+algorithms for the large-scale image classiﬁcation. CoRR, abs/1709.08145, 2017.
+
+9
+
+[12] Glorot, X. and Bengio, Y. Understanding the difﬁculty of training deep feedforward neural
+networks. In Proceedings of the Thirteenth International Conference on Artiﬁcial Intelligence
+and Statistics, pp. 249–256, 2010.
+
+[13] He, K., Zhang, X., Ren, S., and Sun, J. Delving deep into rectiﬁers: Surpassing human-level
+performance on imagenet classiﬁcation. In Proceedings of the IEEE international conference
+on computer vision, pp. 1026–1034, 2015.
+
+[14] He, K., Zhang, X., Ren, S., and Sun, J. Deep residual learning for image recognition. In
+Proceedings of the IEEE conference on computer vision and pattern recognition, pp. 770–778,
+2016.
+
+[15] Hoffer, E., Hubara, I., and Soudry, D. Train longer, generalize better: closing the generalization
+gap in large batch training of neural networks. In Advances in Neural Information Processing
+Systems, pp. 1729–1739, 2017.
+
+[16] Huang, L., Liu, X., Lang, B., and Li, B. Projection based weight normalization for deep neural
+
+networks. arXiv preprint arXiv:1710.02338, 2017.
+
+[17] Hubara, I., Courbariaux, M., Soudry, D., El-Yaniv, R., and Bengio, Y. Binarized neural networks.
+
+In Advances in neural information processing systems, pp. 4107–4115, 2016.
+
+[18] Ioffe, S. Batch renormalization: Towards reducing minibatch dependence in batch-normalized
+models. In Advances in Neural Information Processing Systems, pp. 1942–1950, 2017.
+
+[19] Ioffe, S. and Szegedy, C. Batch normalization: Accelerating deep network training by reducing
+internal covariate shift. In International conference on machine learning, pp. 448–456, 2015.
+
+[20] Kingma, D. P. and Ba, J. Adam: A method for stochastic optimization. arXiv preprint
+
+arXiv:1412.6980, 2014.
+
+[21] Klambauer, G., Unterthiner, T., Mayr, A., and Hochreiter, S. Self-normalizing neural networks.
+
+In Advances in Neural Information Processing Systems, pp. 971–980, 2017.
+
+[22] Köster, U., Webb, T., Wang, X., et al. Flexpoint: An adaptive numerical format for efﬁcient
+training of deep neural networks. In Advances in Neural Information Processing Systems, pp.
+1740–1750, 2017.
+
+[23] Krizhevsky, A. and Hinton, G. Learning multiple layers of features from tiny images. 2009.
+
+[24] Krogh, A. and Hertz, J. A. A simple weight decay can improve generalization. In Advances in
+
+neural information processing systems, pp. 950–957, 1992.
+
+[25] Micikevicius, P., Narang, S., Alben, J., et al. Mixed precision training.
+
+In International
+
+Conference on Learning Representations, 2018.
+
+[26] Rota Bulò, S., Porzi, L., and Kontschieder, P.
+
+In-place activated batchnorm for memory-
+
+optimized training of dnns. arXiv preprint arXiv:1712.02616, 2017.
+
+[27] Salimans, T. and Kingma, D. P. Weight normalization: A simple reparameterization to accelerate
+training of deep neural networks. In Advances in Neural Information Processing Systems, pp.
+901–909, 2016.
+
+[28] Salimans, T., Goodfellow, I., Zaremba, W., et al. Improved techniques for training gans. In
+
+Advances in Neural Information Processing Systems, pp. 2234–2242, 2016.
+
+[29] Simon, M. K. Probability distributions involving gaussian random variables: A handbook for
+
+engineers and scientists. 2007.
+
+[30] Simonyan, K. and Zisserman, A. Very deep convolutional networks for large-scale image
+
+recognition. arXiv preprint arXiv:1409.1556, 2014.
+
+[31] Smith, S. L., Kindermans, P.-J., and Le, Q. V. Don’t decay the learning rate, increase the batch
+
+size. arXiv preprint arXiv:1711.00489, 2017.
+
+10
+
+[32] Soudry, D., Hubara, I., and Meir, R. Expectation backpropagation: parameter-free training
+of multilayer neural networks with continuous or discrete weights. In Neural Information
+Processing Systems, volume 2, pp. 963–971, dec 2014.
+
+[33] Soudry, D., Hoffer, E., and Srebro, N. The implicit bias of gradient descent on separable data.
+
+International Conference on Learning Representations, 2018.
+
+[34] Takeru Miyato, M. K. Y. Y., Toshiki Kataoka. Spectral normalization for generative adversarial
+
+networks. International Conference on Learning Representations, 2018.
+
+[35] Ulyanov, D., Vedaldi, A., and Lempitsky, V. S. Instance normalization: The missing ingredient
+
+for fast stylization. CoRR, abs/1607.08022, 2016.
+
+[36] van Laarhoven, T. L2 regularization versus batch and weight normalization. arXiv preprint
+
+arXiv:1706.05350, 2017.
+
+[37] Vaswani, A., Shazeer, N., Parmar, N., et al. Attention is all you need. In Advances in Neural
+
+Information Processing Systems, pp. 6000–6010, 2017.
+
+[38] Venkatesh, G., Nurvitadhi, E., and Marr, D. Accelerating deep convolutional networks using
+low-precision and sparsity. In Acoustics, Speech and Signal Processing (ICASSP), 2017 IEEE
+International Conference on, pp. 2861–2865. IEEE, 2017.
+
+[39] Wu, S., Li, G., Deng, L., et al. L1-Norm Batch Normalization for Efﬁcient Training of Deep
+
+Neural Networks. ArXiv e-prints, February 2018.
+
+[40] Wu, Y. and He, K. Group normalization. arXiv preprint arXiv:1803.08494, 2018.
+
+[41] Xiang, S. and Li, H. On the effect of batch normalization and weight normalization in generative
+
+adversarial networks. arXiv preprint arXiv:1704.03971, 2017.
+
+[42] Zhang, C., Bengio, S., Hardt, M., Recht, B., and Vinyals, O. Understanding deep learning
+
+requires rethinking generalization. arXiv preprint arXiv:1611.03530, 2016.
+
+11
+
+Appendix
+
+A Implementation Details for weight-decay experiments
+
+For all experiments, we used weight decay on the last layer with λ = 0.0005. The network architecture
+was VGG11 [30] with batch-norm after every convolution layer. Learning rate started from 0.1 and
+divided by 10 every 20 epochs (except for the norm scheduling experiment). The same random seed
+was used.
+
+B Importance of normalization constants
+
+Figure 5 shows the scale adjustment CL1 is essential even for relatively "easy" data sets with small
+images such as CIFAR-10, and the use of smaller/bigger adjustments degrade classiﬁcation accuracy.
+
+Figure 5: Left: The importance of normalization term CL1 while training ResNet-56 on CIFAR-10.
+Without the use of CL1 the network convergence is slower and reaches a higher ﬁnal validation
+error. We found it somewhat surprising that a constant so close to one (CL1 = (cid:112)
+π/2 ≈ 1.25) can
+have such an impact on performance. Right: We further demonstrate, with Res18 on ImageNet, that
+CL1 = (cid:112)
+
+π/2 is optimal: performance is only degraded if we modify CL1 to other nearby values.
+
+B.1 Deriving normalization constants
+
+As seen in main manuscript,
+
+ˆx(k) =
+
+x(k) − µk
+CL∞ (n) · ||x(k) − µk||∞
+
+,
+
+(9)
+
+To derive CL∞ (n) we assume again the input {xi}n
+i=1 to the normalization layer follows a Gaussian
+distribution N (µk, σ2). Then, the maximum absolute deviation is bounded on expectation as follows
+[29]:
+
+σ · (cid:112)ln(n)
+(cid:112)
+π ln(2)
+
+≤ ||x(k) − µk||∞ ≤ σ
+
+(cid:112)2 ln(n).
+
+Therefore, by multiplying the three sides of inequality with the normalization term CL∞(n), the L∞
+batch norm in equation 9 approximates an expectation the original standard deviation measure σ as
+follows:
+
+where l =
+
+· σ ≈ 0.793σ, and u =
+
+1+
+
+π ln (4)
+2
+
+· σ ≈ 1.543σ.
+
+√
+
+1+
+√
+
+π ln (4)
+
+8π ln(2)
+
+l ≤ CL∞(n) · ||x(k) − µk||∞ ≤ u
+√
+
+12
+
+C Bounded-weight-norm experiments
+
+Figure 6 depicts the impact of bounded-weight norm for the training of recurrent network on WMT14
+de-en task. Additional results are summarized in Table 1.
+
+Figure 6: Comparison between bounded weight-norm and baseline with no normalization in recurrent
+network training (LSTM attention-seq2seq network, WMT14 de-en)
+
+.
+Table 1: Results comparing baseline, L2 based normalization with weight-norm (WN) by Salimans
+& Kingma [27] and our bounded-weight-norm (BWN)
+
+Network
+
+Batch/Layer norm WN
+
+BWN
+
+ResNet56 (Cifar10)
+ResNet50 (ImageNet)
+Transformer (WMT14)
+2-layer LSTM (WMT14)
+
+93.03%
+75.3%
+27.3 BLEU
+21.5 BLEU
+
+92.5%
+67% [11]
+-
+-
+
+92.88%
+73.8%
+26.5 BLEU
+21.2 BLEU
+
+Table 2: Results comparing baseline, and L1 norm results (ppl for perplexity)
+
+Network
+
+ResNet56 (Cifar10)
+ResNet18 (ImageNet)
+ResNet50 (ImageNet)
+Transformer (WMT14)
+
+L2 Batch/Layer norm L1 Batch/Layer norm
+93.03%
+69.8%
+75.3%
+5.1 ppl
+
+93.07%
+69.74%
+75.32%
+5.2 ppl
+
+13
+
+9
+1
+0
+2
+ 
+b
+e
+F
+ 
+7
+ 
+ 
+]
+L
+M
+
+.
+t
+a
+t
+s
+[
+ 
+ 
+3
+v
+4
+1
+8
+1
+0
+.
+3
+0
+8
+1
+:
+v
+i
+X
+r
+a
+
+Norm matters: efﬁcient and accurate normalization
+schemes in deep networks
+
+Elad Hoffer1∗, Ron Banner2∗, Itay Golan1∗, Daniel Soudry1
+{elad.hoffer, itaygolan, daniel.soudry}@gmail.com
+{ron.banner}@intel.com
+
+(1) Technion - Israel Institute of Technology, Haifa, Israel
+(2) Intel - Artiﬁcial Intelligence Products Group (AIPG)
+
+Abstract
+
+Over the past few years, Batch-Normalization has been commonly used in deep
+networks, allowing faster training and high performance for a wide variety of
+applications. However, the reasons behind its merits remained unanswered, with
+several shortcomings that hindered its use for certain tasks. In this work, we present
+a novel view on the purpose and function of normalization methods and weight-
+decay, as tools to decouple weights’ norm from the underlying optimized objective.
+This property highlights the connection between practices such as normalization,
+weight decay and learning-rate adjustments. We suggest several alternatives to the
+widely used L2 batch-norm, using normalization in L1 and L∞ spaces that can
+substantially improve numerical stability in low-precision implementations as well
+as provide computational and memory beneﬁts. We demonstrate that such methods
+enable the ﬁrst batch-norm alternative to work for half-precision implementations.
+Finally, we suggest a modiﬁcation to weight-normalization, which improves its
+performance on large-scale tasks. 2
+
+1
+
+Introduction
+
+Deep neural networks are known to beneﬁt from normalization between consecutive layers. This
+was made noticeable with the introduction of Batch-Normalization (BN) [19], which normalizes
+the output of each layer to have zero mean and unit variance for each channel across the training
+batch. This idea was later developed to act across channels instead of the batch dimension in Layer-
+normalization [2] and improved in certain tasks with methods such as Batch-Renormalization [18],
+Instance-normalization [35] and Group-Normalization [40]. In addition, normalization methods are
+also applied to the layer parameters instead of their outputs. Methods such as Weight-Normalization
+[27], and Normalization-Propagation [1] targeted the layer weights by normalizing their per-channel
+norm to have a ﬁxed value. Instead of explicit normalization, effort was also made to enable self-
+normalization by adapting activation function so that intermediate activations will converge towards
+zero-mean and unit variance [21].
+
+1.1
+
+Issues with current normalization methods
+
+Batch-normalization, despite its merits, suffers from several issues, as pointed out by previous work
+[27, 18, 1]. These issues are not yet solved in current normalization methods.
+
+∗Equal contribution
+2Source code is available at https://github.com/eladhoffer/norm_matters
+
+32nd Conference on Neural Information Processing Systems (NeurIPS 2018), Montréal, Canada.
+
+Interplay with other regularization mechanisms. Batch normalization typically improves gener-
+alization performance and is therefore considered a regularization mechanism. Other regularization
+mechanisms are typically used in conjunction. For example, weight decay, also known as L2 regular-
+ization, is a common method which adds a penalty proportional to the weights’ norm. Weight decay
+was proven to improve generalization in various problems [24, 5, 4], but, so far, not for non-linear
+deep neural networks. There, [42] performed an extensive set of experiments on regularization and
+concluded that explicit regularization, such as weight decay, may improve generalization performance,
+but is neither necessary nor, by itself, sufﬁcient for reducing generalization error. Therefore, it is
+not clear how weight decay interacts with BN, or if weight decay is even really necessary given that
+batch norm already constrains the output norms [16]).
+
+Task-speciﬁc limitations. A key assumption in BN is the independence between samples appearing
+in each batch. While this assumption seems to hold for most convolutional networks used to classify
+images in conventional datasets, it falls short when employed in domains with strong correlations
+between samples, such as time-series prediction, reinforcement learning, and generative modeling.
+For example, BN requires modiﬁcations to work in recurrent networks [6], for which alternatives such
+as weight-normalization [27] and layer-normalization [2] were explicitly devised, without reaching
+the success and wide adoption of BN. Another example is Generative adversarial networks, which
+are also noted to suffer from the common form of BN. GAN training with BN proved unstable in
+some cases, decreasing the quality of the trained model [28]. Instead, it was replaced with virtual-BN
+[28], weight-norm [41] and spectral normalization [34]. Also, BN may be harmful even in plain
+classiﬁcation tasks, when using unbalanced classes, or correlated instances. In addition, while BN is
+deﬁned for the training phase of the models, it requires a running estimate for the evaluation phase
+– causing a noticeable difference between the two [19]. This shortcoming was addressed later by
+batch-renormalization [18], yet still requiring the original BN at the early steps of training.
+
+Computational costs. From the computational perspective, BN is signiﬁcant in modern neural
+networks, as it requires several ﬂoating point operations across the activation of the entire batch for
+every layer in the network. Previous analysis by Gitman & Ginsburg [11] measured BN to constitute
+up to 24% of the computation time needed for the entire model. It is also not easily parallelized, as it
+is usually memory-bound on currently employed hardware. In addition, the operation requires saving
+the pre-normalized activations for back-propagation in the general case [26], thus using roughly twice
+the memory as a non-BN network in the training phase. Other methods, such as Weight-Normalization
+[27] have a much smaller computational cost but typically achieve signiﬁcantly lower accuracy when
+used in large-scale tasks such as ImageNet [11].
+
+Numerical precision. As the use of deep learning continues to evolve, the interest in low-precision
+training and inference increases [17, 38]. Optimized hardware was designed to leverage beneﬁts
+of low-precision arithmetic and memory operations, with the promise of better, more efﬁcient
+implementations [22]. Although most mathematical operations employed in neural-networks are
+known to be robust to low-precision and quantized values, the current normalization methods are
+notably not suited for these cases. As far as we know, this has remained an unanswered issue,
+with no suggested alternatives. Speciﬁcally, all normalization methods, including BN, use an L2
+normalization (variance computation) to control the activation scale for each layer. The operation
+requires a sum of power-of-two ﬂoating point variables, a square-root function, and a reciprocal
+operation. All of these require both high-precision to avoid zero variance, and a large range to avoid
+overﬂow when adding large numbers. This makes BN an operation that is not easily adapted to
+low-precision implementations. Using norm spaces other than L2 can alleviate these problems, as we
+shall see later.
+
+1.2 Contributions
+
+In this paper we make the following contributions, to address the issues explained in the previous
+section:
+
+• We ﬁnd the mechanism through which weight decay before BN affects learning dynamics:
+we demonstrate that by adjusting the learning rate or normalization method we can exactly
+mimic the effect of weight decay on the learning dynamics. We suggest this happens since
+
+2
+
+certain normalization methods, such as a BN, disentangle the effect of weight vector norm
+on the following activation layers.
+
+• We show that we can replace the standard L2 BN with certain L1 and L∞ based variations
+of BN, which do not harm accuracy (on CIFAR and ImageNet) and even somewhat improve
+training speed. Importantly, we demonstrate that such norms can work well with low
+precision (16bit), while L2 does not. Notably, for these normalization schemes to work well,
+precise scale adjustment is required, which can be approximated analytically.
+
+• We show that by bounding the norm in a weight-normalization scheme, we can signiﬁcantly
+improve its performance in convnets (on ImageNet), and improve baseline performance in
+LSTMs (on WMT14 de-en). This method can alleviate several task-speciﬁc limitations of
+BN, and reduce its computational and memory costs (e.g., allowing to work with signiﬁcantly
+larger batch sizes). Importantly, for the method to work well, we need to carefully choose
+the scale of the weights using the scale of the initialization.
+
+Together, these ﬁndings emphasize that the learning dynamics in neural networks are very sensitive to
+the norms of the weights. Therefore, it is an important goal for future research to search for precise
+and theoretically justiﬁable methods to adjust the scale for these norms.
+
+2 Consequences of the scale invariance of Batch-Normalization
+
+When BN is applied after a linear layer, it is well known that the output is invariant to the channel
+weight vector norm. Speciﬁcally, denoting a channel weight vector with w and ˆw = w/(cid:107)w(cid:107)2, channel
+input as x and BN for batch-norm, we have
+
+BN ((cid:107)w(cid:107)2 ˆwx) = BN ( ˆwx).
+
+This invariance to the weight vector norm means that a BN applied after a layer renders its norm
+irrelevant to the inputs of consecutive layers. The same can be easily shown for the per-channel
+weights of a convolutional layer. The gradient in such case is scaled by 1/(cid:107)w(cid:107)2:
+∂BN((cid:107)w(cid:107)2 ˆwx)
+∂((cid:107)w(cid:107)2 ˆw)
+
+∂BN( ˆwx)
+∂( ˆw)
+
+1
+(cid:107)w(cid:107)2
+
+(2)
+
+=
+
+.
+
+When a layer is rescaling invariant, the key feature of the weight vector is its direction.
+
+During training, the weights are typically incremented through some variant of stochastic gradient
+descent, according to the gradient of the loss at mini-batch t, with learning rate η
+
+wt+1 = wt − η∇Lt (wt) .
+
+Claim. During training, the weight direction ˆwt = wt/(cid:107)wt(cid:107)2 is updated according to
+
+ˆwt+1 = ˆwt − η (cid:107)wt(cid:107)−2 (cid:0)I − ˆwt ˆw(cid:62)
+
+(cid:1) ∇L ( ˆwt) + O (cid:0)η2(cid:1)
+
+t
+
+(1)
+
+(3)
+
+Proof. Denote ρt = (cid:107)wt(cid:107)2. Note that, from eqs. 2 and 3 we have
+
+t+1 = ρ2
+ρ2
+
+t − 2η ˆw(cid:62)
+
+t ∇L ( ˆwt) + η2ρ−2
+
+t (cid:107)∇L ( ˆwt)(cid:107)2
+
+and therefore
+
+(cid:113)
+
+ρt+1 = ρt
+
+1 − 2ηρ−2
+t ˆw(cid:62)
+
+t ∇L ( ˆwt) + η2ρ−4
+
+t ˆw(cid:62)
+t ∇L ( ˆwt) + O (cid:0)η2(cid:1) .
+
+= ρt − ηρ−1
+
+t (cid:107)∇L ( ˆwt)(cid:107)2
+
+Additionally, from eq. 3 we have
+
+and therefore, from eq. 2,
+
+ρt+1 ˆwt+1 = ρt ˆwt − η∇L ( ˆwtρt)
+
+ˆwt+1 =
+
+ρt
+ˆwt − η
+ρt+1
+= (cid:0)1 + ηρ−2
+= ˆwt − ηρ−2
+
+1
+∇L ( ˆwt)
+ρt+1ρt
+t ∇L ( ˆwt)(cid:1) ˆwt − ηρ−2
+(cid:0)I − ˆwt ˆw(cid:62)
+
+t ˆw(cid:62)
+
+t
+
+t
+
+(cid:1) ∇L ( ˆwt) + O (cid:0)η2(cid:1) ,
+
+t ∇L ( ˆwt) + O (cid:0)η2(cid:1)
+
+3
+
+which proves the claim. (cid:3)
+
+Therefore, the step size of the weight direction is approximately proportional to
+
+ˆwt+1 − ˆwt ∝
+
+η
+(cid:107)wt(cid:107)2
+2
+
+.
+
+(4)
+
+in the case of linear layer followed by BN, and for small learning rate η. Note that a similar conclusion
+was reached by van Laarhoven [36], who implicitly assumed ||wt+1|| = ||wt||, though this is only
+approximately true. Here we show this conclusion is still true without such an assumption. This
+analysis continues to hold for non-linear functions that do not affect scale, such as the commonly
+used ReLU function. In addition, although stated for the case of vanilla SGD, similar argument can
+be made for adaptive methods such as Adagrad [9] or Adam [20].
+
+3 Connection between weight-decay, learning rate and normalization
+
+We claim that when using batch-norm (BN), weight decay (WD) improves optimization only by
+ﬁxing the norm to a small range of values, leading to a more stable step size for the weight direction
+(“effective step size”). Fixing the norm allows better control over the effective step size through the
+learning rate η. Without WD, the norm grows unbounded [33], resulting in a decreased effective step
+size, although the learning rate hyper-parameter remains unchanged.
+
+We show empirically that the accuracy gained by us-
+ing WD can be achieved without it, only by adjusting
+the learning rate. Given statistics on norms of each
+channel from a training with WD and BN, similar
+results can be achieved without WD by mimicking
+the effective step size using the following correction
+on the learning rate:
+
+ˆηCorrection = η
+
+(5)
+
+(cid:107)w(cid:107)2
+2
+(cid:107)w[WD on](cid:107)2
+
+2
+
+where w is the weights’ vector of a single channel,
+and w[WD on] is the weights’ vector of the correspond-
+ing channel in a training with WD. This correction
+requires access to the norms of a training with WD,
+hence it is not a practical method to replace WD but
+just a tool to demonstrate our claim on the connection
+between weights’ norm, WD and step size.
+
+Figure 1: The connection between norm,
+effective step size and weight decay. WD
+on/WD off was trained with/without weight
+decay respectively. WD off correction was
+trained without weight decay but with LR
+correction as presented in Eq. 5. LR sched
+replaced with Norm sched is based on WD
+on norms but replacing LR scheduling with
+norm scheduling. (VGG11, CIFAR-10)
+
+We conducted multiple experiments on CIFAR-10
+[23] to show this connection. Figure 1 reports the test
+accuracy during the training of all experiments. We
+were able to show that WD results can be mimicked
+with step size adjustments using the correction for-
+mula from Eq. 5. In another experiment, we replaced
+the learning rate scheduling with norm scheduling.
+To do so, after every gradient descent step we normal-
+ized the norm of each convolution layer channel to
+be the same as the norm of the corresponding channel in training with WD and keep the learning
+rate constant. When learning rate is multiplied by 0.1 in the WD training, we instead multiply the
+. As expected, when
+norm by
+
+10, leading to an effective step size of
+
+√
+
+√
+
+η
+
+102 = 0.1
+
+η
+(cid:107)WWD on(cid:107)2
+2
+
+(cid:107)WWD on(cid:107)2
+2
+
+applying the correction on step-size or replacing learning rate scheduling with norm scheduling, the
+accuracy is similar to the training with WD throughout the learning process, suggesting that WD
+affects the training process only indirectly, by modulating the learning rate. Implementation details
+appear in supplementary material.
+
+4
+
+4 Alternative Lp metrics for batch norm
+
+We suggested above that the main function of BN is to neutralize the effect of the preceding layer’s
+weights. If this hypothesis is true, then other operations might be able to replace BN, as long as they
+remain similarly scale invariant (as in eq. (1)) — and if we keep the same scale as BN. Following
+this reasoning, we next aim to replace the use of L2 norm with scale-invariant alternatives which are
+more appealing computationally and for low-precision implementations.
+
+Batch normalization aims at regularizing the input so that sum of deviations from the mean would
+be standardized according to the Euclidean L2 norm metric. For a layer with d−dimensional input
+x = (x(1), x(2), ..., x(d)), L2 batch norm normalizes each dimension
+
+ˆx(k) =
+
+x(k) − µk
+(cid:112)Var[x(k)]
+
+,
+
+(6)
+
+(7)
+
+where µk is the expectation over x(k), n is the batch size and Var[x(k)] = 1
+
+n ||x(k) − µk||2
+2.
+
+(cid:112)Var[x(k)] is often signiﬁcant with non-negligible overheads on
+The computation toll induced by
+memory and energy consumption. In addition, as the above variance computation involves sums
+of squares, the quantization of the L2 batch norm for training on optimized hardware can lead to
+numerical instability as well as to arithmetic overﬂows when dealing with large values.
+In this section, we suggest alternative Lp metrics for BN. We focus on the L1 and L∞ due to their
+appealing speed and memory computations. In our simulations, we were able to train models faster
+and with fewer GPUs using the above normalizations. Strikingly, by proper adjustments of these
+normalizations, we were able to train various complicated models without hurting the classiﬁcation
+performance. We begin with the L1-norm metric.
+
+4.1 L1 batch norm.
+
+For a layer with d−dimensional input x = (x(1), x(2), ..., x(d)), L1 batch normalization normalize
+each dimension
+
+ˆx(k) =
+
+x(k) − µk
+CL1 · ||x(k) − µk||1/n
+
+where µk is the expectation over x(k), n is the batch size and CL1 = (cid:112)
+π/2 is a normalization term.
+Unlike traditional L2 batch normalization that computes the average squared deviation from the mean
+(variance), L1 batch normalization computes only the average absolute deviation from the mean. This
+has two major advantages. First, L1 batch normalization eliminates the computational efforts required
+for the square and square root operations. Second, as the square of an n-bit number is generally of 2n
+bits, the absence of these square computations makes it much more suitable for low-precision training
+that has been recognized to drastically reduce memory size and power consumption on dedicated
+deep learning hardware [7].
+As can be seen in equation 7, the L1 batch normalization quantiﬁes the variability with the normal-
+ized average absolute deviation CL1 · ||x(k) − µk||1/n. To calculate an appropriate value for the
+constant CL1, we assume the input x(k) follows Gaussian distribution N (µk, σ2). This is a common
+approximation (e.g., Soudry et al. [32]), based on the fact that the neural input x(k) is a sum of many
+inputs, so we expect it to be approximately Gaussian from the central limit theorem. In this case,
+ˆx(k) = (x(k) − µk) follows the distribution N (0, σ2). Therefore, for each example ˆx(k)
+i ∈ ˆx(k) it
+|) = σ · (cid:112)2/π. Accord-
+holds that |ˆx(k)
+| follows a half-normal distribution with expectation E(|ˆx(k)
+ingly, the expected L1 variability measure is related to the traditional standard deviation measure σ
+normally used with batch normalization as follows:
+
+i
+
+i
+
+(cid:20) CL1
+n
+
+E
+
+· ||x(k) − µk||1
+
+=
+
+E[|ˆx(k)
+i
+
+|] = σ.
+
+(cid:21)
+
+(cid:112)
+
+π/2
+n
+
+·
+
+n
+(cid:88)
+
+i=1
+
+Figure 2 presents the validation accuracy of ResNet-18 and ResNet-50 on ImageNet using L1 and
+L2 batch norms. While the use of L1 batch norm is more efﬁcient in terms of resource usage,
+
+5
+
+power, and speed, they both share the same classiﬁcation accuracy. We additionally veriﬁed L1
+layer-normalization to work on Transformer architecture [37]. Using an L1 layer-norm we achieved a
+ﬁnal perplexity of 5.2 vs. 5.1 for original L2 layer-norm using the base model on the WMT14 dataset.
+We note the importance of CL1 to the performance of L1 normalization method. For example, using
+CL1 helps the network to reach 20% validation error more than twice faster than an equivalent
+conﬁguration without this normalization term. With CL1 the network converges at the same rate and
+to the same accuracy as L2 batch norm. It is somewhat surprising that this constant can have such
+an impact on performance, considering the fact that it is so close to one (CL1 = (cid:112)
+π/2 ≈ 1.25). A
+demonstration of this effect can be found in the supplementary material (Figure 1).
+We also note that the use of L1 norm improved both running time and memory consumption for
+models we tested. These beneﬁts can be attributed to the fact that absolute-value operation is
+computationally more efﬁcient compared to the costly square and sqrt operations. Additionally, the
+derivative of |x| is the operation sign(x). Therefore, in order to compute the gradients, we only need
+to cache the sign of the values (not the actual values), allowing for substantial memory savings.
+
+4.2 L∞ batch norm
+
+Another alternative measure for variability that avoids the discussed limitations of the traditional
+L2 batch norm is the maximum absolute deviation. For a layer with d−dimensional input x =
+(x(1), x(2), ..., x(d)), L∞ batch normalization normalize each dimension
+
+ˆx(k) =
+
+x(k) − µk
+CL∞ (n) · ||x(k) − µk||∞
+
+,
+
+(8)
+
+where µk is the expectation over x(k), n is batch size and CL∞ (n) is computed similarly to CL1(n)
+(derivation appears in appendix).
+
+While normalizing according to the maximum absolute deviation offers a major performance advan-
+tage, we found it somewhat less robust to noise compared to L1 and L2 normalization.
+
+By replacing the maximum absolute deviation with the mean of ten largest deviations, we were able
+to make normalization much more robust to outliers. Formally, let sn be the n-th largest value in S,
+we deﬁne Top(k) as follows
+
+Top(k) =
+
+|sn|
+
+1
+k
+
+k
+(cid:88)
+
+n=1
+
+Given a batch of size n, the notion of Top(k) generalizes L1 and L∞ metrics. Indeed, L∞ is precisely
+Top(1) while L1 is by deﬁnition equivalent to Top(n). As we could not ﬁnd a closed-form expression
+for the normalization term CTopK(n), we approximated it as a linear interpolation between CL1
+and CL∞(n). As can be seen in ﬁgure 2, the use of Top(10) was sufﬁcient to close the gap to L2
+performance. For further details on Top(10) implementation, see our code.
+
+4.3 Batch norm at half precision
+
+Due to numerical issues, prior attempts to train neural networks at low precision had to leave batch
+norm operations at full precision (ﬂoat 32) as described by Micikevicius et al. [25], Das et al. [8],
+thus enabling only mixed precision training. This effectively means that low precision hardware still
+needs to support full precision data types. The sensitivity of BN to low precision operations can be
+attributed to both the numerical operations of square and square-root used, as well as the possible
+overﬂow of the sum of many large positive values. To overcome this overﬂow, we may further require
+a wide accumulator with full precision.
+We provide evidence that by using L1 arithmetic, batch normalization can also be quantized to half
+precision with no apparent effect on validation accuracy, as can be seen in ﬁgure 3. Using the standard
+L2 BN in low-precision leads to overﬂow and signiﬁcant quantization noise that quickly deteriorate
+the whole training process, while L1 BN allows training with no visible loss of accuracy.
+
+As far as we know, our work is the ﬁrst to demonstrate a viable alternative to BN in half-precision
+accuracy. We also note that the usage of L∞ BN or its Top(k) relaxation, may further help low-
+
+6
+
+Figure 2: Classiﬁcation error with L2 batch norm
+(baseline) and L1, L∞ and Top(10) alternatives
+for ResNet-18 and ResNet-50 on ImageNet. Com-
+pared to the baselines, L1 and Top(10) normaliza-
+tions reached similar ﬁnal accuracy (difference <
+0.2%), while L∞ had a lower accuracy, by 3%.
+
+Figure 3: L1 BN is more robust to quantization
+noise compared to L2 BN as demonstrated for
+ResNet18 on ImageNet. The half precision run
+of L2 BN was clearly diverging, even when done
+with a high precision accumulator, and we stopped
+the run before termination at epoch 20.
+
+precision implementations by signiﬁcantly lowering the extent of the reduction operation (as only k
+numbers need to be summed).
+
+5
+
+Improving weight normalization
+
+5.1 The advantages and disadvantages of weight normalization
+
+Trying to address several of the limitations of BN, Salimans & Kingma [27] suggested weight
+normalization as its replacement. As weight-norm requires an L2 normalization over the output
+channels of the weight matrix, it alleviates both computational and task-speciﬁc shortcomings of BN,
+ensuring no dependency on the current batch of sample activations within a layer.
+
+While this alternative works well for small-scale problems, as demonstrated in the original work, it
+was noted by Gitman & Ginsburg [11] to fall short in large-scale usage. For example, in the ImageNet
+classiﬁcation task, weight-norm exhibited unstable convergence and signiﬁcantly lower performance
+(67% accuracy on ResNet50 vs. 75% for original).
+
+An additional modiﬁcation of weight-norm called "normalization propagation" [1] adds additional
+multiplicative and additive corrections to address the change of activation distribution introduced
+by the ReLU non-linearity used between layers in the network. These modiﬁcations are not trivially
+applied to architectures with complex structure elements such as residual connections [14].
+
+So far, we’ve demonstrated that the key to the performance of normalization techniques lies in their
+property to neutralize the effect of weight’s norm. Next, we will use this reasoning to overcome the
+shortcoming of weight-norm.
+
+5.2 Norm bounded weight-normalization
+
+We return to the original parametrization suggested for weight norm, for a given initialized weight
+matrix V with N output channels:
+
+where wi is a parameterized weight for the ith output channel, composed from an L2 normalized
+vector vi and scalar gi.
+Weight-norm successfully normalized each output channel’s weights to reside on the L2 sphere.
+However, it allowed the weights scale to change freely through the scalar gi. Following reasoning
+presented earlier in this work, we wish to make the weight’s norm completely disjoint from its values.
+
+wi = gi
+
+vi
+(cid:107)vi(cid:107)2
+
+,
+
+7
+
+We can achieve this by keeping the norm ﬁxed as follows:
+
+wi = ρ
+
+vi
+(cid:107)vi(cid:107)2
+
+,
+
+where ρ is a ﬁxed scalar for each layer that is determined by its size (number of input and output
+channels). A simple choice for ρ is by the initial norm of the weights, e.g ρ = (cid:107)V (cid:107)(t=0)
+N , thus
+employing the various successful heuristics used to initialize modern networks [12, 13]. We also note
+that when using non-linearity with no scale sensitivity (e.g ReLU), these ρ constants can be instead
+incorporated into only the ﬁnal classiﬁer’s weights and biases throughout the network.
+
+√
+/
+
+F
+
+Previous works demonstrated that weight-normalized networks converge faster when augmented with
+mean only batch normalization. We follow this regime, although noting that similar ﬁnal accuracy
+can be achieved without mean normalization but at the cost of slower convergence, or with the use of
+zero-mean preserving activation functions [10].
+
+After this modiﬁcation, we now ﬁnd that weight-norm can be improved substantially, solving the stabil-
+ity issues for large-scale task observed by Gitman & Ginsburg [11] and achieving comparable accuracy
+(although still behind BN). Results on Imagenet using Resnet50 are described in Figure 4, using the
+original settings and training regime [14]. We believe the still apparent margin between the two meth-
+ods can be further decreased using hyper-parameter tuning, such as a modiﬁed learning rate schedule.
+It is also interesting to observe BWN’s effect in re-
+current networks, where BN is not easily applicable
+[6]. We compare weight-norm vs. the common im-
+plementation (with layer-norm) of an attention-based
+LSTM model on the WMT14 en-de translation task
+[3]. The model consists of 2 LSTM cells for both
+encoder and decoder, with an attention mechanism.
+We also compared BWN on the Transformer archi-
+tecture [37] to replace layer-norm, again achieving
+comparable ﬁnal performance (26.5 vs. 27.3 BLEU
+score on the original base model). Both sequence-
+to-sequence models were tested using beam-search
+decoding with a beam size of 4 and length penalty of
+0.6. Additional results for BWN can be found in the
+supplementary material (Figure 2 and Table 1).
+
+5.3 Lp weight normalization
+
+As we did for BN, we can consider weight-
+normalization over norms other than L2 such that
+
+wi = ρ
+
+vi
+(cid:107)vi(cid:107)p
+
+, ρ = (cid:107)V (cid:107)(t=0)
+
+/N 1/p,
+
+p
+
+Figure 4: Comparison between batch-norm
+(BN), weight-norm (WN) and bounded-
+weight-norm (WN) on ResNet50, ImageNet.
+For weight-norm, we show the ﬁnal results
+from [11]. Our implementation of WN here
+could not converge (similar convergence is-
+sues were reported by [11]). Final accuracy:
+BN - 75.3%, WN 67%, and BWN - 73.8%.
+
+where computing the constant ρ over desired (vector)
+norm will ensure proper scaling that was required in
+the BN case. We ﬁnd that similarly to BN, the L1 norm can serve as an alternative to original L2
+weight-norm, where using L∞ cause a noticeable degradation when using its proper form (top-1
+absolute maximum).
+
+6 Discussion
+
+In this work, we analyzed common normalization techniques used in deep learning models, with
+BN as their prime representative. We considered a novel perspective on the role of these methods,
+as tools to decouple the weights’ norm from training objective. This perspective allowed us to
+re-evaluate the necessity of regularization methods such as weight decay, and to suggest new methods
+for normalization, targeting the computational, numerical and task-speciﬁc deﬁciencies of current
+techniques.
+Speciﬁcally, we showed that the use of L1 and L∞-based normalization schemes could provide
+similar results to the standard BN while allowing low-precision computation. Such methods can
+
+8
+
+be easily implemented and deployed to serve in current and future network architectures, low-
+precision devices. A similar L1 normalization scheme to ours was recently introduced by Wu et al.
+[39], appearing in parallel to us (within a week). In contrast to Wu et al. [39], we found that the
+CL1 normalization constant is crucial for achieving the same performance as L2 (see Figure 1 in
+supplementary). We additionally demonstrated the beneﬁts of L1 normalization: it allowed us to
+perform BN in half-precision ﬂoating-point, which was noted to fail in previous works [25, 8] and
+required full and mixed precision hardware.
+
+Moreover, we suggested a bounded weight normalization method, which achieves improved results
+on large-scale tasks (ImageNet) and is nearly comparable with BN. Such a weight normalization
+scheme improves computational costs and can enable improved learning in tasks that were not suited
+for previous methods such as reinforcement-learning and temporal modeling.
+
+We further suggest that insights gained from our ﬁndings can have an additional impact on the way
+neural networks are devised and trained. As previous works demonstrated, a strong connection
+appears between the batch-size used and the optimal learning rate regime [15, 31] and between
+the weight-decay factor and learning-rate [36]. We deepen this connection and suggest that all of
+these factors, including the effective norm (or temperature), are mutually affecting one another. It is
+plausible, given our results, that some (or all) of these hyper-parameters can be ﬁxed given another,
+which can potentially ease the design and training of modern models.
+
+Acknowledgments
+
+References
+
+2016.
+
+This research was supported by the Israel Science Foundation (grant No. 31/1031), and by the Taub
+foundation. A Titan Xp used for this research was donated by the NVIDIA Corporation.
+
+[1] Arpit, D., Zhou, Y., Kota, B., and Govindaraju, V. Normalization propagation: A parametric
+technique for removing internal covariate shift in deep networks. In International Conference
+on Machine Learning, pp. 1168–1176, 2016.
+
+[2] Ba, J. L., Kiros, J. R., and Hinton, G. E. Layer normalization. arXiv preprint arXiv:1607.06450,
+
+[3] Bahdanau, D., Cho, K., and Bengio, Y. Neural machine translation by jointly learning to align
+
+and translate. arXiv preprint arXiv:1409.0473, 2014.
+
+[4] Bös, S. Optimal weight decay in a perceptron. In International Conference on Artiﬁcial Neural
+
+Networks, pp. 551–556. Springer, 1996.
+
+[5] Bos, S. and Chug, E. Using weight decay to optimize the generalization ability of a perceptron.
+In Neural Networks, 1996., IEEE International Conference on, volume 1, pp. 241–246. IEEE,
+1996.
+
+[6] Cooijmans, T., Ballas, N., Laurent, C., Gülçehre, Ç., and Courville, A. Recurrent batch
+
+normalization. arXiv preprint arXiv:1603.09025, 2016.
+
+[7] Courbariaux, M., Bengio, Y., and David, J.-P. Training deep neural networks with low precision
+
+multiplications. arXiv preprint arXiv:1412.7024, 2014.
+
+[8] Das, D., Mellempudi, N., Mudigere, D., et al. Mixed precision training of convolutional neural
+
+networks using integer operations. arXiv preprint arXiv:1802.00930, 2018.
+
+[9] Duchi, J., Hazan, E., and Singer, Y. Adaptive subgradient methods for online learning and
+stochastic optimization. Journal of Machine Learning Research, 12(Jul):2121–2159, 2011.
+
+[10] Eidnes, L. and Nøkland, A. Shifting mean activation towards zero with bipolar activation
+
+functions. arXiv preprint arXiv:1709.04054, 2017.
+
+[11] Gitman, I. and Ginsburg, B. Comparison of batch normalization and weight normalization
+
+algorithms for the large-scale image classiﬁcation. CoRR, abs/1709.08145, 2017.
+
+9
+
+[12] Glorot, X. and Bengio, Y. Understanding the difﬁculty of training deep feedforward neural
+networks. In Proceedings of the Thirteenth International Conference on Artiﬁcial Intelligence
+and Statistics, pp. 249–256, 2010.
+
+[13] He, K., Zhang, X., Ren, S., and Sun, J. Delving deep into rectiﬁers: Surpassing human-level
+performance on imagenet classiﬁcation. In Proceedings of the IEEE international conference
+on computer vision, pp. 1026–1034, 2015.
+
+[14] He, K., Zhang, X., Ren, S., and Sun, J. Deep residual learning for image recognition. In
+Proceedings of the IEEE conference on computer vision and pattern recognition, pp. 770–778,
+2016.
+
+[15] Hoffer, E., Hubara, I., and Soudry, D. Train longer, generalize better: closing the generalization
+gap in large batch training of neural networks. In Advances in Neural Information Processing
+Systems, pp. 1729–1739, 2017.
+
+[16] Huang, L., Liu, X., Lang, B., and Li, B. Projection based weight normalization for deep neural
+
+networks. arXiv preprint arXiv:1710.02338, 2017.
+
+[17] Hubara, I., Courbariaux, M., Soudry, D., El-Yaniv, R., and Bengio, Y. Binarized neural networks.
+
+In Advances in neural information processing systems, pp. 4107–4115, 2016.
+
+[18] Ioffe, S. Batch renormalization: Towards reducing minibatch dependence in batch-normalized
+models. In Advances in Neural Information Processing Systems, pp. 1942–1950, 2017.
+
+[19] Ioffe, S. and Szegedy, C. Batch normalization: Accelerating deep network training by reducing
+internal covariate shift. In International conference on machine learning, pp. 448–456, 2015.
+
+[20] Kingma, D. P. and Ba, J. Adam: A method for stochastic optimization. arXiv preprint
+
+arXiv:1412.6980, 2014.
+
+[21] Klambauer, G., Unterthiner, T., Mayr, A., and Hochreiter, S. Self-normalizing neural networks.
+
+In Advances in Neural Information Processing Systems, pp. 971–980, 2017.
+
+[22] Köster, U., Webb, T., Wang, X., et al. Flexpoint: An adaptive numerical format for efﬁcient
+training of deep neural networks. In Advances in Neural Information Processing Systems, pp.
+1740–1750, 2017.
+
+[23] Krizhevsky, A. and Hinton, G. Learning multiple layers of features from tiny images. 2009.
+
+[24] Krogh, A. and Hertz, J. A. A simple weight decay can improve generalization. In Advances in
+
+neural information processing systems, pp. 950–957, 1992.
+
+[25] Micikevicius, P., Narang, S., Alben, J., et al. Mixed precision training.
+
+In International
+
+Conference on Learning Representations, 2018.
+
+[26] Rota Bulò, S., Porzi, L., and Kontschieder, P.
+
+In-place activated batchnorm for memory-
+
+optimized training of dnns. arXiv preprint arXiv:1712.02616, 2017.
+
+[27] Salimans, T. and Kingma, D. P. Weight normalization: A simple reparameterization to accelerate
+training of deep neural networks. In Advances in Neural Information Processing Systems, pp.
+901–909, 2016.
+
+[28] Salimans, T., Goodfellow, I., Zaremba, W., et al. Improved techniques for training gans. In
+
+Advances in Neural Information Processing Systems, pp. 2234–2242, 2016.
+
+[29] Simon, M. K. Probability distributions involving gaussian random variables: A handbook for
+
+engineers and scientists. 2007.
+
+[30] Simonyan, K. and Zisserman, A. Very deep convolutional networks for large-scale image
+
+recognition. arXiv preprint arXiv:1409.1556, 2014.
+
+[31] Smith, S. L., Kindermans, P.-J., and Le, Q. V. Don’t decay the learning rate, increase the batch
+
+size. arXiv preprint arXiv:1711.00489, 2017.
+
+10
+
+[32] Soudry, D., Hubara, I., and Meir, R. Expectation backpropagation: parameter-free training
+of multilayer neural networks with continuous or discrete weights. In Neural Information
+Processing Systems, volume 2, pp. 963–971, dec 2014.
+
+[33] Soudry, D., Hoffer, E., and Srebro, N. The implicit bias of gradient descent on separable data.
+
+International Conference on Learning Representations, 2018.
+
+[34] Takeru Miyato, M. K. Y. Y., Toshiki Kataoka. Spectral normalization for generative adversarial
+
+networks. International Conference on Learning Representations, 2018.
+
+[35] Ulyanov, D., Vedaldi, A., and Lempitsky, V. S. Instance normalization: The missing ingredient
+
+for fast stylization. CoRR, abs/1607.08022, 2016.
+
+[36] van Laarhoven, T. L2 regularization versus batch and weight normalization. arXiv preprint
+
+arXiv:1706.05350, 2017.
+
+[37] Vaswani, A., Shazeer, N., Parmar, N., et al. Attention is all you need. In Advances in Neural
+
+Information Processing Systems, pp. 6000–6010, 2017.
+
+[38] Venkatesh, G., Nurvitadhi, E., and Marr, D. Accelerating deep convolutional networks using
+low-precision and sparsity. In Acoustics, Speech and Signal Processing (ICASSP), 2017 IEEE
+International Conference on, pp. 2861–2865. IEEE, 2017.
+
+[39] Wu, S., Li, G., Deng, L., et al. L1-Norm Batch Normalization for Efﬁcient Training of Deep
+
+Neural Networks. ArXiv e-prints, February 2018.
+
+[40] Wu, Y. and He, K. Group normalization. arXiv preprint arXiv:1803.08494, 2018.
+
+[41] Xiang, S. and Li, H. On the effect of batch normalization and weight normalization in generative
+
+adversarial networks. arXiv preprint arXiv:1704.03971, 2017.
+
+[42] Zhang, C., Bengio, S., Hardt, M., Recht, B., and Vinyals, O. Understanding deep learning
+
+requires rethinking generalization. arXiv preprint arXiv:1611.03530, 2016.
+
+11
+
+Appendix
+
+A Implementation Details for weight-decay experiments
+
+For all experiments, we used weight decay on the last layer with λ = 0.0005. The network architecture
+was VGG11 [30] with batch-norm after every convolution layer. Learning rate started from 0.1 and
+divided by 10 every 20 epochs (except for the norm scheduling experiment). The same random seed
+was used.
+
+B Importance of normalization constants
+
+Figure 5 shows the scale adjustment CL1 is essential even for relatively "easy" data sets with small
+images such as CIFAR-10, and the use of smaller/bigger adjustments degrade classiﬁcation accuracy.
+
+Figure 5: Left: The importance of normalization term CL1 while training ResNet-56 on CIFAR-10.
+Without the use of CL1 the network convergence is slower and reaches a higher ﬁnal validation
+error. We found it somewhat surprising that a constant so close to one (CL1 = (cid:112)
+π/2 ≈ 1.25) can
+have such an impact on performance. Right: We further demonstrate, with Res18 on ImageNet, that
+CL1 = (cid:112)
+
+π/2 is optimal: performance is only degraded if we modify CL1 to other nearby values.
+
+B.1 Deriving normalization constants
+
+As seen in main manuscript,
+
+ˆx(k) =
+
+x(k) − µk
+CL∞ (n) · ||x(k) − µk||∞
+
+,
+
+(9)
+
+To derive CL∞ (n) we assume again the input {xi}n
+i=1 to the normalization layer follows a Gaussian
+distribution N (µk, σ2). Then, the maximum absolute deviation is bounded on expectation as follows
+[29]:
+
+σ · (cid:112)ln(n)
+(cid:112)
+π ln(2)
+
+≤ ||x(k) − µk||∞ ≤ σ
+
+(cid:112)2 ln(n).
+
+Therefore, by multiplying the three sides of inequality with the normalization term CL∞(n), the L∞
+batch norm in equation 9 approximates an expectation the original standard deviation measure σ as
+follows:
+
+where l =
+
+· σ ≈ 0.793σ, and u =
+
+1+
+
+π ln (4)
+2
+
+· σ ≈ 1.543σ.
+
+√
+
+1+
+√
+
+π ln (4)
+
+8π ln(2)
+
+l ≤ CL∞(n) · ||x(k) − µk||∞ ≤ u
+√
+
+12
+
+C Bounded-weight-norm experiments
+
+Figure 6 depicts the impact of bounded-weight norm for the training of recurrent network on WMT14
+de-en task. Additional results are summarized in Table 1.
+
+Figure 6: Comparison between bounded weight-norm and baseline with no normalization in recurrent
+network training (LSTM attention-seq2seq network, WMT14 de-en)
+
+.
+Table 1: Results comparing baseline, L2 based normalization with weight-norm (WN) by Salimans
+& Kingma [27] and our bounded-weight-norm (BWN)
+
+Network
+
+Batch/Layer norm WN
+
+BWN
+
+ResNet56 (Cifar10)
+ResNet50 (ImageNet)
+Transformer (WMT14)
+2-layer LSTM (WMT14)
+
+93.03%
+75.3%
+27.3 BLEU
+21.5 BLEU
+
+92.5%
+67% [11]
+-
+-
+
+92.88%
+73.8%
+26.5 BLEU
+21.2 BLEU
+
+Table 2: Results comparing baseline, and L1 norm results (ppl for perplexity)
+
+Network
+
+ResNet56 (Cifar10)
+ResNet18 (ImageNet)
+ResNet50 (ImageNet)
+Transformer (WMT14)
+
+L2 Batch/Layer norm L1 Batch/Layer norm
+93.03%
+69.8%
+75.3%
+5.1 ppl
+
+93.07%
+69.74%
+75.32%
+5.2 ppl
+
+13
+

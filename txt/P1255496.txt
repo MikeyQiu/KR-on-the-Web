@@ -1,0 +1,2230 @@
+8
+1
+0
+2
+ 
+g
+u
+A
+ 
+0
+2
+ 
+ 
+]
+
+V
+C
+.
+s
+c
+[
+ 
+ 
+2
+v
+5
+4
+5
+8
+0
+.
+4
+0
+7
+1
+:
+v
+i
+X
+r
+a
+
+ICNet for Real-Time Semantic Segmentation
+on High-Resolution Images
+
+Hengshuang Zhao1, Xiaojuan Qi1, Xiaoyong Shen2, Jianping Shi3, Jiaya Jia1,2
+
+1The Chinese University of Hong Kong, 2 Tencent Youtu Lab, 3SenseTime Research
+{hszhao,xjqi,leojia}@cse.cuhk.edu.hk,
+dylanshen@tencent.com, shijianping@sensetime.com
+
+Abstract. We focus on the challenging task of real-time semantic seg-
+mentation in this paper. It ﬁnds many practical applications and yet is
+with fundamental diﬃculty of reducing a large portion of computation for
+pixel-wise label inference. We propose an image cascade network (ICNet)
+that incorporates multi-resolution branches under proper label guidance
+to address this challenge. We provide in-depth analysis of our framework
+and introduce the cascade feature fusion unit to quickly achieve high-
+quality segmentation. Our system yields real-time inference on a single
+GPU card with decent quality results evaluated on challenging datasets
+like Cityscapes, CamVid and COCO-Stuﬀ.
+
+Keywords: Real-Time, High-Resolution, Semantic Segmentation
+
+1
+
+Introduction
+
+Semantic image segmentation is a fundamental task in computer vision. It pre-
+dicts dense labels for all pixels in the image, and is regarded as a very important
+task that can help deep understanding of scene, objects, and human. Develop-
+ment of recent deep convolutional neural networks (CNNs) makes remarkable
+progress on semantic segmentation [1,2,3,4,5,6]. The eﬀectiveness of these net-
+works largely depends on the sophisticated model design regarding depth and
+width, which has to involve many operations and parameters.
+
+CNN-based semantic segmentation mainly exploits fully convolutional net-
+works (FCNs). It is common wisdom now that increase of result accuracy almost
+means more operations, especially for pixel-level prediction tasks like semantic
+segmentation. To illustrate it, we show in Fig. 1(a) the accuracy and inference
+time of diﬀerent frameworks on Cityscapes [7] dataset.
+
+Status of Fast Semantic Segmentation Contrary to the extraordinary de-
+velopment of high-quality semantic segmentation, research along the line to make
+semantic segmentation run fast while not sacriﬁcing too much quality is left be-
+hind. We note actually this line of work is similarly important since it can inspire
+or enable many practical tasks in, for example, automatic driving, robotic inter-
+action, online video processing, and even mobile computing where running time
+becomes a critical factor to evaluate system performance.
+
+2
+
+H. Zhao, X. Qi, X. Shen, J. Shi, J. Jia
+
+(a) Inference speed and mIoU
+
+(b) Time in each layer of PSPNet50
+
+Fig. 1. (a)1: Inference speed and mIoU performance on Cityscapes [7] test set. Meth-
+ods involved are PSPNet [5], ResNet38 [6], DUC [10], ReﬁneNet [11], FRRN [12],
+DeepLabv2-CRF[13], Dilation10 [14], DPN [15], FCN-8s [1], DeepLab [2], CRF-
+RNN [16], SQ [9], ENet [8], SegNet [3], and our ICNet. (b): Time spent on PSPNet50
+with dilation 8 for two input images. Roughly running time is proportional to the pixel
+number and kernel number.
+
+Our experiments show that high-accuracy methods of ResNet38 [6] and PSP-
+Net [5] take around 1 second to predict a 1024 × 2048 high-resolution image on
+one Nvidia TitanX GPU card during testing. These methods fall into the area
+illustrated in Fig. 1(a) with high accuracy and low speed. Recent fast semantic
+segmentation methods of ENet [8] and SQ [9], contrarily, take quite diﬀerent
+positions in the plot. The speed is much accelerated; but accuracy drops, where
+the ﬁnal mIoUs are lower than 60%. These methods are located in the lower
+right phase in the ﬁgure.
+
+Our Focus and Contributions In this paper, we focus on building a prac-
+tically fast semantic segmentation system with decent prediction accuracy. Our
+method is the ﬁrst in its kind to locate in the top-right area shown in Fig. 1(a)
+and is one of the only two available real-time approaches. It achieves decent
+trade-oﬀ between eﬃciency and accuracy.
+
+Diﬀerent from previous architectures, we make comprehensive consideration
+on the two factors of speed and accuracy that are seemingly contracting. We ﬁrst
+make in-depth analysis of time budget in semantic segmentation frameworks and
+conduct extensive experiments to demonstrate insuﬃciency of intuitive speedup
+strategies. This motivates development of image cascade network (ICNet), a high
+eﬃciency segmentation system with decent quality. It exploits eﬃciency of pro-
+cessing low-resolution images and high inference quality of high-resolution ones.
+The idea is to let low-resolution images go through the full semantic perception
+
+1 Blue ones are tested with downsampled images. Inference speed is reported with sin-
+gle network forward while accuracy of several mIoU aimed approaches (like PSPNet(cid:63))
+may contain testing tricks like multi-scale and ﬂipping, resulting much more time.
+See supplementary material for detailed information.
+
+ICNet for Real-Time Semantic Segmentation
+
+3
+
+network ﬁrst for a coarse prediction map. Then cascade feature fusion unit and
+cascade label guidance strategy are proposed to integrate medium and high reso-
+lution features, which reﬁne the coarse semantic map gradually. We make all our
+code and models publicly available2. Our main contributions and performance
+statistics are the following.
+
+– We develop a novel and unique image cascade network for real-time semantic
+segmentation, it utilizes semantic information in low resolution along with
+details from high-resolution images eﬃciently.
+
+– The developed cascade feature fusion unit together with cascade label guid-
+ance can recover and reﬁne segmentation prediction progressively with a low
+computation cost.
+
+– Our ICNet achieves 5× speedup of inference time, and reduces memory con-
+sumption by 5× times. It can run at high resolution 1024×2048 in speed of 30
+fps while accomplishing high-quality results. It yields real-time inference on
+various datasets including Cityscapes [7], CamVid [17] and COCO-Stuﬀ [18].
+
+2 Related Work
+
+Traditional semantic segmentation methods [19] adopt handcrafted feature to
+learn the representation. Recently, CNN based methods largely improve the per-
+formance.
+
+High Quality Semantic Segmentation FCN [1] is the pioneer work to re-
+place the last fully-connected layers in classiﬁcation with convolution layers.
+DeepLab [2,13] and [14] used dilated convolution to enlarge the receptive ﬁeld
+for dense labeling. Encoder-decoder structures [3,4] can combine the high-level
+semantic information from later layers with the spatial information from earlier
+ones. Multi-scale feature ensembles are also used in [20,21,22]. In [2,15,16], condi-
+tional random ﬁelds (CRF) or Markov random ﬁelds (MRF) were used to model
+spatial relationship. Zhao et al. [5] used pyramid pooling to aggregate global and
+local context information. Wu et al. [6] adopted a wider network to boost per-
+formance. In [11], a multi-path reﬁnement network combined multi-scale image
+features. These methods are eﬀective, but preclude real-time inference.
+
+High Eﬃciency Semantic Segmentation In object detection, speed became
+one important factor in system design [23,24]. Recent Yolo [25,26] and SSD [27]
+are representative solutions. In contrast, high speed inference in semantic seg-
+mentation is under-explored. ENet [8] and [28] are lightweight networks. These
+methods greatly raise eﬃciency with notably sacriﬁced accuracy.
+
+2 https://github.com/hszhao/ICNet
+
+4
+
+H. Zhao, X. Qi, X. Shen, J. Shi, J. Jia
+
+Video Semantic Segmentation Videos contain redundant information in
+frames, which can be utilized to reduce computation. Recent Clockwork [29]
+reuses feature maps given stable video input. Deep feature ﬂow [30] is based
+on a small-scale optical ﬂow network to propagate features from key frames to
+others. FSO [31] performs structured prediction with dense CRF applied on op-
+timized features to get temporal consistent predictions. NetWarp [32] utilizes op-
+tical ﬂow of adjacent frames to warp internal features across time space in video
+sequences. We note when a good-accuracy fast image semantic-segmentation
+framework comes into existence, video segmentation will also be beneﬁted.
+
+3
+
+Image Cascade Network
+
+We start by analyzing computation time budget of diﬀerent components on
+the high performance segmentation framework PSPNet [5] with experimental
+statistics. Then we introduce the image cascade network (ICNet) as illustrated
+in Fig. 2, along with the cascade feature fusion unit and cascade label guidance,
+for fast semantic segmentation.
+
+3.1 Speed Analysis
+
+In convolution, the transformation function Φ is applied to input feature map
+V ∈ Rc×h×w to obtain the output map U ∈ Rc(cid:48)×h(cid:48)×w(cid:48)
+, where c, h and w denote
+features channel, height and width respectively. The transformation operation
+Φ : V → U is achieved by applying c(cid:48) number of 3D kernels K ∈ Rc×k×k where
+k × k (e.g, 3 × 3) is kernel spatial size. Thus the total number of operations
+O(Φ) in convolution layer is c(cid:48)ck2h(cid:48)w(cid:48). The spatial size of the output map h(cid:48)
+and w(cid:48) are highly related to the input, controlled by parameter stride s as h(cid:48) =
+h/s, w(cid:48) = w/s, making
+
+O(Φ) ≈ c(cid:48)ck2hw/s2.
+
+(1)
+
+The computation complexity is associated with feature map resolution (e.g.,
+h, w, s), number of kernels and network width (e.g., c, c(cid:48)). Fig. 1(b) shows
+the time cost of two resolution images in PSPNet50. Blue curve corresponds
+to high-resolution input with size 1024 × 2048 and green curve is for image
+with resolution 512 × 1024. Computation increases squarely regarding image
+resolution. For either curve, feature maps in stage4 and stage5 are with the
+same spatial resolution, i.e., 1/8 of the original input; but the computation in
+stage5 is four times heavier than that in stage4. It is because convolutional layers
+in stage5 double the number of kernels c together with input channel c(cid:48).
+
+3.2 Network Architecture
+
+According to above time budget analysis, we adopt intuitive speedup strategies
+in experiments to be detailed in Sec. 5, including downsampling input, shrink-
+ing feature maps and conducting model compression. The corresponding results
+
+ICNet for Real-Time Semantic Segmentation
+
+5
+
+Fig. 2. Network architecture of ICNet. ‘CFF’ stands for cascade feature fusion detailed
+in Sec. 3.3. Numbers in parentheses are feature map size ratios to the full-resolution
+input. Operations are highlighted in brackets. The ﬁnal ×4 upsampling in the bottom
+branch is only used during testing.
+
+show that it is very diﬃcult to keep a good balance between inference accuracy
+and speed. The intuitive strategies are eﬀective to reduce running time, while
+they yield very coarse prediction maps. Directly feeding high-resolution images
+into a network is unbearable in computation.
+
+Our proposed system image cascade network (ICNet) does not simply choose
+either way. Instead it takes cascade image inputs (i.e., low-, medium- and high
+resolution images), adopts cascade feature fusion unit (Sec. 3.3) and is trained
+with cascade label guidance (Sec. 3.4). The new architecture is illustrated in
+Fig. 2. The input image with full resolution (e.g., 1024 × 2048 in Cityscapes [7])
+is downsampled by factors of 2 and 4, forming cascade input to medium- and
+high-resolution branches.
+
+Segmenting the high-resolution input with classical frameworks like FCN di-
+rectly is time consuming. To overcome this shortcoming, we get semantic extrac-
+tion using low-resolution input as shown in top branch of Fig. 2. A 1/4 sized im-
+age is fed into PSPNet with downsampling rate 8, resulting in a 1/32-resolution
+feature map. To get high quality segmentation, medium and high resolution
+branches (middle and bottom parts in Fig. 2) help recover and reﬁne the coarse
+prediction. Though some details are missing and blurry boundaries are gener-
+ated in the top branch, it already harvests most semantic parts. Thus we can
+safely limit the number of parameters in both middle and bottom branches. Light
+weighted CNNs (green dotted box) are adopted in higher resolution branches;
+diﬀerent-branch output feature maps are fused by cascade-feature-fusion unit
+(Sec. 3.3) and trained with cascade label guidance (Sec. 3.4).
+
+Although the top branch is based on a full segmentation backbone, the input
+resolution is low, resulting in limited computation. Even for PSPNet with 50+
+layers, inference time and memory are 18ms and 0.6GB for the large images in
+
+6
+
+H. Zhao, X. Qi, X. Shen, J. Shi, J. Jia
+
+Cityscapes. Because weights and computation (in 17 layers) can be shared be-
+tween low- and medium-branches, only 6ms is spent to construct the fusion map.
+Bottom branch has even less layers. Although the resolution is high, inference
+only takes 9ms. Details of the architecture are presented in the supplementary
+ﬁle. With all these three branches, our ICNet becomes a very eﬃcient and mem-
+ory friendly architecture that can achieve good-quality segmentation.
+
+3.3 Cascade Feature Fusion
+
+To combine cascade features from diﬀerent-
+resolution inputs, we propose a cascade fea-
+ture fusion (CFF) unit as shown in Fig. 3.
+The input to this unit contains three com-
+ponents: two feature maps F1 and F2 with
+sizes C1 × H1 × W1 and C2 × H2 × W2 re-
+spectively, and a ground-truth label with res-
+olution 1×H2 ×W2. F2 is with doubled spatial
+size of F1.
+
+We ﬁrst apply upsampling rate 2 on F1
+through bilinear interpolation, yielding the
+same spatial size as F2. Then a dilated con-
+volution layer with kernel size C3 × 3 × 3 and
+dilation 2 is applied to reﬁne the upsampled
+features. The resulting feature is with size
+C3 × H2 × W2. This dilated convolution combines feature information from sev-
+eral originally neighboring pixels. Compared with deconvolution, upsampling
+followed by dilated convolution only needs small kernels, to harvest the same
+receptive ﬁeld. To keep the same receptive ﬁeld, deconvolution needs larger ker-
+nel sizes than upsampling with dilated convolution (i.e., 7 × 7 vs. 3 × 3), which
+causes more computation.
+
+Fig. 3. Cascade feature fusion.
+
+For feature F2, a projection convolution with kernel size C3 × 1 × 1 is utilized
+to project F2 so that it has the same number of channels as the output of F1.
+Then two batch normalization layers are used to normalize these two processed
+features as shown in Fig. 3. Followed by an element-wise ‘sum’ layer and a ‘ReLU’
+layer, we obtain the fused feature F (cid:48)
+2 as C3 × H2 × W2. To enhance learning of
+F1, we use an auxiliary label guidance on the upsampled feature of F1.
+
+3.4 Cascade Label Guidance
+
+To enhance the learning procedure in each branch, we adopt a cascade label
+guidance strategy. It utilizes diﬀerent-scale (e.g., 1/16, 1/8, and 1/4) ground-
+truth labels to guide the learning stage of low, medium and high resolution
+input. Given T branches (i.e., T =3) and N categories. In branch t, the predicted
+feature map F t has spatial size Yt × Xt. The value at position (n, y, x) is F t
+n,y,x.
+The corresponding ground truth label for 2D position (y, x) is ˆn. To train ICNet,
+
+ICNet for Real-Time Semantic Segmentation
+
+7
+
+Fig. 4. Comparison of semantic segmentation frameworks. (a) Intermediate skip con-
+nection used by FCN [1] and Hypercolumns [21]. (b) Encoder-decoder structure incor-
+porated in SegNet [3], DeconvNet [4], UNet [33], ENet [8], and step-wise reconstruction
+& reﬁnement from LRR [34] and ReﬁneNet [11]. (c) Multi-scale prediction ensemble
+adopted by DeepLab-MSC [2] and PSPNet-MSC [5]. (d) Our ICNet architecture.
+
+we append weighted softmax cross entropy loss in each branch with related loss
+weight λt. Thus we minimize the loss function L deﬁned as
+
+L = −
+
+T
+(cid:88)
+
+t=1
+
+λt
+
+1
+YtXt
+
+Yt(cid:88)
+
+Xt(cid:88)
+
+y=1
+
+x=1
+
+log
+
+ˆn,y,x
+
+eF t
+n=1 eF t
+
+(cid:80)N
+
+.
+
+n,y,x
+
+(2)
+
+In the testing phase, the low and medium guidance operations are simply aban-
+doned, where only high-resolution branch is retained. This strategy makes gradi-
+ent optimization smoother for easy training. With more powerful learning ability
+in each branch, the ﬁnal prediction map is not dominated by any single branch.
+
+4 Structure Comparison and Analysis
+
+Now we illustrate the diﬀerence of ICNet from existing cascade architectures for
+semantic segmentation. Typical structures in previous semantic segmentation
+systems are illustrated in Fig. 4. Our proposed ICNet (Fig. 4(d)) is by nature
+diﬀerent from others. Previous frameworks are all with relatively intensive com-
+putation given the high-resolution input. While in our cascade structure, only
+the lowest-resolution input is fed into the heavy CNN with much reduced compu-
+tation to get the coarse semantic prediction. The higher-res inputs are designed
+to recover and reﬁne the prediction progressively regarding blurred boundaries
+and missing details. Thus they are processed by light-weighted CNNs. Newly
+introduced cascade-feature-fusion unit and cascade label guidance strategy in-
+tegrate medium and high resolution features to reﬁne the coarse semantic map
+gradually. In this special design, ICNet achieves high-eﬃciency inference with
+reasonable-quality segmentation results.
+
+8
+
+H. Zhao, X. Qi, X. Shen, J. Shi, J. Jia
+
+5 Experimental Evaluation
+
+Our method is eﬀective for high resolution images. We evaluate the architec-
+ture on three challenging datasets, including urban-scene understanding dataset
+Cityscapes [7] with image resolution 1024 × 2048, CamVid [17] with image res-
+olution 720 × 960 and stuﬀ understanding dataset COCO-Stuﬀ [18] with image
+resolution up to 640 × 640. There is a notable diﬀerence between COCO-Stuﬀ
+and object/scene segmentation datasets of VOC2012 [35] and ADE20K [36]. In
+the latter two sets, most images are of low resolution (e.g., 300 × 500), which
+can already be processed quickly. While in COCO-Stuﬀ, most images are larger,
+making it more diﬃcult to achieve real-time performance.
+
+In the following, we ﬁrst show intuitive speedup strategies and their draw-
+
+backs, then reveal our improvement with quantitative and visual analysis.
+
+5.1 Implementation Details
+
+We conduct experiments based on platform Caﬀe [37]. All experiments are on
+a workstation with Maxwell TitanX GPU cards under CUDA 7.5 and CUDNN
+V5. Our testing uses only one card. To measure the forward inference time, we
+use the time measure tool ‘Caﬀe time’ and set the repeating iteration number
+to 100 to eliminate accidental errors during testing. All the parameters in batch
+normalization layers are merged into the neighboring front convolution layers.
+
+For the training hyper-parameters, the mini-batch size is set to 16. The base
+learning rate is 0.01 and the ‘poly’ learning rate policy is adopted with power
+0.9, together with the maximum iteration number set to 30K for Cityscapes,
+10K for CamVid and 30K for COCO-Stuﬀ. Momentum is 0.9 and weight decay
+is 0.0001. Data augmentation contains random mirror and rand resizing between
+0.5 and 2. The auxiliary loss weights are empirically set to 0.4 for λ1 and λ2,
+1 for λ3 in Eq. 2, as adopted in [5]. For evaluation, both mean of class-wise
+intersection over union (mIoU) and network forward time (Time) are used.
+
+5.2 Cityscapes
+
+We ﬁrst apply our framework to the recent urban scene understanding dataset
+Cityscapes [7]. This dataset contains high-resolution 1024 × 2048 images, which
+make it a big challenge for fast semantic segmentation. It contains 5,000 ﬁnely
+annotated images split into training, validation and testing sets with 2,975, 500,
+and 1,525 images respectively. The dense annotation contains 30 common classes
+of road, person, car, etc. 19 of them are used in training and testing.
+
+Intuitive Speedup According to the time complexity shown in Eq. (1), we do
+intuitive speedup in three aspects, namely downsampling input, downsampling
+feature, and model compression.
+
+ICNet for Real-Time Semantic Segmentation
+
+9
+
+(a) input image
+
+(b) ground truth
+
+(c) colormap
+
+(d) scale 0.25 (42ms/60.7%)
+
+(e) scale 0.5 (123ms/68.4%)
+
+(f) scale 1 (446ms/71.7%)
+
+Fig. 5. Downsampling input: prediction of PSPNet50 on the validation set of
+Cityscapes. Values in the parentheses are the inference time and mIoU.
+
+Table 1. Left: Downsampling feature with factors 8, 16 and 32. Right: Model com-
+pression with kernel keeping rates 1, 0.5 and 0.25.
+
+Downsample Size
+
+8
+
+16
+
+32
+
+Kernel Keeping Rates
+
+1
+
+0.5 0.25
+
+mIoU (%)
+Time (ms)
+
+71.7 70.2 67.1
+446 177 131
+
+mIoU (%)
+Time (ms)
+
+71.7 67.9 59.4
+72
+446 170
+
+Downsampling Input Image resolution is the most critical factor that aﬀects
+running speed as analyzed in Sec. 3.1. A simple approach is to use the small-
+resolution image as input. We test downsampling the image with ratios 1/2 and
+1/4, and feeding the resulting images into PSPNet50. We directly upsample
+prediction results to the original size. This approach empirically has several
+drawbacks as illustrated in Fig. 5. With scaling ratio 0.25, although the inference
+time is reduced by a large margin, the prediction map is very coarse, missing
+many small but important details compared to the higher resolution prediction.
+With scaling ratio 0.5, the prediction recovers more information compared to
+the 0.25 case. Unfortunately, the person and traﬃc light far from the camera
+are still missing and object boundaries are blurred. To make things worse, the
+running time is still too long for a real-time system.
+
+Downsampling Feature Besides directly downsampling the input image, another
+simple choice is to scale down the feature map by a large ratio in the inference
+process. FCN [1] downsampled it for 32 times and DeepLab [2] did that for
+8 times. We test PSPNet50 with downsampling ratios of 1:8, 1:16 and 1:32
+and show results in the left of Table 1. A smaller feature map can yield faster
+inference at the cost of sacriﬁcing prediction accuracy. The lost information is
+mostly detail contained in low-level layers. Also, even with the smallest resulting
+feature map under ratio 1:32, the system still takes 131ms in inference.
+
+10
+
+H. Zhao, X. Qi, X. Shen, J. Shi, J. Jia
+
+Table 2. Performance of ICNet with diﬀerent branches on validation set of Citysapes.
+The baseline method is PSPNet50 compressed to a half. ‘sub4’, ‘sub24’ and ‘sub124’
+represent predictions in low-, medium-, and high-resolution branches respectively.
+
+Items
+
+Baseline
+
+sub4
+
+sub24
+
+sub124
+
+mIoU (%)
+Time (ms)
+Frame (fps)
+Speedup
+Memory (GB)
+Memory Save
+
+67.9
+170
+5.9
+1×
+9.2
+1×
+
+59.6
+18
+55.6
+9.4×
+0.6
+
+66.5
+25
+40
+6.8×
+1.1
+15.3× 8.4×
+
+67.7
+33
+30.3
+5.2×
+1.6
+5.8×
+
+Table 3. Eﬀectiveness of cascade feature fusion unit (CFF) and cascade label guid-
+ance (CLG). ‘DC3’, ‘DC5’ and ‘DC7’ denote replacing ‘bilinear upsampling + dilated
+convolution’ with deconvolution operation with kernels 3×3, 5×5 and 7×7 respectively.
+
+(cid:88)
+
+DC3 DC5 DC7 CFF CLG mIoU (%) Time (ms)
+(cid:88)
+(cid:88)
+(cid:88)
+(cid:88)
+
+(cid:88)
+
+(cid:88)
+
+66.7
+66.7
+68.0
+67.7
+66.8
+
+31
+34
+38
+33
+33
+
+(cid:88)
+(cid:88)
+
+Model Compression Apart from the above two strategies, another natural way to
+reduce network complexity is to trim kernels in each layer. Compressing models
+becomes an active research topic in recent years due to the high demand. The
+solutions [38,39,40,41] can make a complicated network reduce to a lighter one
+under user-controlled accuracy reduction. We adopt recent eﬀective classiﬁca-
+tion model compression strategy presented in [41] on our segmentation models.
+For each ﬁlter, we ﬁrst calculate the sum of kernel (cid:96)1-norm. Then we sort these
+sum results in a descending order and keep only the most signiﬁcant ones. Dis-
+appointingly, this strategy also does not meet our requirement given the com-
+pressed models listed in the right of Table 1. Even by keeping only a quarter of
+kernels, the inference time is still too long. Meanwhile the corresponding mIoU
+is intolerably low – it already cannot produce reasonable segmentation for many
+applications.
+
+Cascade Branches We do ablation study on cascade branches, the results are
+shown in Table 2. Our baseline is the half-compressed PSPNet50, 170ms infer-
+ence time is yielded with mIoU reducing to 67.9%. They indicate that model
+compression has almost no chance to achieve real-time performance under the
+condition of keeping decent segmentation quality. Based on this baseline, we
+
+ICNet for Real-Time Semantic Segmentation
+
+11
+
+Table 4. Predicted mIoU and inference time on Cityscapes test set with image resolu-
+tion 1024 × 2048. ‘DR’ stands for image downsampling ratio during testing (e.g, DR=4
+represents testing at resolution 256 × 512). Methods trained using both ﬁne and coarse
+data are marked with ‘†’.
+
+Method
+
+DR mIoU (%) Time (ms) Frame (fps)
+
+4
+SegNet [3]
+ENet [8]
+2
+no
+SQ [9]
+2
+CRF-RNN [16]
+DeepLab [2]
+2
+FCN-8S [1]
+no
+Dilation10 [14] no
+2
+FRRN [12]
+PSPNet3 [5]
+no
+ICNet
+ICNet†
+
+no
+no
+
+57.0
+58.3
+59.8
+62.5
+63.1
+65.3
+67.1
+71.8
+81.2
+
+69.5
+70.6
+
+60
+13
+60
+700
+4000
+500
+4000
+469
+1288
+
+33
+33
+
+16.7
+76.9
+16.7
+1.4
+0.25
+2
+0.25
+2.1
+0.78
+
+30.3
+30.3
+
+test our ICNet on diﬀerent branches. To show the eﬀectiveness of the proposed
+cascade framework, we denote the outputs of low-, medium- and high-resolution
+branches as ‘sub4’, ‘sub24’ and ‘sub124’, where the numbers stand for the infor-
+mation used. The setting ‘sub4’ only uses the top branch with the low-resolution
+input. ‘sub24’ and ‘sub124’ respectively contain top two and all three branches.
+We test these three settings on the validation set of Cityscapes and list the
+results in Table 2. With just the low-resolution input branch, although running
+time is short, the result quality drops to 59.6%. Using two and three branches, we
+increase mIoU to 66.5% and 67.7% respectively. The running time only increases
+by 7ms and 8ms. Note our segmentation quality nearly stays the same as the
+baseline, and yet is 5.2× times faster. The memory consumption is signiﬁcantly
+reduced by 5.8×.
+
+Cascade Structure We also do ablation study on cascade feature fusion unit
+and cascade label guidance. The results are shown in Table 3. Compared to
+the deconvolution layer with 3 × 3 and 5 × 5 kernels, with similar inference
+eﬃciency, cascade feature fusion unit gets higher mIoU performance. Compared
+to deconvolution layer with a larger kernel with size 7×7, the mIoU performance
+is close, while cascade feature fusion unit yields faster processing speed. Without
+the cascade label guidance, the performance drops a lot as shown in the last row.
+
+Methods Comparison We ﬁnally list mIoU performance and inference time
+of our proposed ICNet on the test set of Cityscapes. It is trained on training and
+
+3 Single network forward costs 1288ms (with TitanX Maxwell, 680ms for Pascal) while
+
+mIoU aimed testing for boosting performance (81.2% mIoU) costs 51.0s.
+
+12
+
+H. Zhao, X. Qi, X. Shen, J. Shi, J. Jia
+
+(a) input image
+
+(b) ground truth
+
+(c) colormap
+
+(d) sub4 branch
+
+(e) sub24 branch
+
+(f) sub124 branch
+
+Fig. 6. Visual prediction improvement of ICNet in each branch on Cityscapes dataset.
+
+(a) input image
+
+(b) diﬀ1
+
+(c) diﬀ2
+
+(d) sub4 branch
+
+(e) sub24 branch
+
+(f) sub124 branch
+
+Fig. 7. Visual prediction improvement of ICNet. White regions in ‘diﬀ1’ and ‘diﬀ2’
+denote prediction diﬀerence between ‘sub24’ and ‘sub4’, and between ‘sub124’ and
+‘sub24’ respectively.
+
+validation sets of Cityscapes for 90K iterations. Results are included in Table 4.
+The reported mIoUs and running time of other methods are shown in the oﬃcial
+Cityscapes leadboard. For fairness, we do not include methods without reporting
+running time. Many of these methods may have adopted time-consuming multi-
+scale testing for the best result quality.
+
+Our ICNet yields mIoU 69.5%. It is even quantitatively better than several
+methods that do not care about speed. It is about 10 points higher than ENet [8]
+and SQ [9]. Training with both ﬁne and coarse data boosts mIoU performance
+to 70.6%. ICNet is a 30fps method on 1024 × 2048 resolution images using only
+one TitanX GPU card. Video example can be accessed through link4.
+
+Visual Improvement Figs. 6 and 7 show the visual results of ICNet on
+Cityscapes. With proposed gradual feature fusion steps and cascade label guid-
+
+4 https://youtu.be/qWl9idsCuLQ
+
+ICNet for Real-Time Semantic Segmentation
+
+13
+
+Fig. 8. Quantitative analysis of accuracy change in connected components.
+
+Table 5. Results on CamVid test set with
+time reported on resolution 720 × 960.
+
+Table 6. Results on COCO-Stuﬀ test set
+with time reported on resolution 640×640.
+
+Method
+
+mIoU Time Frame
+(ms)
+(%)
+
+fps
+
+Method
+
+mIoU Time Frame
+(ms)
+(%)
+
+fps
+
+SegNet [3]
+DPN [15]
+DeepLab [2]
+Dilation8 [14]
+PSPNet50 [5]
+
+ICNet
+
+46.4
+60.1
+61.6
+65.3
+69.1
+
+67.1
+
+217
+830
+203
+227
+185
+
+36
+
+4.6
+1.2
+4.9
+4.4
+5.4
+
+27.8
+
+FCN [1]
+DeepLab [2]
+PSPNet50 [5]
+
+ICNet
+
+22.7
+26.9
+32.6
+
+29.1
+
+169
+124
+151
+
+28
+
+5.9
+8.1
+6.6
+
+35.7
+
+ance structure, we produce decent prediction results. Intriguingly, output of the
+‘sub4’ branch can already capture most of semantically meaningful objects. But
+the prediction is coarse due to the low-resolution input. It misses a few small-size
+important regions, such as poles and traﬃc signs.
+
+With the help of medium-resolution information, many of these regions are
+re-estimated and recovered as shown in the ‘sub24’ branch. It is noticeable that
+objects far from the camera, such as a few persons, are still missing with blurry
+object boundaries. The ‘sub124’ branch with full-resolution input helps reﬁne
+these details – the output of this branch is undoubted the best. It manifests that
+our diﬀerent-resolution information is properly made use of in this framework.
+
+Quantitative Analysis To further understand accuracy gain in each branch,
+we quantitatively analyze the predicted label maps based on connected com-
+ponents. For each connected region Ri, we calculate the number of pixels it
+contains, denoted as Si. Then we count the number of pixels correctly predicted
+in the corresponding map as si. The predicted region accuracy pi in Ri is thus
+si/Si. According to the region size Si, we project these regions onto a histogram
+H with interval K and average all related region accuracy pi as the value of
+current bin.
+
+In experiments, we set bin size of the histogram as 30 and interval K as
+3,000. It thus covers region size Si between 1 to 90K. We ignore regions with size
+
+14
+
+H. Zhao, X. Qi, X. Shen, J. Shi, J. Jia
+
+exceeding 90K. Fig. 8 shows the accuracy change in each bin. The blue histogram
+stands for the diﬀerence between ‘sub24’ and ‘sub4’ while the green histogram
+shows the diﬀerence between ‘sub124’ and ‘sub24’. For both histograms, the
+large diﬀerence is mainly on the front bins with small region sizes. This manifests
+that small region objects like traﬃc light and pole can be well improved in our
+framework. The front changes are large positives, proving that ‘sub24’ can restore
+much information on small objects on top of ‘sub4’. ‘sub124’ is also very useful
+compared to ‘sub24’.
+
+5.3 CamVid
+
+CamVid [17] dataset contains images extracted from high resolution video se-
+quences with resolution up to 720 × 960. For easy comparison with prior work,
+we adopt the split of Sturgess et al. [42], which partitions the dataset into 367,
+100, and 233 images for training, validation and testing respectively. 11 semantic
+classes are used for evaluation.
+
+The testing results are listed in Table 5, our base-model is no compressed
+PSPNet50. ICNet gets much faster inference speed than other methods on this
+high resolution, reaching the real-time speed of 27.8 fps, 5.7 times faster than
+the second one and 5.1 times faster compared to the basic model. Apart from
+high eﬃciency, it also accomplishes high quality segmentation. Visual results are
+provided in the supplementary material.
+
+5.4 COCO-Stuﬀ
+
+COCO-Stuﬀ [18] is a recently labeled dataset based on MS-COCO [43] for stuﬀ
+segmentation in context. We evaluate ICNet following the split in [18] that 9K
+images are used for training and another 1K for testing. This dataset is much
+more complex for multiple categories – up to 182 classes are used for evaluation,
+including 91 thing and 91 stuﬀ classes.
+
+Table 6 shows the testing results. ICNet still performs satisfyingly regarding
+common thing and stuﬀ understanding. It is more eﬃcient and accurate than
+modern segmentation frameworks, such as FCN and DeepLab. Compared to our
+baseline model, it achieves 5.4 times speedup. Visual predictions are provided in
+the supplementary material.
+
+6 Conclusion
+
+We have proposed a real-time semantic segmentation system ICNet. It incorpo-
+rates eﬀective strategies to accelerate network inference speed without sacriﬁcing
+much performance. The major contributions include the new framework for sav-
+ing operations in multiple resolutions and the powerful fusion unit.
+
+We believe the optimal balance of speed and accuracy makes our system
+important since it can beneﬁt many other tasks that require fast scene and object
+segmentation. It greatly enhances the practicality of semantic segmentation in
+other disciplines.
+
+ICNet for Real-Time Semantic Segmentation
+
+15
+
+References
+
+1. Long, J., Shelhamer, E., Darrell, T.: Fully convolutional networks for semantic
+
+segmentation. In: CVPR. (2015)
+
+2. Chen, L., Papandreou, G., Kokkinos, I., Murphy, K., Yuille, A.L.: Semantic image
+segmentation with deep convolutional nets and fully connected crfs. ICLR (2015)
+Segnet: A deep convolutional
+
+3. Badrinarayanan, V., Kendall, A., Cipolla, R.:
+
+encoder-decoder architecture for image segmentation. arXiv:1511.00561 (2015)
+4. Noh, H., Hong, S., Han, B.: Learning deconvolution network for semantic segmen-
+
+5. Zhao, H., Shi, J., Qi, X., Wang, X., Jia, J.: Pyramid scene parsing network. In:
+
+tation. In: ICCV. (2015)
+
+CVPR. (2017)
+
+6. Wu, Z., Shen, C., van den Hengel, A.: Wider or deeper: Revisiting the resnet model
+
+for visual recognition. arXiv:1611.10080 (2016)
+
+7. Cordts, M., Omran, M., Ramos, S., Rehfeld, T., Enzweiler, M., Benenson, R.,
+Franke, U., Roth, S., Schiele, B.: The cityscapes dataset for semantic urban scene
+understanding. In: CVPR. (2016)
+
+8. Paszke, A., Chaurasia, A., Kim, S., Culurciello, E.: Enet: A deep neural network
+
+architecture for real-time semantic segmentation. arXiv:1606.02147 (2016)
+
+9. Treml, M., Arjona-Medina, J., Unterthiner, T., Durgesh, R., Friedmann, F., Schu-
+berth, P., Mayr, A., Heusel, M., Hofmarcher, M., Widrich, M., Nessler1, B., Hochre-
+iter, S.: Speeding up semantic segmentation for autonomous driving. NIPS Work-
+shop (2016)
+
+10. Wang, P., Chen, P., Yuan, Y., Liu, D., Huang, Z., Hou, X., Cottrell, G.W.: Un-
+derstanding convolution for semantic segmentation. arXiv:1702.08502 (2017)
+11. Lin, G., Milan, A., Shen, C., Reid, I.D.: Reﬁnenet: Multi-path reﬁnement networks
+
+for high-resolution semantic segmentation. In: CVPR. (2017)
+
+12. Pohlen, T., Hermans, A., Mathias, M., Leibe, B.: Full-resolution residual networks
+
+for semantic segmentation in street scenes. In: CVPR. (2017)
+
+13. Chen, L., Papandreou, G., Kokkinos, I., Murphy, K., Yuille, A.L.: Deeplab: Se-
+mantic image segmentation with deep convolutional nets, atrous convolution, and
+fully connected crfs. arXiv:1606.00915 (2016)
+
+14. Yu, F., Koltun, V.: Multi-scale context aggregation by dilated convolutions. ICLR
+
+(2016)
+
+15. Liu, Z., Li, X., Luo, P., Loy, C.C., Tang, X.: Semantic image segmentation via
+
+deep parsing network. In: ICCV. (2015)
+
+16. Zheng, S., Jayasumana, S., Romera-Paredes, B., Vineet, V., Su, Z., Du, D., Huang,
+C., Torr, P.H.S.: Conditional random ﬁelds as recurrent neural networks. In: ICCV.
+(2015)
+
+17. Brostow, G.J., Fauqueur, J., Cipolla, R.: Semantic object classes in video: A high-
+
+deﬁnition ground truth database. Pattern Recognition Letters (2009)
+
+18. Caesar, H., Uijlings, J., Ferrari, V.: Coco-stuﬀ: Thing and stuﬀ classes in context.
+
+arXiv:1612.03716 (2016)
+
+TPAMI (2011)
+
+19. Liu, C., Yuen, J., Torralba, A.: Nonparametric scene parsing via label transfer.
+
+20. Chen, L., Yang, Y., Wang, J., Xu, W., Yuille, A.L.: Attention to scale: Scale-aware
+
+semantic image segmentation. In: CVPR. (2016)
+
+21. Hariharan, B., Arbel´aez, P.A., Girshick, R.B., Malik, J.: Hypercolumns for object
+
+segmentation and ﬁne-grained localization. In: CVPR. (2015)
+
+16
+
+H. Zhao, X. Qi, X. Shen, J. Shi, J. Jia
+
+22. Xia, F., Wang, P., Chen, L., Yuille, A.L.: Zoom better to see clearer: Human and
+
+object parsing with hierarchical auto-zoom net. In: ECCV. (2016)
+
+23. Girshick, R.: Fast R-CNN. In: ICCV. (2015)
+24. Ren, S., He, K., Girshick, R., Sun, J.: Faster R-CNN: Towards real-time object
+
+detection with region proposal networks. In: NIPS. (2015)
+
+25. Redmon, J., Divvala, S.K., Girshick, R.B., Farhadi, A.: You only look once: Uniﬁed,
+
+real-time object detection. In: CVPR. (2016)
+
+26. Redmon, J., Farhadi, A.: YOLO9000: better, faster, stronger. In: CVPR. (2017)
+27. Liu, W., Anguelov, D., Erhan, D., Szegedy, C., Reed, S.E., Fu, C., Berg, A.C.: Ssd:
+
+Single shot multibox detector. In: ECCV. (2016)
+
+28. Romera, E., Alvarez, J.M., Bergasa, L.M., Arroyo, R.: Eﬃcient convnet for real-
+time semantic segmentation. In: Intelligent Vehicles Symposium (IV). (2017)
+29. Shelhamer, E., Rakelly, K., Hoﬀman, J., Darrell, T.: Clockwork convnets for video
+
+semantic segmentation. In: ECCV Workshop. (2016)
+
+30. Zhu, X., Xiong, Y., Dai, J., Yuan, L., Wei, Y.: Deep feature ﬂow for video recog-
+
+31. Kundu, A., Vineet, V., Koltun, V.: Feature space optimization for semantic video
+
+nition. In: CVPR. (2017)
+
+segmentation. In: CVPR. (2016)
+
+warping. In: ICCV. (2017)
+
+32. Gadde, R., Jampani, V., Gehler, P.V.: Semantic video cnns through representation
+
+33. Ronneberger, O., Fischer, P., Brox, T.: U-net: Convolutional networks for biomed-
+
+ical image segmentation. In: MICCAI. (2015)
+
+34. Ghiasi, G., Fowlkes, C.C.: Laplacian pyramid reconstruction and reﬁnement for
+
+semantic segmentation. In: ECCV. (2016)
+
+35. Everingham, M., Gool, L.J.V., Williams, C.K.I., Winn, J.M., Zisserman, A.: The
+
+pascal visual object classes VOC challenge. IJCV (2010)
+
+36. Zhou, B., Zhao, H., Puig, X., Fidler, S., Barriuso, A., Torralba, A.: Semantic
+
+understanding of scenes through the ADE20K dataset. arXiv:1608.05442 (2016)
+
+37. Jia, Y., Shelhamer, E., Donahue, J., Karayev, S., Long, J., Girshick, R.B., Guadar-
+rama, S., Darrell, T.: Caﬀe: Convolutional architecture for fast feature embedding.
+In: ACM MM. (2014)
+
+38. Iandola, F.N., Moskewicz, M.W., Ashraf, K., Han, S., Dally, W.J., Keutzer, K.:
+Squeezenet: Alexnet-level accuracy with 50x fewer parameters and <1mb model
+size. arXiv:1602.07360 (2016)
+
+39. Han, S., Mao, H., Dally, W.J.: Deep compression: Compressing deep neural network
+
+with pruning, trained quantization and huﬀman coding. In: ICLR. (2016)
+
+40. Han, S., Pool, J., Narang, S., Mao, H., Tang, S., Elsen, E., Catanzaro, B., Tran,
+J., Dally, W.J.: DSD: regularizing deep neural networks with dense-sparse-dense
+training ﬂow. In: ICLR. (2017)
+
+41. Li, H., Kadav, A., Durdanovic, I., Samet, H., Graf, H.P.: Pruning ﬁlters for eﬃcient
+
+convnets. In: ICLR. (2017)
+
+42. Sturgess, P., Alahari, K., Ladicky, L., Torr, P.H.: Combining appearance and
+
+structure from motion features for road scene understanding. In: BMVC. (2009)
+
+43. Lin, T., Maire, M., Belongie, S.J., Hays, J., Perona, P., Ramanan, D., Doll´ar, P.,
+Zitnick, C.L.: Microsoft coco: Common objects in context. In: ECCV. (2014)
+
+8
+1
+0
+2
+ 
+g
+u
+A
+ 
+0
+2
+ 
+ 
+]
+
+V
+C
+.
+s
+c
+[
+ 
+ 
+2
+v
+5
+4
+5
+8
+0
+.
+4
+0
+7
+1
+:
+v
+i
+X
+r
+a
+
+ICNet for Real-Time Semantic Segmentation
+on High-Resolution Images
+
+Hengshuang Zhao1, Xiaojuan Qi1, Xiaoyong Shen2, Jianping Shi3, Jiaya Jia1,2
+
+1The Chinese University of Hong Kong, 2 Tencent Youtu Lab, 3SenseTime Research
+{hszhao,xjqi,leojia}@cse.cuhk.edu.hk,
+dylanshen@tencent.com, shijianping@sensetime.com
+
+Abstract. We focus on the challenging task of real-time semantic seg-
+mentation in this paper. It ﬁnds many practical applications and yet is
+with fundamental diﬃculty of reducing a large portion of computation for
+pixel-wise label inference. We propose an image cascade network (ICNet)
+that incorporates multi-resolution branches under proper label guidance
+to address this challenge. We provide in-depth analysis of our framework
+and introduce the cascade feature fusion unit to quickly achieve high-
+quality segmentation. Our system yields real-time inference on a single
+GPU card with decent quality results evaluated on challenging datasets
+like Cityscapes, CamVid and COCO-Stuﬀ.
+
+Keywords: Real-Time, High-Resolution, Semantic Segmentation
+
+1
+
+Introduction
+
+Semantic image segmentation is a fundamental task in computer vision. It pre-
+dicts dense labels for all pixels in the image, and is regarded as a very important
+task that can help deep understanding of scene, objects, and human. Develop-
+ment of recent deep convolutional neural networks (CNNs) makes remarkable
+progress on semantic segmentation [1,2,3,4,5,6]. The eﬀectiveness of these net-
+works largely depends on the sophisticated model design regarding depth and
+width, which has to involve many operations and parameters.
+
+CNN-based semantic segmentation mainly exploits fully convolutional net-
+works (FCNs). It is common wisdom now that increase of result accuracy almost
+means more operations, especially for pixel-level prediction tasks like semantic
+segmentation. To illustrate it, we show in Fig. 1(a) the accuracy and inference
+time of diﬀerent frameworks on Cityscapes [7] dataset.
+
+Status of Fast Semantic Segmentation Contrary to the extraordinary de-
+velopment of high-quality semantic segmentation, research along the line to make
+semantic segmentation run fast while not sacriﬁcing too much quality is left be-
+hind. We note actually this line of work is similarly important since it can inspire
+or enable many practical tasks in, for example, automatic driving, robotic inter-
+action, online video processing, and even mobile computing where running time
+becomes a critical factor to evaluate system performance.
+
+2
+
+H. Zhao, X. Qi, X. Shen, J. Shi, J. Jia
+
+(a) Inference speed and mIoU
+
+(b) Time in each layer of PSPNet50
+
+Fig. 1. (a)1: Inference speed and mIoU performance on Cityscapes [7] test set. Meth-
+ods involved are PSPNet [5], ResNet38 [6], DUC [10], ReﬁneNet [11], FRRN [12],
+DeepLabv2-CRF[13], Dilation10 [14], DPN [15], FCN-8s [1], DeepLab [2], CRF-
+RNN [16], SQ [9], ENet [8], SegNet [3], and our ICNet. (b): Time spent on PSPNet50
+with dilation 8 for two input images. Roughly running time is proportional to the pixel
+number and kernel number.
+
+Our experiments show that high-accuracy methods of ResNet38 [6] and PSP-
+Net [5] take around 1 second to predict a 1024 × 2048 high-resolution image on
+one Nvidia TitanX GPU card during testing. These methods fall into the area
+illustrated in Fig. 1(a) with high accuracy and low speed. Recent fast semantic
+segmentation methods of ENet [8] and SQ [9], contrarily, take quite diﬀerent
+positions in the plot. The speed is much accelerated; but accuracy drops, where
+the ﬁnal mIoUs are lower than 60%. These methods are located in the lower
+right phase in the ﬁgure.
+
+Our Focus and Contributions In this paper, we focus on building a prac-
+tically fast semantic segmentation system with decent prediction accuracy. Our
+method is the ﬁrst in its kind to locate in the top-right area shown in Fig. 1(a)
+and is one of the only two available real-time approaches. It achieves decent
+trade-oﬀ between eﬃciency and accuracy.
+
+Diﬀerent from previous architectures, we make comprehensive consideration
+on the two factors of speed and accuracy that are seemingly contracting. We ﬁrst
+make in-depth analysis of time budget in semantic segmentation frameworks and
+conduct extensive experiments to demonstrate insuﬃciency of intuitive speedup
+strategies. This motivates development of image cascade network (ICNet), a high
+eﬃciency segmentation system with decent quality. It exploits eﬃciency of pro-
+cessing low-resolution images and high inference quality of high-resolution ones.
+The idea is to let low-resolution images go through the full semantic perception
+
+1 Blue ones are tested with downsampled images. Inference speed is reported with sin-
+gle network forward while accuracy of several mIoU aimed approaches (like PSPNet(cid:63))
+may contain testing tricks like multi-scale and ﬂipping, resulting much more time.
+See supplementary material for detailed information.
+
+ICNet for Real-Time Semantic Segmentation
+
+3
+
+network ﬁrst for a coarse prediction map. Then cascade feature fusion unit and
+cascade label guidance strategy are proposed to integrate medium and high reso-
+lution features, which reﬁne the coarse semantic map gradually. We make all our
+code and models publicly available2. Our main contributions and performance
+statistics are the following.
+
+– We develop a novel and unique image cascade network for real-time semantic
+segmentation, it utilizes semantic information in low resolution along with
+details from high-resolution images eﬃciently.
+
+– The developed cascade feature fusion unit together with cascade label guid-
+ance can recover and reﬁne segmentation prediction progressively with a low
+computation cost.
+
+– Our ICNet achieves 5× speedup of inference time, and reduces memory con-
+sumption by 5× times. It can run at high resolution 1024×2048 in speed of 30
+fps while accomplishing high-quality results. It yields real-time inference on
+various datasets including Cityscapes [7], CamVid [17] and COCO-Stuﬀ [18].
+
+2 Related Work
+
+Traditional semantic segmentation methods [19] adopt handcrafted feature to
+learn the representation. Recently, CNN based methods largely improve the per-
+formance.
+
+High Quality Semantic Segmentation FCN [1] is the pioneer work to re-
+place the last fully-connected layers in classiﬁcation with convolution layers.
+DeepLab [2,13] and [14] used dilated convolution to enlarge the receptive ﬁeld
+for dense labeling. Encoder-decoder structures [3,4] can combine the high-level
+semantic information from later layers with the spatial information from earlier
+ones. Multi-scale feature ensembles are also used in [20,21,22]. In [2,15,16], condi-
+tional random ﬁelds (CRF) or Markov random ﬁelds (MRF) were used to model
+spatial relationship. Zhao et al. [5] used pyramid pooling to aggregate global and
+local context information. Wu et al. [6] adopted a wider network to boost per-
+formance. In [11], a multi-path reﬁnement network combined multi-scale image
+features. These methods are eﬀective, but preclude real-time inference.
+
+High Eﬃciency Semantic Segmentation In object detection, speed became
+one important factor in system design [23,24]. Recent Yolo [25,26] and SSD [27]
+are representative solutions. In contrast, high speed inference in semantic seg-
+mentation is under-explored. ENet [8] and [28] are lightweight networks. These
+methods greatly raise eﬃciency with notably sacriﬁced accuracy.
+
+2 https://github.com/hszhao/ICNet
+
+4
+
+H. Zhao, X. Qi, X. Shen, J. Shi, J. Jia
+
+Video Semantic Segmentation Videos contain redundant information in
+frames, which can be utilized to reduce computation. Recent Clockwork [29]
+reuses feature maps given stable video input. Deep feature ﬂow [30] is based
+on a small-scale optical ﬂow network to propagate features from key frames to
+others. FSO [31] performs structured prediction with dense CRF applied on op-
+timized features to get temporal consistent predictions. NetWarp [32] utilizes op-
+tical ﬂow of adjacent frames to warp internal features across time space in video
+sequences. We note when a good-accuracy fast image semantic-segmentation
+framework comes into existence, video segmentation will also be beneﬁted.
+
+3
+
+Image Cascade Network
+
+We start by analyzing computation time budget of diﬀerent components on
+the high performance segmentation framework PSPNet [5] with experimental
+statistics. Then we introduce the image cascade network (ICNet) as illustrated
+in Fig. 2, along with the cascade feature fusion unit and cascade label guidance,
+for fast semantic segmentation.
+
+3.1 Speed Analysis
+
+In convolution, the transformation function Φ is applied to input feature map
+V ∈ Rc×h×w to obtain the output map U ∈ Rc(cid:48)×h(cid:48)×w(cid:48)
+, where c, h and w denote
+features channel, height and width respectively. The transformation operation
+Φ : V → U is achieved by applying c(cid:48) number of 3D kernels K ∈ Rc×k×k where
+k × k (e.g, 3 × 3) is kernel spatial size. Thus the total number of operations
+O(Φ) in convolution layer is c(cid:48)ck2h(cid:48)w(cid:48). The spatial size of the output map h(cid:48)
+and w(cid:48) are highly related to the input, controlled by parameter stride s as h(cid:48) =
+h/s, w(cid:48) = w/s, making
+
+O(Φ) ≈ c(cid:48)ck2hw/s2.
+
+(1)
+
+The computation complexity is associated with feature map resolution (e.g.,
+h, w, s), number of kernels and network width (e.g., c, c(cid:48)). Fig. 1(b) shows
+the time cost of two resolution images in PSPNet50. Blue curve corresponds
+to high-resolution input with size 1024 × 2048 and green curve is for image
+with resolution 512 × 1024. Computation increases squarely regarding image
+resolution. For either curve, feature maps in stage4 and stage5 are with the
+same spatial resolution, i.e., 1/8 of the original input; but the computation in
+stage5 is four times heavier than that in stage4. It is because convolutional layers
+in stage5 double the number of kernels c together with input channel c(cid:48).
+
+3.2 Network Architecture
+
+According to above time budget analysis, we adopt intuitive speedup strategies
+in experiments to be detailed in Sec. 5, including downsampling input, shrink-
+ing feature maps and conducting model compression. The corresponding results
+
+ICNet for Real-Time Semantic Segmentation
+
+5
+
+Fig. 2. Network architecture of ICNet. ‘CFF’ stands for cascade feature fusion detailed
+in Sec. 3.3. Numbers in parentheses are feature map size ratios to the full-resolution
+input. Operations are highlighted in brackets. The ﬁnal ×4 upsampling in the bottom
+branch is only used during testing.
+
+show that it is very diﬃcult to keep a good balance between inference accuracy
+and speed. The intuitive strategies are eﬀective to reduce running time, while
+they yield very coarse prediction maps. Directly feeding high-resolution images
+into a network is unbearable in computation.
+
+Our proposed system image cascade network (ICNet) does not simply choose
+either way. Instead it takes cascade image inputs (i.e., low-, medium- and high
+resolution images), adopts cascade feature fusion unit (Sec. 3.3) and is trained
+with cascade label guidance (Sec. 3.4). The new architecture is illustrated in
+Fig. 2. The input image with full resolution (e.g., 1024 × 2048 in Cityscapes [7])
+is downsampled by factors of 2 and 4, forming cascade input to medium- and
+high-resolution branches.
+
+Segmenting the high-resolution input with classical frameworks like FCN di-
+rectly is time consuming. To overcome this shortcoming, we get semantic extrac-
+tion using low-resolution input as shown in top branch of Fig. 2. A 1/4 sized im-
+age is fed into PSPNet with downsampling rate 8, resulting in a 1/32-resolution
+feature map. To get high quality segmentation, medium and high resolution
+branches (middle and bottom parts in Fig. 2) help recover and reﬁne the coarse
+prediction. Though some details are missing and blurry boundaries are gener-
+ated in the top branch, it already harvests most semantic parts. Thus we can
+safely limit the number of parameters in both middle and bottom branches. Light
+weighted CNNs (green dotted box) are adopted in higher resolution branches;
+diﬀerent-branch output feature maps are fused by cascade-feature-fusion unit
+(Sec. 3.3) and trained with cascade label guidance (Sec. 3.4).
+
+Although the top branch is based on a full segmentation backbone, the input
+resolution is low, resulting in limited computation. Even for PSPNet with 50+
+layers, inference time and memory are 18ms and 0.6GB for the large images in
+
+6
+
+H. Zhao, X. Qi, X. Shen, J. Shi, J. Jia
+
+Cityscapes. Because weights and computation (in 17 layers) can be shared be-
+tween low- and medium-branches, only 6ms is spent to construct the fusion map.
+Bottom branch has even less layers. Although the resolution is high, inference
+only takes 9ms. Details of the architecture are presented in the supplementary
+ﬁle. With all these three branches, our ICNet becomes a very eﬃcient and mem-
+ory friendly architecture that can achieve good-quality segmentation.
+
+3.3 Cascade Feature Fusion
+
+To combine cascade features from diﬀerent-
+resolution inputs, we propose a cascade fea-
+ture fusion (CFF) unit as shown in Fig. 3.
+The input to this unit contains three com-
+ponents: two feature maps F1 and F2 with
+sizes C1 × H1 × W1 and C2 × H2 × W2 re-
+spectively, and a ground-truth label with res-
+olution 1×H2 ×W2. F2 is with doubled spatial
+size of F1.
+
+We ﬁrst apply upsampling rate 2 on F1
+through bilinear interpolation, yielding the
+same spatial size as F2. Then a dilated con-
+volution layer with kernel size C3 × 3 × 3 and
+dilation 2 is applied to reﬁne the upsampled
+features. The resulting feature is with size
+C3 × H2 × W2. This dilated convolution combines feature information from sev-
+eral originally neighboring pixels. Compared with deconvolution, upsampling
+followed by dilated convolution only needs small kernels, to harvest the same
+receptive ﬁeld. To keep the same receptive ﬁeld, deconvolution needs larger ker-
+nel sizes than upsampling with dilated convolution (i.e., 7 × 7 vs. 3 × 3), which
+causes more computation.
+
+Fig. 3. Cascade feature fusion.
+
+For feature F2, a projection convolution with kernel size C3 × 1 × 1 is utilized
+to project F2 so that it has the same number of channels as the output of F1.
+Then two batch normalization layers are used to normalize these two processed
+features as shown in Fig. 3. Followed by an element-wise ‘sum’ layer and a ‘ReLU’
+layer, we obtain the fused feature F (cid:48)
+2 as C3 × H2 × W2. To enhance learning of
+F1, we use an auxiliary label guidance on the upsampled feature of F1.
+
+3.4 Cascade Label Guidance
+
+To enhance the learning procedure in each branch, we adopt a cascade label
+guidance strategy. It utilizes diﬀerent-scale (e.g., 1/16, 1/8, and 1/4) ground-
+truth labels to guide the learning stage of low, medium and high resolution
+input. Given T branches (i.e., T =3) and N categories. In branch t, the predicted
+feature map F t has spatial size Yt × Xt. The value at position (n, y, x) is F t
+n,y,x.
+The corresponding ground truth label for 2D position (y, x) is ˆn. To train ICNet,
+
+ICNet for Real-Time Semantic Segmentation
+
+7
+
+Fig. 4. Comparison of semantic segmentation frameworks. (a) Intermediate skip con-
+nection used by FCN [1] and Hypercolumns [21]. (b) Encoder-decoder structure incor-
+porated in SegNet [3], DeconvNet [4], UNet [33], ENet [8], and step-wise reconstruction
+& reﬁnement from LRR [34] and ReﬁneNet [11]. (c) Multi-scale prediction ensemble
+adopted by DeepLab-MSC [2] and PSPNet-MSC [5]. (d) Our ICNet architecture.
+
+we append weighted softmax cross entropy loss in each branch with related loss
+weight λt. Thus we minimize the loss function L deﬁned as
+
+L = −
+
+T
+(cid:88)
+
+t=1
+
+λt
+
+1
+YtXt
+
+Yt(cid:88)
+
+Xt(cid:88)
+
+y=1
+
+x=1
+
+log
+
+ˆn,y,x
+
+eF t
+n=1 eF t
+
+(cid:80)N
+
+.
+
+n,y,x
+
+(2)
+
+In the testing phase, the low and medium guidance operations are simply aban-
+doned, where only high-resolution branch is retained. This strategy makes gradi-
+ent optimization smoother for easy training. With more powerful learning ability
+in each branch, the ﬁnal prediction map is not dominated by any single branch.
+
+4 Structure Comparison and Analysis
+
+Now we illustrate the diﬀerence of ICNet from existing cascade architectures for
+semantic segmentation. Typical structures in previous semantic segmentation
+systems are illustrated in Fig. 4. Our proposed ICNet (Fig. 4(d)) is by nature
+diﬀerent from others. Previous frameworks are all with relatively intensive com-
+putation given the high-resolution input. While in our cascade structure, only
+the lowest-resolution input is fed into the heavy CNN with much reduced compu-
+tation to get the coarse semantic prediction. The higher-res inputs are designed
+to recover and reﬁne the prediction progressively regarding blurred boundaries
+and missing details. Thus they are processed by light-weighted CNNs. Newly
+introduced cascade-feature-fusion unit and cascade label guidance strategy in-
+tegrate medium and high resolution features to reﬁne the coarse semantic map
+gradually. In this special design, ICNet achieves high-eﬃciency inference with
+reasonable-quality segmentation results.
+
+8
+
+H. Zhao, X. Qi, X. Shen, J. Shi, J. Jia
+
+5 Experimental Evaluation
+
+Our method is eﬀective for high resolution images. We evaluate the architec-
+ture on three challenging datasets, including urban-scene understanding dataset
+Cityscapes [7] with image resolution 1024 × 2048, CamVid [17] with image res-
+olution 720 × 960 and stuﬀ understanding dataset COCO-Stuﬀ [18] with image
+resolution up to 640 × 640. There is a notable diﬀerence between COCO-Stuﬀ
+and object/scene segmentation datasets of VOC2012 [35] and ADE20K [36]. In
+the latter two sets, most images are of low resolution (e.g., 300 × 500), which
+can already be processed quickly. While in COCO-Stuﬀ, most images are larger,
+making it more diﬃcult to achieve real-time performance.
+
+In the following, we ﬁrst show intuitive speedup strategies and their draw-
+
+backs, then reveal our improvement with quantitative and visual analysis.
+
+5.1 Implementation Details
+
+We conduct experiments based on platform Caﬀe [37]. All experiments are on
+a workstation with Maxwell TitanX GPU cards under CUDA 7.5 and CUDNN
+V5. Our testing uses only one card. To measure the forward inference time, we
+use the time measure tool ‘Caﬀe time’ and set the repeating iteration number
+to 100 to eliminate accidental errors during testing. All the parameters in batch
+normalization layers are merged into the neighboring front convolution layers.
+
+For the training hyper-parameters, the mini-batch size is set to 16. The base
+learning rate is 0.01 and the ‘poly’ learning rate policy is adopted with power
+0.9, together with the maximum iteration number set to 30K for Cityscapes,
+10K for CamVid and 30K for COCO-Stuﬀ. Momentum is 0.9 and weight decay
+is 0.0001. Data augmentation contains random mirror and rand resizing between
+0.5 and 2. The auxiliary loss weights are empirically set to 0.4 for λ1 and λ2,
+1 for λ3 in Eq. 2, as adopted in [5]. For evaluation, both mean of class-wise
+intersection over union (mIoU) and network forward time (Time) are used.
+
+5.2 Cityscapes
+
+We ﬁrst apply our framework to the recent urban scene understanding dataset
+Cityscapes [7]. This dataset contains high-resolution 1024 × 2048 images, which
+make it a big challenge for fast semantic segmentation. It contains 5,000 ﬁnely
+annotated images split into training, validation and testing sets with 2,975, 500,
+and 1,525 images respectively. The dense annotation contains 30 common classes
+of road, person, car, etc. 19 of them are used in training and testing.
+
+Intuitive Speedup According to the time complexity shown in Eq. (1), we do
+intuitive speedup in three aspects, namely downsampling input, downsampling
+feature, and model compression.
+
+ICNet for Real-Time Semantic Segmentation
+
+9
+
+(a) input image
+
+(b) ground truth
+
+(c) colormap
+
+(d) scale 0.25 (42ms/60.7%)
+
+(e) scale 0.5 (123ms/68.4%)
+
+(f) scale 1 (446ms/71.7%)
+
+Fig. 5. Downsampling input: prediction of PSPNet50 on the validation set of
+Cityscapes. Values in the parentheses are the inference time and mIoU.
+
+Table 1. Left: Downsampling feature with factors 8, 16 and 32. Right: Model com-
+pression with kernel keeping rates 1, 0.5 and 0.25.
+
+Downsample Size
+
+8
+
+16
+
+32
+
+Kernel Keeping Rates
+
+1
+
+0.5 0.25
+
+mIoU (%)
+Time (ms)
+
+71.7 70.2 67.1
+446 177 131
+
+mIoU (%)
+Time (ms)
+
+71.7 67.9 59.4
+72
+446 170
+
+Downsampling Input Image resolution is the most critical factor that aﬀects
+running speed as analyzed in Sec. 3.1. A simple approach is to use the small-
+resolution image as input. We test downsampling the image with ratios 1/2 and
+1/4, and feeding the resulting images into PSPNet50. We directly upsample
+prediction results to the original size. This approach empirically has several
+drawbacks as illustrated in Fig. 5. With scaling ratio 0.25, although the inference
+time is reduced by a large margin, the prediction map is very coarse, missing
+many small but important details compared to the higher resolution prediction.
+With scaling ratio 0.5, the prediction recovers more information compared to
+the 0.25 case. Unfortunately, the person and traﬃc light far from the camera
+are still missing and object boundaries are blurred. To make things worse, the
+running time is still too long for a real-time system.
+
+Downsampling Feature Besides directly downsampling the input image, another
+simple choice is to scale down the feature map by a large ratio in the inference
+process. FCN [1] downsampled it for 32 times and DeepLab [2] did that for
+8 times. We test PSPNet50 with downsampling ratios of 1:8, 1:16 and 1:32
+and show results in the left of Table 1. A smaller feature map can yield faster
+inference at the cost of sacriﬁcing prediction accuracy. The lost information is
+mostly detail contained in low-level layers. Also, even with the smallest resulting
+feature map under ratio 1:32, the system still takes 131ms in inference.
+
+10
+
+H. Zhao, X. Qi, X. Shen, J. Shi, J. Jia
+
+Table 2. Performance of ICNet with diﬀerent branches on validation set of Citysapes.
+The baseline method is PSPNet50 compressed to a half. ‘sub4’, ‘sub24’ and ‘sub124’
+represent predictions in low-, medium-, and high-resolution branches respectively.
+
+Items
+
+Baseline
+
+sub4
+
+sub24
+
+sub124
+
+mIoU (%)
+Time (ms)
+Frame (fps)
+Speedup
+Memory (GB)
+Memory Save
+
+67.9
+170
+5.9
+1×
+9.2
+1×
+
+59.6
+18
+55.6
+9.4×
+0.6
+
+66.5
+25
+40
+6.8×
+1.1
+15.3× 8.4×
+
+67.7
+33
+30.3
+5.2×
+1.6
+5.8×
+
+Table 3. Eﬀectiveness of cascade feature fusion unit (CFF) and cascade label guid-
+ance (CLG). ‘DC3’, ‘DC5’ and ‘DC7’ denote replacing ‘bilinear upsampling + dilated
+convolution’ with deconvolution operation with kernels 3×3, 5×5 and 7×7 respectively.
+
+(cid:88)
+
+DC3 DC5 DC7 CFF CLG mIoU (%) Time (ms)
+(cid:88)
+(cid:88)
+(cid:88)
+(cid:88)
+
+(cid:88)
+
+(cid:88)
+
+66.7
+66.7
+68.0
+67.7
+66.8
+
+31
+34
+38
+33
+33
+
+(cid:88)
+(cid:88)
+
+Model Compression Apart from the above two strategies, another natural way to
+reduce network complexity is to trim kernels in each layer. Compressing models
+becomes an active research topic in recent years due to the high demand. The
+solutions [38,39,40,41] can make a complicated network reduce to a lighter one
+under user-controlled accuracy reduction. We adopt recent eﬀective classiﬁca-
+tion model compression strategy presented in [41] on our segmentation models.
+For each ﬁlter, we ﬁrst calculate the sum of kernel (cid:96)1-norm. Then we sort these
+sum results in a descending order and keep only the most signiﬁcant ones. Dis-
+appointingly, this strategy also does not meet our requirement given the com-
+pressed models listed in the right of Table 1. Even by keeping only a quarter of
+kernels, the inference time is still too long. Meanwhile the corresponding mIoU
+is intolerably low – it already cannot produce reasonable segmentation for many
+applications.
+
+Cascade Branches We do ablation study on cascade branches, the results are
+shown in Table 2. Our baseline is the half-compressed PSPNet50, 170ms infer-
+ence time is yielded with mIoU reducing to 67.9%. They indicate that model
+compression has almost no chance to achieve real-time performance under the
+condition of keeping decent segmentation quality. Based on this baseline, we
+
+ICNet for Real-Time Semantic Segmentation
+
+11
+
+Table 4. Predicted mIoU and inference time on Cityscapes test set with image resolu-
+tion 1024 × 2048. ‘DR’ stands for image downsampling ratio during testing (e.g, DR=4
+represents testing at resolution 256 × 512). Methods trained using both ﬁne and coarse
+data are marked with ‘†’.
+
+Method
+
+DR mIoU (%) Time (ms) Frame (fps)
+
+4
+SegNet [3]
+ENet [8]
+2
+no
+SQ [9]
+2
+CRF-RNN [16]
+DeepLab [2]
+2
+FCN-8S [1]
+no
+Dilation10 [14] no
+2
+FRRN [12]
+PSPNet3 [5]
+no
+ICNet
+ICNet†
+
+no
+no
+
+57.0
+58.3
+59.8
+62.5
+63.1
+65.3
+67.1
+71.8
+81.2
+
+69.5
+70.6
+
+60
+13
+60
+700
+4000
+500
+4000
+469
+1288
+
+33
+33
+
+16.7
+76.9
+16.7
+1.4
+0.25
+2
+0.25
+2.1
+0.78
+
+30.3
+30.3
+
+test our ICNet on diﬀerent branches. To show the eﬀectiveness of the proposed
+cascade framework, we denote the outputs of low-, medium- and high-resolution
+branches as ‘sub4’, ‘sub24’ and ‘sub124’, where the numbers stand for the infor-
+mation used. The setting ‘sub4’ only uses the top branch with the low-resolution
+input. ‘sub24’ and ‘sub124’ respectively contain top two and all three branches.
+We test these three settings on the validation set of Cityscapes and list the
+results in Table 2. With just the low-resolution input branch, although running
+time is short, the result quality drops to 59.6%. Using two and three branches, we
+increase mIoU to 66.5% and 67.7% respectively. The running time only increases
+by 7ms and 8ms. Note our segmentation quality nearly stays the same as the
+baseline, and yet is 5.2× times faster. The memory consumption is signiﬁcantly
+reduced by 5.8×.
+
+Cascade Structure We also do ablation study on cascade feature fusion unit
+and cascade label guidance. The results are shown in Table 3. Compared to
+the deconvolution layer with 3 × 3 and 5 × 5 kernels, with similar inference
+eﬃciency, cascade feature fusion unit gets higher mIoU performance. Compared
+to deconvolution layer with a larger kernel with size 7×7, the mIoU performance
+is close, while cascade feature fusion unit yields faster processing speed. Without
+the cascade label guidance, the performance drops a lot as shown in the last row.
+
+Methods Comparison We ﬁnally list mIoU performance and inference time
+of our proposed ICNet on the test set of Cityscapes. It is trained on training and
+
+3 Single network forward costs 1288ms (with TitanX Maxwell, 680ms for Pascal) while
+
+mIoU aimed testing for boosting performance (81.2% mIoU) costs 51.0s.
+
+12
+
+H. Zhao, X. Qi, X. Shen, J. Shi, J. Jia
+
+(a) input image
+
+(b) ground truth
+
+(c) colormap
+
+(d) sub4 branch
+
+(e) sub24 branch
+
+(f) sub124 branch
+
+Fig. 6. Visual prediction improvement of ICNet in each branch on Cityscapes dataset.
+
+(a) input image
+
+(b) diﬀ1
+
+(c) diﬀ2
+
+(d) sub4 branch
+
+(e) sub24 branch
+
+(f) sub124 branch
+
+Fig. 7. Visual prediction improvement of ICNet. White regions in ‘diﬀ1’ and ‘diﬀ2’
+denote prediction diﬀerence between ‘sub24’ and ‘sub4’, and between ‘sub124’ and
+‘sub24’ respectively.
+
+validation sets of Cityscapes for 90K iterations. Results are included in Table 4.
+The reported mIoUs and running time of other methods are shown in the oﬃcial
+Cityscapes leadboard. For fairness, we do not include methods without reporting
+running time. Many of these methods may have adopted time-consuming multi-
+scale testing for the best result quality.
+
+Our ICNet yields mIoU 69.5%. It is even quantitatively better than several
+methods that do not care about speed. It is about 10 points higher than ENet [8]
+and SQ [9]. Training with both ﬁne and coarse data boosts mIoU performance
+to 70.6%. ICNet is a 30fps method on 1024 × 2048 resolution images using only
+one TitanX GPU card. Video example can be accessed through link4.
+
+Visual Improvement Figs. 6 and 7 show the visual results of ICNet on
+Cityscapes. With proposed gradual feature fusion steps and cascade label guid-
+
+4 https://youtu.be/qWl9idsCuLQ
+
+ICNet for Real-Time Semantic Segmentation
+
+13
+
+Fig. 8. Quantitative analysis of accuracy change in connected components.
+
+Table 5. Results on CamVid test set with
+time reported on resolution 720 × 960.
+
+Table 6. Results on COCO-Stuﬀ test set
+with time reported on resolution 640×640.
+
+Method
+
+mIoU Time Frame
+(ms)
+(%)
+
+fps
+
+Method
+
+mIoU Time Frame
+(ms)
+(%)
+
+fps
+
+SegNet [3]
+DPN [15]
+DeepLab [2]
+Dilation8 [14]
+PSPNet50 [5]
+
+ICNet
+
+46.4
+60.1
+61.6
+65.3
+69.1
+
+67.1
+
+217
+830
+203
+227
+185
+
+36
+
+4.6
+1.2
+4.9
+4.4
+5.4
+
+27.8
+
+FCN [1]
+DeepLab [2]
+PSPNet50 [5]
+
+ICNet
+
+22.7
+26.9
+32.6
+
+29.1
+
+169
+124
+151
+
+28
+
+5.9
+8.1
+6.6
+
+35.7
+
+ance structure, we produce decent prediction results. Intriguingly, output of the
+‘sub4’ branch can already capture most of semantically meaningful objects. But
+the prediction is coarse due to the low-resolution input. It misses a few small-size
+important regions, such as poles and traﬃc signs.
+
+With the help of medium-resolution information, many of these regions are
+re-estimated and recovered as shown in the ‘sub24’ branch. It is noticeable that
+objects far from the camera, such as a few persons, are still missing with blurry
+object boundaries. The ‘sub124’ branch with full-resolution input helps reﬁne
+these details – the output of this branch is undoubted the best. It manifests that
+our diﬀerent-resolution information is properly made use of in this framework.
+
+Quantitative Analysis To further understand accuracy gain in each branch,
+we quantitatively analyze the predicted label maps based on connected com-
+ponents. For each connected region Ri, we calculate the number of pixels it
+contains, denoted as Si. Then we count the number of pixels correctly predicted
+in the corresponding map as si. The predicted region accuracy pi in Ri is thus
+si/Si. According to the region size Si, we project these regions onto a histogram
+H with interval K and average all related region accuracy pi as the value of
+current bin.
+
+In experiments, we set bin size of the histogram as 30 and interval K as
+3,000. It thus covers region size Si between 1 to 90K. We ignore regions with size
+
+14
+
+H. Zhao, X. Qi, X. Shen, J. Shi, J. Jia
+
+exceeding 90K. Fig. 8 shows the accuracy change in each bin. The blue histogram
+stands for the diﬀerence between ‘sub24’ and ‘sub4’ while the green histogram
+shows the diﬀerence between ‘sub124’ and ‘sub24’. For both histograms, the
+large diﬀerence is mainly on the front bins with small region sizes. This manifests
+that small region objects like traﬃc light and pole can be well improved in our
+framework. The front changes are large positives, proving that ‘sub24’ can restore
+much information on small objects on top of ‘sub4’. ‘sub124’ is also very useful
+compared to ‘sub24’.
+
+5.3 CamVid
+
+CamVid [17] dataset contains images extracted from high resolution video se-
+quences with resolution up to 720 × 960. For easy comparison with prior work,
+we adopt the split of Sturgess et al. [42], which partitions the dataset into 367,
+100, and 233 images for training, validation and testing respectively. 11 semantic
+classes are used for evaluation.
+
+The testing results are listed in Table 5, our base-model is no compressed
+PSPNet50. ICNet gets much faster inference speed than other methods on this
+high resolution, reaching the real-time speed of 27.8 fps, 5.7 times faster than
+the second one and 5.1 times faster compared to the basic model. Apart from
+high eﬃciency, it also accomplishes high quality segmentation. Visual results are
+provided in the supplementary material.
+
+5.4 COCO-Stuﬀ
+
+COCO-Stuﬀ [18] is a recently labeled dataset based on MS-COCO [43] for stuﬀ
+segmentation in context. We evaluate ICNet following the split in [18] that 9K
+images are used for training and another 1K for testing. This dataset is much
+more complex for multiple categories – up to 182 classes are used for evaluation,
+including 91 thing and 91 stuﬀ classes.
+
+Table 6 shows the testing results. ICNet still performs satisfyingly regarding
+common thing and stuﬀ understanding. It is more eﬃcient and accurate than
+modern segmentation frameworks, such as FCN and DeepLab. Compared to our
+baseline model, it achieves 5.4 times speedup. Visual predictions are provided in
+the supplementary material.
+
+6 Conclusion
+
+We have proposed a real-time semantic segmentation system ICNet. It incorpo-
+rates eﬀective strategies to accelerate network inference speed without sacriﬁcing
+much performance. The major contributions include the new framework for sav-
+ing operations in multiple resolutions and the powerful fusion unit.
+
+We believe the optimal balance of speed and accuracy makes our system
+important since it can beneﬁt many other tasks that require fast scene and object
+segmentation. It greatly enhances the practicality of semantic segmentation in
+other disciplines.
+
+ICNet for Real-Time Semantic Segmentation
+
+15
+
+References
+
+1. Long, J., Shelhamer, E., Darrell, T.: Fully convolutional networks for semantic
+
+segmentation. In: CVPR. (2015)
+
+2. Chen, L., Papandreou, G., Kokkinos, I., Murphy, K., Yuille, A.L.: Semantic image
+segmentation with deep convolutional nets and fully connected crfs. ICLR (2015)
+Segnet: A deep convolutional
+
+3. Badrinarayanan, V., Kendall, A., Cipolla, R.:
+
+encoder-decoder architecture for image segmentation. arXiv:1511.00561 (2015)
+4. Noh, H., Hong, S., Han, B.: Learning deconvolution network for semantic segmen-
+
+5. Zhao, H., Shi, J., Qi, X., Wang, X., Jia, J.: Pyramid scene parsing network. In:
+
+tation. In: ICCV. (2015)
+
+CVPR. (2017)
+
+6. Wu, Z., Shen, C., van den Hengel, A.: Wider or deeper: Revisiting the resnet model
+
+for visual recognition. arXiv:1611.10080 (2016)
+
+7. Cordts, M., Omran, M., Ramos, S., Rehfeld, T., Enzweiler, M., Benenson, R.,
+Franke, U., Roth, S., Schiele, B.: The cityscapes dataset for semantic urban scene
+understanding. In: CVPR. (2016)
+
+8. Paszke, A., Chaurasia, A., Kim, S., Culurciello, E.: Enet: A deep neural network
+
+architecture for real-time semantic segmentation. arXiv:1606.02147 (2016)
+
+9. Treml, M., Arjona-Medina, J., Unterthiner, T., Durgesh, R., Friedmann, F., Schu-
+berth, P., Mayr, A., Heusel, M., Hofmarcher, M., Widrich, M., Nessler1, B., Hochre-
+iter, S.: Speeding up semantic segmentation for autonomous driving. NIPS Work-
+shop (2016)
+
+10. Wang, P., Chen, P., Yuan, Y., Liu, D., Huang, Z., Hou, X., Cottrell, G.W.: Un-
+derstanding convolution for semantic segmentation. arXiv:1702.08502 (2017)
+11. Lin, G., Milan, A., Shen, C., Reid, I.D.: Reﬁnenet: Multi-path reﬁnement networks
+
+for high-resolution semantic segmentation. In: CVPR. (2017)
+
+12. Pohlen, T., Hermans, A., Mathias, M., Leibe, B.: Full-resolution residual networks
+
+for semantic segmentation in street scenes. In: CVPR. (2017)
+
+13. Chen, L., Papandreou, G., Kokkinos, I., Murphy, K., Yuille, A.L.: Deeplab: Se-
+mantic image segmentation with deep convolutional nets, atrous convolution, and
+fully connected crfs. arXiv:1606.00915 (2016)
+
+14. Yu, F., Koltun, V.: Multi-scale context aggregation by dilated convolutions. ICLR
+
+(2016)
+
+15. Liu, Z., Li, X., Luo, P., Loy, C.C., Tang, X.: Semantic image segmentation via
+
+deep parsing network. In: ICCV. (2015)
+
+16. Zheng, S., Jayasumana, S., Romera-Paredes, B., Vineet, V., Su, Z., Du, D., Huang,
+C., Torr, P.H.S.: Conditional random ﬁelds as recurrent neural networks. In: ICCV.
+(2015)
+
+17. Brostow, G.J., Fauqueur, J., Cipolla, R.: Semantic object classes in video: A high-
+
+deﬁnition ground truth database. Pattern Recognition Letters (2009)
+
+18. Caesar, H., Uijlings, J., Ferrari, V.: Coco-stuﬀ: Thing and stuﬀ classes in context.
+
+arXiv:1612.03716 (2016)
+
+TPAMI (2011)
+
+19. Liu, C., Yuen, J., Torralba, A.: Nonparametric scene parsing via label transfer.
+
+20. Chen, L., Yang, Y., Wang, J., Xu, W., Yuille, A.L.: Attention to scale: Scale-aware
+
+semantic image segmentation. In: CVPR. (2016)
+
+21. Hariharan, B., Arbel´aez, P.A., Girshick, R.B., Malik, J.: Hypercolumns for object
+
+segmentation and ﬁne-grained localization. In: CVPR. (2015)
+
+16
+
+H. Zhao, X. Qi, X. Shen, J. Shi, J. Jia
+
+22. Xia, F., Wang, P., Chen, L., Yuille, A.L.: Zoom better to see clearer: Human and
+
+object parsing with hierarchical auto-zoom net. In: ECCV. (2016)
+
+23. Girshick, R.: Fast R-CNN. In: ICCV. (2015)
+24. Ren, S., He, K., Girshick, R., Sun, J.: Faster R-CNN: Towards real-time object
+
+detection with region proposal networks. In: NIPS. (2015)
+
+25. Redmon, J., Divvala, S.K., Girshick, R.B., Farhadi, A.: You only look once: Uniﬁed,
+
+real-time object detection. In: CVPR. (2016)
+
+26. Redmon, J., Farhadi, A.: YOLO9000: better, faster, stronger. In: CVPR. (2017)
+27. Liu, W., Anguelov, D., Erhan, D., Szegedy, C., Reed, S.E., Fu, C., Berg, A.C.: Ssd:
+
+Single shot multibox detector. In: ECCV. (2016)
+
+28. Romera, E., Alvarez, J.M., Bergasa, L.M., Arroyo, R.: Eﬃcient convnet for real-
+time semantic segmentation. In: Intelligent Vehicles Symposium (IV). (2017)
+29. Shelhamer, E., Rakelly, K., Hoﬀman, J., Darrell, T.: Clockwork convnets for video
+
+semantic segmentation. In: ECCV Workshop. (2016)
+
+30. Zhu, X., Xiong, Y., Dai, J., Yuan, L., Wei, Y.: Deep feature ﬂow for video recog-
+
+31. Kundu, A., Vineet, V., Koltun, V.: Feature space optimization for semantic video
+
+nition. In: CVPR. (2017)
+
+segmentation. In: CVPR. (2016)
+
+warping. In: ICCV. (2017)
+
+32. Gadde, R., Jampani, V., Gehler, P.V.: Semantic video cnns through representation
+
+33. Ronneberger, O., Fischer, P., Brox, T.: U-net: Convolutional networks for biomed-
+
+ical image segmentation. In: MICCAI. (2015)
+
+34. Ghiasi, G., Fowlkes, C.C.: Laplacian pyramid reconstruction and reﬁnement for
+
+semantic segmentation. In: ECCV. (2016)
+
+35. Everingham, M., Gool, L.J.V., Williams, C.K.I., Winn, J.M., Zisserman, A.: The
+
+pascal visual object classes VOC challenge. IJCV (2010)
+
+36. Zhou, B., Zhao, H., Puig, X., Fidler, S., Barriuso, A., Torralba, A.: Semantic
+
+understanding of scenes through the ADE20K dataset. arXiv:1608.05442 (2016)
+
+37. Jia, Y., Shelhamer, E., Donahue, J., Karayev, S., Long, J., Girshick, R.B., Guadar-
+rama, S., Darrell, T.: Caﬀe: Convolutional architecture for fast feature embedding.
+In: ACM MM. (2014)
+
+38. Iandola, F.N., Moskewicz, M.W., Ashraf, K., Han, S., Dally, W.J., Keutzer, K.:
+Squeezenet: Alexnet-level accuracy with 50x fewer parameters and <1mb model
+size. arXiv:1602.07360 (2016)
+
+39. Han, S., Mao, H., Dally, W.J.: Deep compression: Compressing deep neural network
+
+with pruning, trained quantization and huﬀman coding. In: ICLR. (2016)
+
+40. Han, S., Pool, J., Narang, S., Mao, H., Tang, S., Elsen, E., Catanzaro, B., Tran,
+J., Dally, W.J.: DSD: regularizing deep neural networks with dense-sparse-dense
+training ﬂow. In: ICLR. (2017)
+
+41. Li, H., Kadav, A., Durdanovic, I., Samet, H., Graf, H.P.: Pruning ﬁlters for eﬃcient
+
+convnets. In: ICLR. (2017)
+
+42. Sturgess, P., Alahari, K., Ladicky, L., Torr, P.H.: Combining appearance and
+
+structure from motion features for road scene understanding. In: BMVC. (2009)
+
+43. Lin, T., Maire, M., Belongie, S.J., Hays, J., Perona, P., Ramanan, D., Doll´ar, P.,
+Zitnick, C.L.: Microsoft coco: Common objects in context. In: ECCV. (2014)
+

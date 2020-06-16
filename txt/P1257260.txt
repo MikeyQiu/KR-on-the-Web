@@ -1,0 +1,4316 @@
+In-Place Activated BatchNorm for Memory-Optimized Training of DNNs
+
+Samuel Rota Bulò, Lorenzo Porzi, Peter Kontschieder
+Mapillary Research
+research@mapillary.com
+
+8
+1
+0
+2
+ 
+t
+c
+O
+ 
+6
+2
+ 
+ 
+]
+
+V
+C
+.
+s
+c
+[
+ 
+ 
+3
+v
+6
+1
+6
+2
+0
+.
+2
+1
+7
+1
+:
+v
+i
+X
+r
+a
+
+Abstract
+
+In this work we present In-Place Activated Batch Nor-
+malization (INPLACE-ABN) – a novel approach to drasti-
+cally reduce the training memory footprint of modern deep
+neural networks in a computationally efﬁcient way. Our
+solution substitutes the conventionally used succession of
+BatchNorm + Activation layers with a single plugin layer,
+hence avoiding invasive framework surgery while provid-
+ing straightforward applicability for existing deep learning
+frameworks. We obtain memory savings of up to 50% by
+dropping intermediate results and by recovering required
+information during the backward pass through the inversion
+of stored forward results, with only minor increase (0.8-
+2%) in computation time. Also, we demonstrate how fre-
+quently used checkpointing approaches can be made com-
+putationally as efﬁcient as INPLACE-ABN. In our exper-
+iments on image classiﬁcation, we demonstrate on-par re-
+sults on ImageNet-1k with state-of-the-art approaches. On
+the memory-demanding task of semantic segmentation, we
+report results for COCO-Stuff, Cityscapes and Mapillary
+Vistas, obtaining new state-of-the-art results on the lat-
+ter without additional training data but in a single-scale
+and -model scenario. Code can be found at https://
+github.com/mapillary/inplace_abn .
+
+1. Introduction
+
+High-performance computer vision recognition models
+typically take advantage of deep network backbones, gen-
+erating rich feature representations for target applications to
+operate on. For example, top-ranked architectures used in
+the 2017 LSUN or MS COCO segmentation/detection chal-
+lenges are predominantly based on ResNet/ResNeXt [11,
+32] models comprising >100 layers.
+
+Obviously, depth/width of networks strongly correlate
+with GPU memory requirements and at given hardware
+memory limitations, trade-offs have to be made to balance
+feature extractor performance vs. application-speciﬁc pa-
+rameters like network output resolution or training data size.
+A particularly memory-demanding task is semantic seg-
+
+Figure 1. Example of residual block with identity mapping [12].
+Left: Implementation with standard BN and in-place activation
+layers, which requires storing 6 buffers for the backward pass.
+Right: Implementation with our proposed INPLACE-ABN layer,
+which requires storing only 3 buffers. Our solution avoids storing
+the buffers that are typically kept for the backward pass through
+BN and exhibits a lower computational overhead compared to
+state-of-the-art memory-reduction methods.
+
+mentation, where one has to compromise signiﬁcantly on
+the number of training crops per minibatch and their spa-
+tial resolution. In fact, many recent works based on mod-
+ern backbone networks have to set the training batch size to
+no more than a single crop per GPU [2, 30], which is par-
+tially also due to suboptimal memory management in some
+deep learning frameworks. In this work, we focus on in-
+creasing the memory efﬁciency of the training process of
+modern network architectures in order to further leverage
+performance of deep neural networks in tasks like image
+classiﬁcation and semantic segmentation.
+
+We introduce a novel and uniﬁed layer that replaces the
+commonly used succession of batch normalization (BN)
+and nonlinear activation layers (ACT), which are integral
+
+1
+
+with modern deep learning architectures like ResNet [11],
+ResNeXt [32], Inception-ResNet [28], WideResNet [34],
+Squeeze-and-Excitation Networks [13], DenseNet [14], etc.
+Our solution is coined INPLACE-ABN and proposes to
+merge batch normalization and activation layers in order to
+enable in-place computation, using only a single memory
+buffer for storing the results (see illustration in Figure 1).
+During the backward pass, we can efﬁciently recover all
+required quantities from this buffer by inverting the for-
+ward pass computations. Our approach yields a theoreti-
+cal memory reduction of up to 50%, and our experiments
+on semantic segmentation show additional data throughput
+of up to +75% during training, when compared to prevail-
+ing sequential execution of BN+ACT. Our memory gains
+are obtained without introducing noticeable computational
+overhead, i.e. side-by-side runtime comparisons show only
+between +0.8-2% increase in computation time.
+
+As additional contribution, we review the checkpoint-
+ing memory management strategy [4] and propose a com-
+putationally optimized application of this idea in the con-
+text of BN layers. This optimization allows us to drop re-
+computation of certain quantities needed during the back-
+ward pass, eventually leading to reduced computation times
+as per our INPLACE-ABN. However, independent of the
+proposed optimized application of [4], conventional check-
+pointing in general suffers from higher implementation
+complexity (with the necessity to invasively manipulate the
+computation graph), while our main INPLACE-ABN con-
+tribution can be easily implemented as self-contained, stan-
+dard plug-in layer and therefore simply integrated in any
+modern deep learning framework.
+
+Our experimental evaluations demonstrate on-par perfor-
+mance with state-of-the-art models trained for image clas-
+siﬁcation on ImageNet [26] (in directly comparable mem-
+ory settings), and signiﬁcantly improved results for the
+memory-critical application of semantic segmentation.
+
+To summarize, we provide the following contributions:
+
+• Introduction of a novel,
+
+self-contained INPLACE-
+ABN layer that enables joint, in-place computation of
+BN+ACT, approximately halvening the memory require-
+ments during training of modern deep learning models.
+
+• A computationally more efﬁcient application of the
+checkpointing memory management strategy in the con-
+text of BN layers, inspired by optimizations used for
+INPLACE-ABN.
+
+i)
+
+• Experimental evaluations for
+
+image classiﬁcation
+on ImageNet-1k showing approximately on-par perfor-
+mance with state-of-the-art models and ii) semantic seg-
+mentation on COCO-Stuff, Cityscapes and Mapillary
+Vistas, considerably beneﬁting from the additional avail-
+able memory and generating new high-scores on the chal-
+lenging Vistas dataset.
+
+2. Related Work
+
+The topic of optimizing memory management in deep
+learning frameworks is typically addressed at different lev-
+els. Efﬁcient deep learning frameworks like TensorFlow,
+MxNet or PyTorch follow distinct memory allocation strate-
+gies. Among them is checkpointing [4, 21], which provides
+additional memory at the cost of runtime via storing activa-
+tion buffers as so-called checkpoints, from where required
+quantities can be re-computed during the backward pass.
+The paper in [4] describes how to recursively apply such a
+variant on sub-graphs between checkpoints. In [10] this is
+further optimized with dynamic programming, where a stor-
+age policy is determined that minimizes the computational
+costs for re-computation at a ﬁxed memory budget.
+
+Virtually all deep learning frameworks based on
+NVIDIA hardware exploit low-level functionality libraries
+CUDA and cuDNN1, providing GPU-accelerated and
+performance-optimized primitives and basic functionalities.
+Another line of research has focused on training CNNs
+with reduced precision and therefore smaller memory-
+footprint datatypes. Such works include (partially) bina-
+rized weights/activations/gradients [6, 15, 16], which how-
+ever typically lead to degraded overall performance. With
+mixed precision training [22], this issue seems to be over-
+come and we plan to exploit this as complementary tech-
+nique in future work, freeing up even more memory for
+training deep networks without sacriﬁcing runtime.
+
+In [9] the authors modify ResNet in a way to contain
+reversible residual blocks, i.e. residual blocks whose acti-
+vations can be reconstructed backwards. Backpropagation
+through reversible blocks can be performed without hav-
+ing stored intermediate activations during the forward pass,
+which allows to save memory. However, the cost to pay is
+twofold. First, one has to recompute each residual function
+during the backward pass, thus having the same overhead
+as checkpointing [21]. Second, the network design is lim-
+ited to using blocks with certain restrictions, i.e. reversible
+blocks cannot be generated for bottlenecks where informa-
+tion is supposed to be discarded.
+
+Finally, we stress that only training time memory-
+efﬁciency is targeted here while test-time optimization as
+done e.g. in NVIDIAs TensorRT 2 is beyond our scope.
+
+3. In-Place Activated Batch Normalization
+
+Here, we describe our contribution to avoid the storage
+of a buffer that is typically needed for the gradient computa-
+tion during the backward pass through the batch normaliza-
+tion layer. As opposed to existing approaches we also show
+that our solution minimizes the computational overhead we
+have to trade for saving additional memory.
+
+1https://developer.nvidia.com
+2https://developer.nvidia.com/tensorrt
+
+3.1. Batch Normalization Review
+
+Batch Normalization has been introduced in [17] as an
+effective tool to reduce internal covariate shift in deep net-
+works and accelerate the training process. Ever since, BN
+plays a key role in most modern deep learning architectures.
+The key idea consists in having a normalization layer that
+applies an axis-aligned whitening of the input distribution,
+followed by a scale-and-shift operation aiming at preserv-
+ing the network’s representation capacity. The whitening
+operation exploits statistics computed on a minibatch level
+only. The by-product of this approximation is an additional
+regularizing effect for the training process.
+
+In details, we can ﬁx a particular unit x in the network
+and let xB = {x1, . . . , xm} be the set of values x takes from
+a minibatch B of m training examples. The batch normal-
+ization operation applied to xi ﬁrst performs a whitening of
+the activation using statistics computed from the minibatch:
+
+ˆxi = BN(xi) =
+
+(1)
+
+xi − µB
+(cid:112)
+σ2
+B + (cid:15)
+
+.
+
+Here (cid:15) > 0 is a small constant that is introduced to prevent
+numerical issues, and µB and σ2
+B are the empirical mean
+and variance of the activation unit x, respectively, computed
+with respect to the minibatch B, i.e.
+
+µB =
+
+xj ,
+
+σ2
+B =
+
+(xj − µB)2 .
+
+1
+m
+
+m
+(cid:88)
+
+j=1
+
+1
+m
+
+m
+(cid:88)
+
+j=1
+
+The whitened activations ˆxi are then scaled and shifted by
+learnable parameters γ and β, obtaining
+
+yi = BNγ,β(xi) = γ ˆxi + β .
+
+The BN transformation described above can in principle
+be applied to any activation in the network and is typi-
+cally adopted with channel-speciﬁc (γ, β)-parameters. Us-
+ing BN renders training resilient to the scale of parameters,
+thus enabling the use of higher learning rates.
+
+At test time, the BN statistics are ﬁxed to µT and σT ,
+estimated from the entire training set T . These statistics
+are typically updated at training time with a running mean
+over the respective minibatch statistics, but could also be re-
+computed before starting the testing phase. Also, the com-
+putation of networks trained with batch normalization can
+be sped up by absorbing BN parameters into the preceding
+CONV layer, by performing a simple update of the convo-
+lution weights and biases. This is possible because at test-
+time BN becomes a linear operation.
+
+3.2. Memory Optimization Strategies
+
+(a) Standard building block (memory-inefﬁcient)
+
+(b) Checkpointing [4, 21]
+
+(c) Checkpointing (proposed version)
+
+(d) In-Place Activated Batch Normalization I (proposed method)
+
+Here we sketch our proposed memory optimization
+strategies after introducing both, the standard (memory-
+inefﬁcient) use of batch normalization and the state-of-the-
+art coined checkpointing [4, 21].
+
+(e) In-Place Activated Batch Normalization II (proposed method)
+
+Figure 2. Comparison of standard BN, state-of-the-art checkpoint-
+ing from [4, 21] and our proposed methods. See § 3.2 for a detailed
+description.
+
+In Figure 2, we provide diagrams showing the for-
+ward and backward passes of a typical building block
+BN+ACT+CONV3 that we ﬁnd in modern deep architec-
+tures. The activation function (e.g. RELU) is denoted by φ.
+Computations occurring during the forward pass are shown
+in green and involve the entire minibatch B (we omit the
+subscript B). Computations happening during the backward
+pass are shown in cyan and gray. The gray part aims at
+better highlighting the additional computation that has been
+introduced to compensate for the memory savings. Rectan-
+gles are in general volatile buffers holding intermediate re-
+sults, except for rectangles surrounded by a dashed frame,
+which represent buffers that need to be stored for the back-
+ward pass and thus signiﬁcantly impact the training mem-
+ory footprint. E.g., in Figure 2(a) only x and z will be stored
+for the backward pass, while in Figure 2(b) only x is stored.
+For the sake of presentation clarity, we have omitted two
+additional buffers holding µB and σB for the BN backward
+phase. Nevertheless, these buffers represent in general a
+small fraction of the total allocated memory. Moreover, we
+have also omitted the gradients with respect to the model
+parameters (i.e. γ, β and CONV weights).
+
+Standard. In Figure 2(a) we present the standard imple-
+mentation of the reference building block, as used in all
+deep learning frameworks. During the forward pass both,
+the input x to BN and the output of the activation function
+φ need to be stored for the backward pass. Variable x is
+used during the backward pass through BNγ,β to compute
+both the gradient w.r.t. its input and γ, i.e. ∂L
+∂γ where
+L denotes the loss, while z is required for the backward pass
+through the activation φ as well as potential subsequent op-
+erations like e.g. the convolution shown in the ﬁgure.
+
+∂x and ∂L
+
+Checkpointing [4, 21]. This technique allows to trade com-
+putation for memory when training neural networks, appli-
+cable in a very broad setting. In Figure 2(b), we limit its
+application to the building block under consideration like
+in [24]. In contrast to the standard implementation, which
+occupies two buffers for the backward pass of the shown
+building block, checkpointing requires only a single buffer.
+The trick consists in storing only x and recomputing z dur-
+ing the backward pass by reiterating the forward operations
+starting from x (see gray-colored operations). Clearly, the
+computational overhead to be paid comprises both, recom-
+putation of the BN and activation layers. It is worth ob-
+serving that recomputing BNγ,β (gray) during the backward
+phase can reuse values for µB and σB available from the
+forward pass and fuse together the normalization and sub-
+sequent afﬁne transformation into a single scale-and-shift
+operation. Accordingly, the cost of the second forward pass
+over BNγ,β becomes less expensive (see also [24]).
+
+3Having the convolution at the end of the block is not strictly necessary,
+
+but supports comprehension.
+
+The three approaches that follow are all contributions of
+this work. The ﬁrst represents a variation of checkpoint-
+ing, which allows us to save additional computations in the
+context of BN. The second and third are our main contri-
+butions, providing strategies that yield the same memory
+savings and even lower computational costs compared to
+the proposed, optimized checkpointing, but are both self-
+contained and thus much easier to integrate in existing deep
+learning frameworks.
+
+Checkpointing (proposed version). Direct application of
+the checkpointing technique in the sketched building block,
+which is adopted also in [24], is not computationally opti-
+mal since additional operations could be saved by storing
+ˆx, i.e. the normalized value of x as per Eq. (1), instead of
+x. Indeed, as we will see in the next subsection, the back-
+ward pass through BN requires recomputing ˆx if not already
+stored. For this reason, we propose in Figure 2(c) an alter-
+native implementation that is computationally more efﬁcient
+by retaining ˆx from the forward pass through the BN layer.
+From ˆx we can recover z during the backward pass by ap-
+plying the scale-and-shift operation πγ,β(ˆx) = γ ˆx + β, fol-
+lowed by the activation function φ (see gray-colored oper-
+ations). In this way, the computation of z becomes slightly
+more efﬁcient than the one shown in Figure 2(b), for we
+save the fusion operation. Finally, an additional saving of
+the normalization step derives from using the stored ˆx in the
+backward implementation of BN rather than recomputing it
+from x. To distinguish the efﬁcient backward implementa-
+tion of BN from the standard one we write BN∗
+γ,β in place
+of BNγ,β (cyan-colored, see additionally § 3.3).
+
+In-Place Activated Batch Normalization I. A limitation
+of the memory-reduction strategy described above is that
+the last layer, namely CONV in the example, depends on
+non-local quantities like x (or ˆx) for the computation of the
+gradient. This makes the implementation of the approach
+within standard frameworks somewhat cumbersome, be-
+cause the backward pass of any layer that follows φ, which
+relies on the existence of z, has to somehow trigger its
+recomputation. To render the implementation of the pro-
+posed memory savings easier and self-contained, we sug-
+gest an alternative strategy shown in Figure 2(d), which re-
+lies on having only z as the saved buffer during the forward
+pass, thus operating an in-place computation through the
+BN layer (therefrom the paper’s title). By doing so, any
+layer that follows the activation φ would have the informa-
+tion for the gradient computation locally available. Having
+stored z, we need to recompute ˆx backwards, for it will be
+needed in the backward pass through the BN layer.4 How-
+ever, this operation is only possible if the activation func-
+
+4This solution can technically still be considered as a form of check-
+pointing, but instead of recovering information forwards as in [4, 21], we
+recover it backwards, thus bearing a similarity to reversible nets [9].
+
+tion is invertible. Even though this requirement does not
+hold for RELU, i.e. one of the most dominantly used activa-
+tion functions, we show in § 4.1 that an invertible function
+like LEAKY RELU [20] with a small slope works well as
+a surrogate of RELU without compromising on the model
+quality. We also need to invert the scale-and-shift operation
+πγ,β, which is in general possible if γ (cid:54)= 0.
+
+γ
+
+∂γ and ∂L
+
+γ,β(y) = y−β
+
+In-Place Activated Batch Normalization II. The com-
+plexity of the computation of ˆx = π−1
+used
+in the backward pass of INPLACE-ABN I can be further
+reduced by rewriting the gradients ∂L
+∂x directly as
+functions of y instead of ˆx. The explicit inversion of πγ,β
+to recover ˆx applies m scale-and-shift operations (per fea-
+ture channel). If the partial derivatives are however based
+on y directly, the resulting modiﬁed gradients (derivations
+given in the Appendix) show that the same computation can
+be absorbed into the gradient ∂L
+at O(1) cost (per feature
+∂xi
+channel). In Figure 2(e) we show the diagram of this opti-
+mization, where we denote as BN†
+γ,β the implementation of
+the backward pass as a function of y.
+
+3.3. Technical Details
+
+The key components of our method are the computation
+of the inverse of both the activation function (INPLACE-
+ABN I & II) and πγ,β (INPLACE-ABN I), and the imple-
+mentation of a backward pass through the batch normaliza-
+tion layer that depends on y, i.e. the output of the forward
+pass through the same layer.
+
+Invertible activation function. Many activation functions
+are actually invertible and can be computed in-place (e.g.
+sigmoid, hyperbolic tangent, LEAKY RELU, and others),
+but the probably most commonly used one, namely RELU,
+is not invertible. However, we can replace it with LEAKY
+RELU (see, Figure 3) with slope 0.01 without impacting
+the quality of the trained models [33]. This will be the ac-
+tivation function that we use in our experimental evaluation
+due to its afﬁnity to standard RELU, even though other acti-
+vation functions could be used. The corresponding forward
+
+given as follows:
+
+f (y) =
+
+(cid:40)
+y
+ay
+
+if y ≥ 0
+if y < 0
+
+,
+
+f −1(z) =
+
+(cid:40)
+
+z
+z
+a
+
+if z ≥ 0
+if z < 0
+
+.
+
+LEAKY RELU and its inverse share the same computa-
+tional cost, i.e. an elementwise sign check and scaling op-
+eration. Hence, the overhead deriving from the recompu-
+tation of φ in the backward pass of the previously shown,
+checkpointing-based approaches and its inverse φ−1 em-
+ployed in the backward pass of our method are equivalent.
+To give further evidence of the interchangeability of RELU
+and LEAKY RELU with slope a = 0.01, we have suc-
+cessfully retrained well-known models like ResNeXt and
+WideResNet on ImageNet using LEAKY RELU (see § 4.1).
+
+∂x = { ∂L
+∂x1
+
+INPLACE-ABN I: Backward pass through BN. The gra-
+dient ∂L
+}, which is obtained from the
+backward pass through the BN layer, can be written as a
+function of ˆx = {ˆx1, . . . , ˆxm} and ∂L
+}
+as
+
+∂y = { ∂L
+∂y1
+
+, . . . , ∂L
+∂xm
+
+, . . . , ∂L
+∂ym
+
+∂L
+∂xi
+
+=
+
+(cid:26) ∂L
+∂yi
+
+−
+
+1
+m
+
+∂L
+∂γ
+
+ˆxi −
+
+(cid:27)
+
+1
+m
+
+∂L
+∂β
+
+(cid:112)
+
+γ
+σ2
+B + (cid:15)
+
+,
+
+where the gradients of the BN parameters are given by
+
+∂L
+∂γ
+
+=
+
+m
+(cid:88)
+
+i=1
+
+∂L
+∂yi
+
+ˆxi ,
+
+∂L
+∂β
+
+=
+
+m
+(cid:88)
+
+i=1
+
+∂L
+∂yi
+
+.
+
+The expression above differs from what is found in the orig-
+inal BN paper [17], but the refactoring was already used in
+the Caffe [18] framework. It is implemented by BN∗
+γ,β in
+the proposed solutions in Figures 2(c) and 2(d) and does
+not depend on µB. Hence, we store during the forward pass
+only σB (this dependency was omitted from the diagrams).
+Instead, BNγ,β in Figures 2(a) and 2(b), which depends on
+x, requires the additional recomputation of ˆx from x via
+Eq. (1). Hence, it also requires storing µB. Our solution is
+hence memory-wise more efﬁcient than the state-of-the-art
+from Figure 2(b).
+
+Inversion of πγ,β. In the conﬁguration of INPLACE-ABN
+I, the inversion of πγ,β becomes critical if γ = 0 since
+γ,β(y) = y−β
+π−1
+γ . While we never encountered such a case
+in practice, one can protect against it by preventing γ from
+getting less than a given tolerance. We can even avoid this
+problem by simply not considering γ a learnable parame-
+ter and by ﬁxing it to 1, in case the activation function is
+scale covariant (e.g. all RELU-like activations) and when a
+CONV layer follows. Indeed, it is easy to show that the net-
+work retains the exact same capacity in that case, for γ can
+be absorbed into the subsequent CONV layer.
+
+Figure 3. LEAKY RELU with slope a (left) and its inverse (right).
+
+pass through the activation function with slope a for neg-
+ative inputs and its inverse used in our backward pass are
+
+INPLACE-ABN II: Backward pass through BN. We ob-
+tain additional memory savings for our solution illustrated
+
+Algorithm 1 INPLACE-ABN Forward
+Require: x, γ, β
+
+1: y, σB ← BNγ,β(x)
+2: z ← φ(y)
+3: save for backward z, σB
+4: return z
+
+Algorithm 2 INPLACE-ABN Backward
+Require: ∂L
+
+∂z , γ, β
+
+∂y ← φbackward(z, ∂L
+∂z )
+
+1: z, σB ← saved tensors during forward
+2: ∂L
+3: y ← φ−1(z)
+4: if INPLACE-ABN I (see Fig. 2(d)) then
+5:
+
+ˆx ← π−1
+∂x , ∂L
+∂L
+
+γ,β(y)
+∂γ , ∂L
+
+∂β ← BN∗
+
+6:
+7: else if INPLACE-ABN II (see Fig. 2(e)) then
+8:
+
+∂y , σB)
+
+γ,β(ˆx, ∂L
+
+∂L
+
+γ,β(y, ∂L
+
+∂y , σB)
+
+∂x , ∂L
+9: return ∂L
+
+∂γ , ∂L
+∂x , ∂L
+
+∂β ← BN†
+∂γ , ∂L
+
+∂β
+
+in Figure 2(e) and as outlined in § 3.2. The gradient ∂L
+∂x
+when written as a function of y instead of ˆx becomes
+
+∂L
+∂xi
+
+=
+
+(cid:20) ∂L
+∂yi
+
+−
+
+1
+γm
+
+∂L
+∂γ
+
+yi −
+
+1
+m
+
+(cid:18) ∂L
+∂β
+
+−
+
+β
+γ
+
+∂L
+∂γ
+
+(cid:19)(cid:21)
+
+(cid:112)
+
+γ
+σ2
+B + (cid:15)
+
+.
+
+For the gradients of the BN parameters, ∂L
+
+∂β remains as
+
+4. Experiments
+
+above but we get
+
+∂L
+∂γ
+
+=
+
+
+
+
+
+m
+(cid:88)
+
+j=1
+
+1
+γ
+
+∂L
+∂yj
+
+
+
+
+
+∂L
+∂β
+
+yj − β
+
+and we write BN†
+γ,β for the actual backward implementa-
+tion in Figure 2(e). Detailed derivations are provided in the
+Appendix of this paper.
+
+In summary, both of our optimized main contributions
+are memory-wise more efﬁcient than the state-of-the-art so-
+lution in Figure 2(b) and INPLACE-ABN II is computa-
+tionally even more efﬁcient than the proposed, optimized
+checkpointing from Figure 2(c).
+
+3.4. Implementation Details
+
+We have implemented the proposed INPLACE-ABN I
+layer in PyTorch, by simply creating a new layer that fuses
+batch normalization with an (invertible) activation function.
+In this way we can deal with the computation of ˆx from z
+internally in the layer, thus keeping the implementation self-
+contained. We have released code at https://github.
+com/mapillary/inplace_abn for easy plug-in re-
+placement of the block BN+ACT in modern architectures.
+The forward and backward implementations are also given
+as pseudocode in Algorithm 1 and 2. In the forward pass, in
+line 3, we explicitly indicate the buffers that are stored and
+needed for the backward pass. Any other buffer can be over-
+written with in-place computations, e.g. x, y and z can point
+to the same memory location. In the backward pass, we re-
+cover the stored buffers in line 1 and, again, every computa-
+tion can be done in-place if the buffer is not needed anymore
+(e.g. ∂L
+∂z can share the same memory location as
+well as ˆx, y and z). As opposed to Figure 2, the pseudocode
+shows also the dependencies on additional, small, buffers
+like σB and reports the gradients with respect to the BN
+layer parameters γ and β. Please note the difference during
+backward computation when applying INPLACE-ABN I or
+INPLACE-ABN II, respectively.
+
+∂x , ∂L
+
+∂y , ∂L
+
+We assess the effectiveness of our proposed, memory ef-
+ﬁcient INPLACE-ABN layer for the tasks of image classiﬁ-
+cation and semantic segmentation in § 4.1 and 4.2, respec-
+tively. Additionally, we provide timing analyses in § 4.3.
+Experiments were run and timed on machines comprising
+four NVIDIA Titan Xp cards (with 12GB of RAM each).
+Where not otherwise noted, the activation function used in
+all experiments is LEAKY RELU with slope a = 0.01.
+
+4.1. Image Classiﬁcation
+
+We have trained several residual-unit-based models
+on ImageNet-1k [26] to demonstrate the effectiveness of
+INPLACE-ABN for the task of image classiﬁcation. In par-
+ticular, we focus our attention on two main questions:
+i)
+whether using an invertible activation function (i.e. LEAKY
+RELU in our experiments) impacts on the performance of
+the models, and ii) how the memory savings obtained with
+our method can be exploited to improve classiﬁcation accu-
+racy. Our results are summarized in Table 2 and described
+in this subsection.
+
+ResNeXt-101/ResNeXt-152. This is a variant of the
+original ResNet [11] architecture in which the bottleneck
+residual units are replaced with a multi-branch version. In
+practice, this equates to “grouping” the 3 × 3 convolutions
+of each residual unit. The number of groups, i.e. paral-
+lel branches, is known as cardinality and is an additional
+hyperparameter to be set. We follow the best performing
+design guidelines described in [32] and train models with
+cardinality 64, while considering the 101- and 152-layers
+conﬁgurations. During training, we proportionally scale in-
+put images so that their smallest side equals 256 pixels, be-
+fore randomly taking 224 × 224 crops. Additionally, we
+perform per-channel mean and variance normalization and
+color augmentation as described in [32]. We train using
+stochastic gradient descent (SGD) with Nesterov updates,
+initial learning rate 0.1, weight decay 10−4 and momentum
+0.9. The training is run for a total of 90 epochs, reducing
+the learning rate every 30 epochs by a factor 10.
+
+WideResNet-38. This is another modern architecture
+built by stacking residual units. Compared to the original
+ResNet, WideResNet trades depth for width, i.e. it uses units
+with an increased number of feature channels while reduc-
+ing the total number of stacked units. For training, we use
+the same setup and hyperparameters as for ResNeXt, with
+one exception: following [31] we train for 90 epochs, lin-
+early decreasing the learning rate from 0.1 to 10−6.
+
+Discussion of results.
+In our experiments we also com-
+pared the validation accuracy obtained when replacing
+RELU with LEAKY RELU in a ResNeXt-101 trained
+with RELU. We also considered the opposite case, replac-
+ing LEAKY RELU with RELU in a LEAKY RELU-trained
+network (see Table 1). Our results are in line with [33], and
+never differ by more than a single point per training except
+for the 3202 center crop evaluation top-1 results, probably
+also due to non-deterministic training behaviour.
+
+Our results may slightly differ from what was reported
+in the original papers, as our training protocol does not
+exactly match the one in [32] (e.g. data augmentation re-
+garding scale and aspect ratio settings, learning rate sched-
+ule, etc.) or due to changes in reference implementations.5
+Next, we focus on how to better exploit the memory savings
+due to our proposed INPLACE-ABN for improving classi-
+ﬁcation accuracy. As a baseline, we train ResNeXt-101
+with standard Batch Normalization and the maximum batch
+size that ﬁts in GPU memory, i.e. 256 images per batch.
+Then, we consider two different options: i) using the ex-
+tra memory to ﬁt more images per training batch while
+ﬁxing the network architecture, or ii) ﬁxing the batch size
+while training a larger network. For option i) we double the
+batch size to 512 (ResNeXt-101, INPLACE-ABN, 512
+in Table 2), while for option ii) we train ResNeXt-152
+and WideResNet-38. Note that neither ResNeXt-152
+nor WideResNet-38 would ﬁt in memory when using
+256 images per training batch and when using standard
+BN. As it is clear from the table, both i) and ii) result
+in a noticeable performance increase. Interestingly, train-
+ing ResNeXt-101 with an increased batch size results in
+similar accuracy to the deeper (and computationally more
+expensive) ResNeXt-152 model. As an additional ref-
+erence, we train ResNeXt-101 with synchronized Batch
+Normalization (INPLACE-ABNsync), which can be seen as
+a “virtual” increase of batch size applied to the computation
+of BN statistics. In this case we only observe small accu-
+racy improvements when compared to the baseline model.
+For the future, we plan to conduct further experiments with
+deeper variants of DenseNet [14], and investigate effects of
+INPLACE-ABN on Squeeze & Excitation networks [13] or
+deformable convolutional networks [7].
+
+5See note in https://github.com/itijyou/ademxapp men-
+tioning subtle differences in implementation, e.g., different cropping strate-
+gies, interpolation methods, and padding strategies.
+
+4.2. Semantic Segmentation
+
+The goal of semantic segmentation is to assign cate-
+gorical labels to each pixel in an image. State-of-the-art
+segmentations are typically obtained by combining classi-
+ﬁcation models pretrained on ImageNet (typically referred
+to as body) with segmentation-speciﬁc head architectures
+and jointly ﬁne-tuning them on suitable, (densely) anno-
+tated training data like Cityscapes [5], COCO-Stuff [1],
+ADE20K [37] or Mapillary Vistas [23].
+
+Datasets used for Evaluation. We report results on
+Cityscapes [5], COCO-Stuff [1] and Mapillary Vistas [23],
+since these datasets have complementary properties in terms
+of image content, size, number of class labels and annota-
+tion quality. Cityscapes shows street-level images captured
+in central Europe and comprises a total of 5k densely an-
+notated images (19 object categories + 1 void class, all im-
+ages sized 2048×1024), split into 2975/500/1525 images
+for training, validation and test, respectively. While there
+exist additional 20k images with so-called coarse annota-
+tions, we learn only from the high-quality (ﬁne) annotations
+in the training set and test on the corresponding validation
+set (for which ground truth is publicly available). We also
+show results on COCO-Stuff, which provides stuff -class an-
+notations for the well-known MS COCO dataset [19]. This
+dataset comprises 65k COCO images (with 40k for train-
+ing, 5k for validation, 5k for test-dev and 15k as challenge
+test set) with annotations for 91 stuff classes and 1 void
+class. Images are smaller than in Cityscapes and with vary-
+ing sizes, and the provided semantic annotations are based
+on superpixel segmentations, consequently suffering from
+considerable mislabelings. Finally, we also report results on
+Mapillary Vistas (research edition), a novel and large-scale
+street-level image dataset comprising 25k densely annota-
+tion images (65 object categories + 1 void class, images
+have varying aspect ratios and sizes up to 22 Megapixel),
+split into 18k/2k/5k images for training, validation and test,
+respectively. Similar to the aforementioned datasets, we
+train on training data and test on validation data.
+
+Segmentation approach. We chose to adopt the recently
+introduced DeepLabV3 [3] segmentation approach as head,
+and evaluate its performance with body networks from
+§ 4.1. DeepLabV3 is exploiting atrous (dilated) convo-
+lutions in a cascaded way for capturing contextual infor-
+mation, together with crop-level features encoding global
+context (close in spirit to PSPNet’s [36] global feature).
+We follow the parameter choices suggested in [3], assem-
+bling the head as 4 parallel CONV blocks with 256 out-
+put channels each and dilation rates (1, 12, 24, 36) (with x8
+downsampled crop sizes from the body) and kernel sizes
+(12, 32, 32, 32), respectively. The global 1 × 1 features
+are computed in a channel-speciﬁc way and CONVed into
+256 additional channels. Each output block is followed
+
+activation
+
+2242 center
+
+2242 10-crops
+
+3202 center
+
+validation
+
+top-1
+
+top-5
+
+top-1
+
+top-5
+
+top-1
+
+top-5
+
+Network
+
+ResNeXt-101
+ResNeXt-101
+
+training
+
+RELU
+RELU
+
+ResNeXt-101
+ResNeXt-101
+
+LEAKY RELU LEAKY RELU 77.04
+76.81
+LEAKY RELU
+
+RELU
+
+RELU
+
+77.74
+LEAKY RELU 76.88
+
+93.86
+93.42
+
+93.50
+93.53
+
+79.21
+78.74
+
+78.72
+78.46
+
+94.67
+94.46
+
+94.47
+94.38
+
+79.17
+78.37
+
+77.92
+77.84
+
+94.67
+94.25
+
+94.28
+94.20
+
+Table 1. Imagenet validation set results using ResNeXt-101 and RELU/LEAKY RELU exchanged activation functions during training
+and validation.
+
+Network
+
+2242 center
+
+2242 10-crops
+
+3202 center
+
+batch size
+
+top-1
+
+top-5
+
+top-1
+
+top-5
+
+top-1
+
+top-5
+
+ResNeXt-101, STD-BN
+
+77.04
+
+93.50
+
+78.72
+
+94.47
+
+77.92
+
+94.28
+
+ResNeXt-101, INPLACE-ABN
+ResNeXt-152, INPLACE-ABN
+WideResNet-38, INPLACE-ABN
+
+ResNeXt-101, INPLACE-ABNsync
+
+78.08
+78.28
+79.72
+
+93.79
+94.04
+94.78
+
+79.52
+79.73
+81.03
+
+94.66
+94.82
+95.43
+
+79.38
+79.56
+80.69
+
+94.67
+94.67
+95.27
+
+77.70
+
+93.78
+
+79.18
+
+94.60
+
+78.98
+
+94.56
+
+256
+
+512
+256
+256
+
+256
+
+Table 2. Imagenet validation set results using different architectures and training batch sizes.
+
+by BatchNorm before all 1280 features are stacked and re-
+duced by another CONV+BN+ACT block (into 256 fea-
+tures) and ﬁnally CONVed to the number of target classes.
+We exploit our proposed INPLACE-ABN strategy also in
+the head architecture. Finally, we apply bilinear upsampling
+to the logits to obtain the original input crop resolution be-
+fore computing the loss using an online bootstrapping strat-
+egy as described in [25, 30] (setting p = 1.0 and m = 25%).
+We did not apply hybrid dilated convolutions [29] nor added
+an auxiliary loss as proposed in [36]. Training data is
+sampled in a uniform way (by shufﬂing the database in
+each epoch) and all Cityscapes experiments are run for 360
+epochs using an initial learning rate of 2.5 × 10−3 and poly-
+nomial learning rate decay (1 − iter
+max_iter )0.9, following [3].
+COCO-Stuff experiments were trained only for 30 epochs,
+which however approximately matches the number of iter-
+ations on Cityscapes due to the considerably larger dataset
+size. For optimization, we use stochastic gradient descent
+with momentum 0.9 and weight decay 10−4. For train-
+ing data augmentation, we apply random horizontal ﬂipping
+(with prob. 0.5) and random scaling selected from 0.7 - 2.0
+before cropping the actual patches.
+
+Discussion of Results.
+In Table 3, we provide re-
+sults on validation data for Cityscapes and COCO-Stuff
+under different BN layer conﬁgurations. We distin-
+guish between standard BN layers [17] (coined STD-BN)
+and our proposed variants using in-place, activated BN
+(INPLACE-ABN) as well as its gradient-synchronized ver-
+sion INPLACE-ABNsync. All experiments are based on
+LEAKY RELU activations. Trainings were conducted in a
+
+way to maximize GPU memory utilization by i) ﬁxing the
+training crop size and therefore pushing the amount of crops
+per minibatch to the limit (denoted as FIXED CROP) or ii)
+ﬁxing the number of crops per minibatch and maximizing
+the training crop resolutions (FIXED BATCH). Experiments
+are conducted for ResNeXt-101 and WideResNet-38
+network bodies, where the latter seems preferable for seg-
+mentation tasks. Both body networks were solely trained
+on ImageNet-1k. All results derive from single-scale test-
+ing without horizontal image ﬂipping, deliberately avoiding
+dilution of results by well-known bells and whistles. Ta-
+ble 3 shows the positive effects of applying more training
+data (in terms of both, #training crops per minibatch and
+input crop resolutions) on the validation results. The in-
+crease of data (w.r.t. pixels/minibatch) we can put in GPU
+memory, relative to the baseline (top row) is reported in
+square brackets. We observe that higher input resolution
+is in general even more beneﬁcial than adding more crops
+to the batch. For the sake of direct comparability we
+left the learning rates unchanged, but there might be bet-
+ter hyper-parameters for our variants of INPLACE-ABN
+and INPLACE-ABNsync.
+In essence, our results closely
+approach reported numbers for Cityscapes in e.g. [8, 36],
+which however include more training data in the body
+model training or are based on already trained models like
+DeepLabV2 [2]. For COCO-Stuff, results are not directly
+comparable to the original publication [1] since they used
+a lower-performing VGG-16 [27] network for the body.
+However, all experiments show signiﬁcant improvements
+w.r.t. the baseline method in the ﬁrst line of Table 3.
+
+BATCHNORM
+
+ResNeXt-101
+
+WideResNet-38
+
+STD-BN + LEAKY RELU
+
+INPLACE-ABN, FIXED CROP
+INPLACE-ABN, FIXED BATCH
+INPLACE-ABNsync, FIXED BATCH
+
+Cityscapes
+
+16 × 5122
+28 × 5122 [+75%]
+16 × 6722 [+72%]
+16 × 6722 [+72%]
+
+74.42
+
+75.80
+77.04
+77.58
+
+COCO-Stuff
+
+16 × 4802
+24 × 4802 [+50%]
+16 × 6002 [+56%]
+16 × 6002 [+56%]
+
+20.30
+
+22.63
+23.35
+24.91
+
+Cityscapes
+
+20 × 5122
+28 × 5122 [+40%]
+20 × 6402 [+56%]
+20 × 6402 [+56%]
+
+COCO-Stuff
+
+75.82
+
+77.75
+78.31
+78.06
+
+20 × 4962
+28 × 4962 [+40%]
+20 × 5762 [+35%]
+20 × 5762 [+35%]
+
+22.44
+
+22.96
+24.10
+25.11
+
+Table 3. Validation data results (single scale test) for semantic segmentation experiments on Cityscapes and COCO-Stuff, using
+ResNeXt-101 and WideResNet-38 network bodies and different batch normalization settings (see text). All result numbers in [%].
+
+Optimizing Settings for Cityscapes and Vistas Datasets.
+Here we show further experiments when tuning settings
+like #training crops and crop sizes in favor of our method
+(as opposed to maintaining comparability with baselines
+above). First, we report Cityscapes results in Table 4 when
+ﬁne-tuning our INPLACE-ABN ResNeXt-152 ImageNet
+model from § 4.1, using 12 crops of size 680×680 per mini-
+batch (using the gradient-synchronized variant INPLACE-
+ABNsync). Going deeper with the body results in a vali-
+dation set score of 78.49%, improving over the score of
+77.58% obtained by ResNeXt-101, INPLACE-ABNsync.
+We provide additional results using WideResNet-38
+INPLACE-ABNsync-based settings, where we trained the
+model with i) 16 crops at 712 × 712 yielding 79.02% and
+ii) 12 crops at 872 × 872, resulting in 79.16%. As can
+be seen, the combination of INPLACE-ABNsync with larger
+crop sizes improves by ≈ 0.9% over the best perform-
+ing setting in Table 3 (INPLACE-ABN with 20 crops at
+640 × 640). We also list a non-gradient synchronized exper-
+iment (as this gave the highest score on Cityscapes before),
+where an increase of the crop size yields to minor improve-
+ments, climbing from 78.31% to 78.45%.
+
+Finally, we have run another experiment with 12 crops
+at 872 × 872 where we however used a different training
+data sampling strategy. Instead of just randomly perturb-
+ing the dataset and taking training crops from random po-
+sitions, we compiled the minibatches per epoch in a way
+to show all classes approximately uniformly (thus follow-
+ing an oversampling strategy for underrepresented cate-
+gories).
+In practice, we tracked object class presence for
+all images and eventually class-uniformly sampled from
+eligible image candidates, making sure to take training
+crops from areas containing the class of interest. Apply-
+ing this sampling strategy coined CLASS-UNIFORM SAM-
+PLING yields 79.40%, which matches the highest reported
+score on Cityscapes validation data reported in [8], without
+however using additional training data.
+Next, we provide results for the Mapillary Vistas dataset,
+using hyperparameter settings inspired by our highest scor-
+ing conﬁguration for Cityscapes. Vistas is considerably
+larger than Cityscapes (in terms of #classes, #images and
+image resolution), so running an exhaustive amount of ex-
+periments is prohibitive in terms of training time. Due to
+
+the increase of object classes (19 for Cityscapes and 65 for
+Vistas), we used minibatches of 12 crops at 776 × 776 (with
+INPLACE-ABNsync), increased the initial learning rate to
+3.5 × 10−3 and trained for 90 epochs. This setting leads to
+the highest reported single-scale score of 53.12% on val-
+idation data so far, signiﬁcantly outperforming the LSUN
+2017 segmentation winner’s single-scale approach [35] of
+51.59%. As also listed in Table 4, their approach addition-
+ally used hybrid dilated convolutions [29], applied an in-
+verse frequency weighting for correcting training data class
+imbalance as well as pretrained on Cityscapes.
+
+4.3. Timing analyses
+
+Besides the discussed memory improvements and their
+impact on computer vision applications, we also provide
+actual runtime comparisons and analyses for the INPLACE-
+ABN I setting shown in 2(d), as this is the implemen-
+tation we made publicly available6.
+Isolating a single
+BN+ACT+CONV block, we evaluate the computational
+times required for a forward and backward pass over it
+(Figure 4). We compare the conventional approach of
+serially executing layers and storing intermediate results
+(STANDARD), our proposed INPLACE-ABN I and the
+CHECKPOINTING approach. In order to obtain fair timing
+
+6https://github.com/mapillary/inplace_abn
+
+Figure 4. Computation time required for a forward and
+backward pass through basic BN+ACT+CONV blocks from
+ResNeXt-101, using different BN strategies.
+
+ResNeXt-152
+
+WideResNet-38
+
+Cityscapes
+INPLACE-ABNsync
+INPLACE-ABN
+INPLACE-ABNsync
+INPLACE-ABNsync
+INPLACE-ABNsync + CLASS-UNIFORM SAMPLING
+
+12 × 6802
+–
+–
+–
+–
+
+78.49
+
+–
+16 × 7122
+16 × 7122
+12 × 8722
+12 × 8722
+
+78.45
+79.02
+79.16
+79.40
+
+Mapillary Vistas
+INPLACE-ABNsync + CLASS-UNIFORM SAMPLING
+
+LSUN 2017 winner [35] (based on PSPNet)
+PSPNet + auxiliary loss
+
++ Hybrid dilated convolutions [29]
++ Inverse frequency label reweighting
++ Cityscapes pretraining
+
+–
+
+12 × 7762
+
+53.12
+
+ResNet-101
+
+16 × 7132
+16 × 7132
+16 × 7132
+16 × 7132
+
+49.76
+50.28
+51.50
+51.59
+
+Table 4. Validation data results (single scale test, no horizontal ﬂipping) for semantic segmentation experiments on Cityscapes and Vistas,
+using ResNeXt-152 and WideResNet-38 bodies with different settings for #crops per minibatch and crop sizes. All results in [%].
+
+comparisons, we re-implemented the checkpointing idea in
+PyTorch. The results are obtained by running all opera-
+tions over a batch comprising 32-images and setting the
+meta-parameters (number of feature channels, spatial di-
+mensions) to those encountered in the four modules of
+ResNeXt-101, denoted as CONV1-CONV4. The actual
+runtimes were averaged over 200 iterations.
+
+We observe consistent speed advantages in favor of our
+method when comparing against CHECKPOINTING, with
+the actual percentage difference depending on block’s meta-
+parameters. As we can see, INPLACE-ABN induces com-
+putation time increase between 0.8 − 2% over STANDARD
+while CHECKPOINTING is almost doubling our overheads.
+
+5. Conclusions
+
+In this work we have presented INPLACE-ABN, which
+fusion of batch
+is a novel, computationally efﬁcient
+normalization and activation layers,
+targeting memory-
+optimization for modern deep neural networks during train-
+ing time. We reconstruct necessary quantities for the back-
+ward pass by inverting the forward computation from the
+storage buffer, and manage to free up almost 50% of the
+
+memory needed in conventional BN+ACT implementations
+at little additional computational costs. In contrast to state-
+of-the-art checkpointing attempts, our method is recon-
+structing discarded buffers backwards during the backward
+pass, thus allowing us to encapsulate BN+ACT as self-
+contained layer, which is easy to implement and deploy in
+virtually all modern deep learning frameworks. We have
+validated our approach with experiments for image clas-
+siﬁcation on ImageNet-1k and semantic segmentation on
+Cityscapes, COCO-Stuff and Mapillary Vistas. Our ob-
+tained networks have performed consistently and consider-
+ably better when trained with larger batch sizes (or training
+crop sizes), leading to a new high-score on the challeng-
+ing Mapillary Vistas dataset in a single-scale, single-model
+inference setting. In future works, we will investigate the
+consequences of our approach for problems like object de-
+tection, instance-speciﬁc segmentation and learning in 3D.
+Derivations for gradient computation are provided in the
+Appendix.
+
+Acknowledgements. We acknowledge ﬁnancial support
+from project DIGIMAP, funded under grant #860375 by the
+Austrian Research Promotion Agency (FFG).
+
+Appendix – Derivation of Gradient ∂L
+∂x
+
+We follow the gradient derivations as provided in the original batch normalization paper [17] and rewrite them as a function
+
+of ˆx, starting with generally required derivatives for INPLACE-ABN and particular ones of INPLACE-ABN I.
+
+∂yj
+∂γ
+
+∂L
+∂γ
+
+= ˆxj ,
+
+=
+
+m
+(cid:88)
+
+j=1
+
+∂L
+∂yj
+
+∂yj
+∂γ
+
+=
+
+m
+(cid:88)
+
+j=1
+
+∂L
+∂yj
+
+ˆxj ,
+
+∂L
+∂yj
+
+∂yj
+∂β
+
+=
+
+m
+(cid:88)
+
+j=1
+
+∂L
+∂yj
+
+,
+
+∂yj
+∂β
+
+∂L
+∂β
+
+= 1 ,
+
+=
+
+m
+(cid:88)
+
+j=1
+
+= γ ,
+
+∂yj
+∂ ˆxj
+
+∂L
+∂ ˆxj
+
+=
+
+∂L
+∂yj
+
+∂yj
+∂ ˆxj
+
+=
+
+∂L
+∂yj
+
+γ ,
+
+∂ ˆxj
+∂σ2
+B
+
+= −
+
+1
+2(σ2
+B + (cid:15))
+
+xj − µB
+(cid:112)
+σ2
+B + (cid:15)
+
+= −
+
+ˆxj
+2(σ2
+B + (cid:15))
+
+,
+
+∂ ˆxj
+∂µB
+
+= −
+
+(cid:112)
+
+1
+σ2
+B + (cid:15)
+
+,
+
+∂L
+∂σ2
+B
+
+∂L
+∂µB
+
+=
+
+=
+
+m
+(cid:88)
+
+j=1
+m
+(cid:88)
+
+j=1
+
+∂L
+∂ ˆxj
+
+∂ ˆxj
+∂σ2
+B
+
+= −
+
+γ
+2(σ2
+B + (cid:15))
+
+ˆxj = −
+
+γ
+2(σ2
+B + (cid:15))
+
+∂L
+∂γ
+
+,
+
+∂L
+∂ ˆxj
+
+∂ ˆxj
+∂µB
+
+= −
+
+(cid:112)
+
+γ
+σ2
+B + (cid:15)
+
+= −
+
+(cid:112)
+
+γ
+σ2
+B + (cid:15)
+
+∂L
+∂β
+
+,
+
+m
+(cid:88)
+
+j=1
+m
+(cid:88)
+
+j=1
+
+∂L
+∂yj
+
+∂L
+∂yj
+
+∂σ2
+B
+∂xi
+
+=
+
+2(xi − µB)
+m
+
+,
+
+∂µB
+∂xi
+
+=
+
+1
+m
+
+,
+
+∂ ˆxi
+∂xi
+
+=
+
+(cid:112)
+
+1
+σ2
+B + (cid:15)
+
+,
+
+∂L
+∂xi
+
+=
+
+∂L
+∂ ˆxi
+
+∂ ˆxi
+∂xi
+
++
+
+∂L
+∂σ2
+B
+
+∂σ2
+B
+∂xi
+
++
+
+∂L
+∂µB
+
+∂µB
+∂xi
+
+=
+
+(cid:18) ∂L
+∂yi
+
+−
+
+1
+m
+
+∂L
+∂γ
+
+ˆxi −
+
+(cid:19)
+
+1
+m
+
+∂L
+∂β
+
+(cid:112)
+
+γ
+σ2
+B + (cid:15)
+
+.
+
+For INPLACE-ABN II, we write gradients ∂L
+
+∂γ and ∂L
+
+∂x as functions of y instead of ˆx in the following way:
+
+∂L
+∂γ
+
+=
+
+m
+(cid:88)
+
+j=1
+
+∂L
+∂yj
+
+ˆxj =
+
+m
+(cid:88)
+
+j=1
+
+∂L
+∂yj
+
+yj − β
+γ
+
+=
+
+1
+γ
+
+m
+(cid:88)
+
+j=1
+
+∂L
+∂yj
+
+yj −
+
+β
+γ
+
+m
+(cid:88)
+
+j=1
+
+∂L
+∂yj
+
+=
+
+
+
+
+
+m
+(cid:88)
+
+j=1
+
+1
+γ
+
+∂L
+∂yj
+
+
+
+ ,
+
+∂L
+∂β
+
+yj − β
+
+∂L
+∂xi
+
+=
+
+=
+
+=
+
+(cid:18) ∂L
+∂yi
+(cid:18) ∂L
+∂yi
+(cid:20) ∂L
+∂yi
+
+−
+
+−
+
+1
+m
+
+1
+m
+
+∂L
+∂γ
+
+∂L
+∂γ
+
+ˆxi −
+
+1
+m
+yi − β
+γ
+
+−
+
+1
+γm
+
+∂L
+∂γ
+
+yi −
+
+(cid:19)
+
+∂L
+∂β
+
+(cid:112)
+
+−
+
+∂L
+∂β
+
+1
+m
+(cid:18) ∂L
+∂β
+
+−
+
+1
+m
+
+γ
+σ2
+B + (cid:15)
+(cid:19)
+γ
+σ2
+B + (cid:15)
+(cid:19)(cid:21)
+∂L
+∂γ
+
+β
+γ
+
+(cid:112)
+
+(cid:112)
+
+γ
+σ2
+B + (cid:15)
+
+.
+
+References
+
+[1] H. Caesar, J. R. R. Uijlings, and V. Ferrari. COCO-Stuff:
+Thing and stuff classes in context. CoRR, abs/1612.03716,
+2016.
+
+[2] L. Chen, G. Papandreou, I. Kokkinos, K. Murphy, and A. L.
+Yuille. Deeplab: Semantic image segmentation with deep
+convolutional nets, atrous convolution, and fully connected
+CRFs. CoRR, abs/1606.00915, 2016.
+
+[3] L. Chen, G. Papandreou, F. Schroff, and H. Adam. Re-
+thinking atrous convolution for semantic image segmenta-
+tion. CoRR, abs/1706.05587, 2017.
+
+[4] T. Chen, B. Xu, C. Zhang, and C. Guestrin. Training deep
+nets with sublinear memory cost. CoRR, abs/1604.06174,
+2016.
+
+[5] M. Cordts, M. Omran, S. Ramos, T. Rehfeld, M. Enzweiler,
+R. Benenson, U. Franke, S. Roth, and B. Schiele. The
+Cityscapes dataset for semantic urban scene understanding.
+In (CVPR), 2016.
+
+[6] M. Courbariaux, Y. Bengio, and J.-P. David. Binaryconnect:
+Training deep neural networks with binary weights during
+propagations. In (NIPS). 2015.
+
+[7] J. Dai, H. Qi, Y. Xiong, Y. Li, G. Zhang, H. Hu, and
+
+Y. Wei.
+abs/1703.06211, 2017.
+
+Deformable convolutional networks.
+
+CoRR,
+
+[8] R. Gadde, V. Jampani, and P. V. Gehler. Semantic video cnns
+through representation warping. CoRR, abs/1708.03088,
+2017.
+
+[9] A. N. Gomez, M. Ren, R. Urtasun, and R. B. Grosse. The re-
+versible residual network: Backpropagation without storing
+activations. In (NIPS), December 2017.
+
+[10] A. Gruslys, R. Munos,
+
+I. Danihelka, M. Lanctot, and
+A. Graves. Memory-efﬁcient backpropagation through time.
+In (NIPS), 2016.
+
+[11] K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learning
+for image recognition. CoRR, abs/1512.03385, 2015.
+[12] K. He, X. Zhang, S. Ren, and J. Sun. Identity mappings in
+deep residual networks. CoRR, abs/1603.05027, 2016.
+[13] J. Hu, L. Shen, and G. Sun. Squeeze-and-excitation net-
+
+works. CoRR, abs/1709.01507, 2017.
+
+[14] G. Huang, Z. Liu, L. van der Maaten, and K. Q. Weinberger.
+Densely connected convolutional networks. In (CVPR), July
+2017.
+
+[15] I. Hubara, M. Courbariaux, D. Soudry, R. El-Yaniv, and
+Y. Bengio. Binarized neural networks. In (NIPS). 2016.
+[16] I. Hubara, M. Courbariaux, D. Soudry, R. El-Yaniv, and
+
+Y. Bengio. Quantized neural networks: Training neural net-
+works with low precision weights and activations. CoRR,
+abs/1609.07061, 2016.
+
+[17] S. Ioffe and C. Szegedy. Batch normalization: Accelerating
+deep network training by reducing internal covariate shift.
+CoRR, abs/1502.03167, 2015.
+
+[18] Y. Jia, E. Shelhamer, J. Donahue, S. Karayev, J. Long, R. Gir-
+shick, S. Guadarrama, and T. Darrell. Caffe: Convolu-
+tional architecture for fast feature embedding. arXiv preprint
+arXiv:1408.5093, 2014.
+
+[19] T. Lin, M. Maire, S. J. Belongie, L. D. Bourdev, R. B.
+Girshick, J. Hays, P. Perona, D. Ramanan, P. Dollár, and
+C. L. Zitnick. Microsoft COCO: Common objects in con-
+text. CoRR, abs/1405.0312, 2014.
+
+[20] A. L. Maas, A. Y. Hannun, and A. Y. Ng. Rectiﬁer non-
+In in
+linearities improve neural network acoustic models.
+ICML Workshop on Deep Learning for Audio, Speech and
+Language Processing, 2013.
+
+[21] J. Martens and I. Sutskever. Training Deep and Recurrent
+Networks with Hessian-Free Optimization, pages 479–535.
+Springer Berlin Heidelberg, 2012.
+
+[22] P. Micikevicius, S. Narang, J. Alben, G. F. Diamos,
+E. Elsen, D. Garcia, B. Ginsburg, M. Houston, O. Kuchaiev,
+G. Venkatesh, and H. Wu. Mixed precision training. CoRR,
+abs/1710.03740, 2017.
+
+[23] G. Neuhold, T. Ollmann, S. Rota Bulò, and P. Kontschieder.
+The mapillary vistas dataset for semantic understanding of
+street scenes. In (ICCV), October 2017.
+
+[24] G. Pleiss, D. Chen, G. Huang, T. Li, L. van der Maaten,
+and K. Q. Weinberger. Memory-efﬁcient implementation of
+densenets. CoRR, abs/1707.06990, 2017.
+
+[25] S. Rota Bulò, G. Neuhold, and P. Kontschieder. Loss max-
+pooling for semantic image segmentation. In (CVPR), July
+2017.
+
+[26] O. Russakovsky, J. Deng, H. Su, J. Krause, S. Satheesh,
+S. Ma, Z. Huang, A. Karphathy, A. Khosla, M. Bernstein,
+A. C. Berg, and L. Fei-Fei. Imagenet large scale visual recog-
+nition challenge. (IJCV), 2015.
+[27] K. Simonyan and A. Zisserman.
+
+Very deep convolu-
+tional networks for large-scale image recognition. CoRR,
+abs/1409.1556, 2014.
+
+[28] C. Szegedy, S. Ioffe, and V. Vanhoucke.
+
+Inception-v4,
+inception-resnet and the impact of residual connections on
+learning. CoRR, abs/1602.07261, 2016.
+
+[29] P. Wang, P. Chen, Y. Yuan, D. Liu, Z. Huang, X. Hou, and
+G. W. Cottrell. Understanding convolution for semantic seg-
+mentation. CoRR, abs/1702.08502, 2017.
+
+[30] Z. Wu, C. Shen, and A. van den Hengel. High-performance
+semantic segmentation using very deep fully convolutional
+networks. CoRR, abs/1604.04339, 2016.
+
+[31] Z. Wu, C. Shen, and A. van den Hengel. Wider or deeper:
+Revisiting the resnet model for visual recognition. CoRR,
+abs/1611.10080, 2016.
+
+[32] S. Xie, R. Girshick, P. Dollár, Z. Tu, and K. He. Aggregated
+residual transformations for deep neural networks. CoRR,
+abs/1611.05431, 2016.
+
+[33] B. Xu, N. Wang, T. Chen, and M. Li. Empirical evalua-
+tion of rectiﬁed activations in convolutional network. CoRR,
+abs/1505.00853, 2015.
+
+[34] S. Zagoruyko and N. Komodakis. Wide residual networks.
+
+In (BMVC), 2016.
+
+[35] Y. Zhang, H. Zhao, and J. Shi. LSUN2017 segmentation
+
+challenge winning team PSPNet, July 2017.
+
+[36] H. Zhao, J. Shi, X. Qi, X. Wang, and J. Jia. Pyramid scene
+
+parsing network. CoRR, abs/1612.01105, 2016.
+
+[37] B. Zhou, H. Zhao, X. Puig, S. Fidler, A. Barriuso, and
+A. Torralba. Semantic understanding of scenes through the
+ADE20K dataset. CoRR, abs/1608.05442, 2016.
+
+In-Place Activated BatchNorm for Memory-Optimized Training of DNNs
+
+Samuel Rota Bulò, Lorenzo Porzi, Peter Kontschieder
+Mapillary Research
+research@mapillary.com
+
+8
+1
+0
+2
+ 
+t
+c
+O
+ 
+6
+2
+ 
+ 
+]
+
+V
+C
+.
+s
+c
+[
+ 
+ 
+3
+v
+6
+1
+6
+2
+0
+.
+2
+1
+7
+1
+:
+v
+i
+X
+r
+a
+
+Abstract
+
+In this work we present In-Place Activated Batch Nor-
+malization (INPLACE-ABN) – a novel approach to drasti-
+cally reduce the training memory footprint of modern deep
+neural networks in a computationally efﬁcient way. Our
+solution substitutes the conventionally used succession of
+BatchNorm + Activation layers with a single plugin layer,
+hence avoiding invasive framework surgery while provid-
+ing straightforward applicability for existing deep learning
+frameworks. We obtain memory savings of up to 50% by
+dropping intermediate results and by recovering required
+information during the backward pass through the inversion
+of stored forward results, with only minor increase (0.8-
+2%) in computation time. Also, we demonstrate how fre-
+quently used checkpointing approaches can be made com-
+putationally as efﬁcient as INPLACE-ABN. In our exper-
+iments on image classiﬁcation, we demonstrate on-par re-
+sults on ImageNet-1k with state-of-the-art approaches. On
+the memory-demanding task of semantic segmentation, we
+report results for COCO-Stuff, Cityscapes and Mapillary
+Vistas, obtaining new state-of-the-art results on the lat-
+ter without additional training data but in a single-scale
+and -model scenario. Code can be found at https://
+github.com/mapillary/inplace_abn .
+
+1. Introduction
+
+High-performance computer vision recognition models
+typically take advantage of deep network backbones, gen-
+erating rich feature representations for target applications to
+operate on. For example, top-ranked architectures used in
+the 2017 LSUN or MS COCO segmentation/detection chal-
+lenges are predominantly based on ResNet/ResNeXt [11,
+32] models comprising >100 layers.
+
+Obviously, depth/width of networks strongly correlate
+with GPU memory requirements and at given hardware
+memory limitations, trade-offs have to be made to balance
+feature extractor performance vs. application-speciﬁc pa-
+rameters like network output resolution or training data size.
+A particularly memory-demanding task is semantic seg-
+
+Figure 1. Example of residual block with identity mapping [12].
+Left: Implementation with standard BN and in-place activation
+layers, which requires storing 6 buffers for the backward pass.
+Right: Implementation with our proposed INPLACE-ABN layer,
+which requires storing only 3 buffers. Our solution avoids storing
+the buffers that are typically kept for the backward pass through
+BN and exhibits a lower computational overhead compared to
+state-of-the-art memory-reduction methods.
+
+mentation, where one has to compromise signiﬁcantly on
+the number of training crops per minibatch and their spa-
+tial resolution. In fact, many recent works based on mod-
+ern backbone networks have to set the training batch size to
+no more than a single crop per GPU [2, 30], which is par-
+tially also due to suboptimal memory management in some
+deep learning frameworks. In this work, we focus on in-
+creasing the memory efﬁciency of the training process of
+modern network architectures in order to further leverage
+performance of deep neural networks in tasks like image
+classiﬁcation and semantic segmentation.
+
+We introduce a novel and uniﬁed layer that replaces the
+commonly used succession of batch normalization (BN)
+and nonlinear activation layers (ACT), which are integral
+
+1
+
+with modern deep learning architectures like ResNet [11],
+ResNeXt [32], Inception-ResNet [28], WideResNet [34],
+Squeeze-and-Excitation Networks [13], DenseNet [14], etc.
+Our solution is coined INPLACE-ABN and proposes to
+merge batch normalization and activation layers in order to
+enable in-place computation, using only a single memory
+buffer for storing the results (see illustration in Figure 1).
+During the backward pass, we can efﬁciently recover all
+required quantities from this buffer by inverting the for-
+ward pass computations. Our approach yields a theoreti-
+cal memory reduction of up to 50%, and our experiments
+on semantic segmentation show additional data throughput
+of up to +75% during training, when compared to prevail-
+ing sequential execution of BN+ACT. Our memory gains
+are obtained without introducing noticeable computational
+overhead, i.e. side-by-side runtime comparisons show only
+between +0.8-2% increase in computation time.
+
+As additional contribution, we review the checkpoint-
+ing memory management strategy [4] and propose a com-
+putationally optimized application of this idea in the con-
+text of BN layers. This optimization allows us to drop re-
+computation of certain quantities needed during the back-
+ward pass, eventually leading to reduced computation times
+as per our INPLACE-ABN. However, independent of the
+proposed optimized application of [4], conventional check-
+pointing in general suffers from higher implementation
+complexity (with the necessity to invasively manipulate the
+computation graph), while our main INPLACE-ABN con-
+tribution can be easily implemented as self-contained, stan-
+dard plug-in layer and therefore simply integrated in any
+modern deep learning framework.
+
+Our experimental evaluations demonstrate on-par perfor-
+mance with state-of-the-art models trained for image clas-
+siﬁcation on ImageNet [26] (in directly comparable mem-
+ory settings), and signiﬁcantly improved results for the
+memory-critical application of semantic segmentation.
+
+To summarize, we provide the following contributions:
+
+• Introduction of a novel,
+
+self-contained INPLACE-
+ABN layer that enables joint, in-place computation of
+BN+ACT, approximately halvening the memory require-
+ments during training of modern deep learning models.
+
+• A computationally more efﬁcient application of the
+checkpointing memory management strategy in the con-
+text of BN layers, inspired by optimizations used for
+INPLACE-ABN.
+
+i)
+
+• Experimental evaluations for
+
+image classiﬁcation
+on ImageNet-1k showing approximately on-par perfor-
+mance with state-of-the-art models and ii) semantic seg-
+mentation on COCO-Stuff, Cityscapes and Mapillary
+Vistas, considerably beneﬁting from the additional avail-
+able memory and generating new high-scores on the chal-
+lenging Vistas dataset.
+
+2. Related Work
+
+The topic of optimizing memory management in deep
+learning frameworks is typically addressed at different lev-
+els. Efﬁcient deep learning frameworks like TensorFlow,
+MxNet or PyTorch follow distinct memory allocation strate-
+gies. Among them is checkpointing [4, 21], which provides
+additional memory at the cost of runtime via storing activa-
+tion buffers as so-called checkpoints, from where required
+quantities can be re-computed during the backward pass.
+The paper in [4] describes how to recursively apply such a
+variant on sub-graphs between checkpoints. In [10] this is
+further optimized with dynamic programming, where a stor-
+age policy is determined that minimizes the computational
+costs for re-computation at a ﬁxed memory budget.
+
+Virtually all deep learning frameworks based on
+NVIDIA hardware exploit low-level functionality libraries
+CUDA and cuDNN1, providing GPU-accelerated and
+performance-optimized primitives and basic functionalities.
+Another line of research has focused on training CNNs
+with reduced precision and therefore smaller memory-
+footprint datatypes. Such works include (partially) bina-
+rized weights/activations/gradients [6, 15, 16], which how-
+ever typically lead to degraded overall performance. With
+mixed precision training [22], this issue seems to be over-
+come and we plan to exploit this as complementary tech-
+nique in future work, freeing up even more memory for
+training deep networks without sacriﬁcing runtime.
+
+In [9] the authors modify ResNet in a way to contain
+reversible residual blocks, i.e. residual blocks whose acti-
+vations can be reconstructed backwards. Backpropagation
+through reversible blocks can be performed without hav-
+ing stored intermediate activations during the forward pass,
+which allows to save memory. However, the cost to pay is
+twofold. First, one has to recompute each residual function
+during the backward pass, thus having the same overhead
+as checkpointing [21]. Second, the network design is lim-
+ited to using blocks with certain restrictions, i.e. reversible
+blocks cannot be generated for bottlenecks where informa-
+tion is supposed to be discarded.
+
+Finally, we stress that only training time memory-
+efﬁciency is targeted here while test-time optimization as
+done e.g. in NVIDIAs TensorRT 2 is beyond our scope.
+
+3. In-Place Activated Batch Normalization
+
+Here, we describe our contribution to avoid the storage
+of a buffer that is typically needed for the gradient computa-
+tion during the backward pass through the batch normaliza-
+tion layer. As opposed to existing approaches we also show
+that our solution minimizes the computational overhead we
+have to trade for saving additional memory.
+
+1https://developer.nvidia.com
+2https://developer.nvidia.com/tensorrt
+
+3.1. Batch Normalization Review
+
+Batch Normalization has been introduced in [17] as an
+effective tool to reduce internal covariate shift in deep net-
+works and accelerate the training process. Ever since, BN
+plays a key role in most modern deep learning architectures.
+The key idea consists in having a normalization layer that
+applies an axis-aligned whitening of the input distribution,
+followed by a scale-and-shift operation aiming at preserv-
+ing the network’s representation capacity. The whitening
+operation exploits statistics computed on a minibatch level
+only. The by-product of this approximation is an additional
+regularizing effect for the training process.
+
+In details, we can ﬁx a particular unit x in the network
+and let xB = {x1, . . . , xm} be the set of values x takes from
+a minibatch B of m training examples. The batch normal-
+ization operation applied to xi ﬁrst performs a whitening of
+the activation using statistics computed from the minibatch:
+
+ˆxi = BN(xi) =
+
+(1)
+
+xi − µB
+(cid:112)
+σ2
+B + (cid:15)
+
+.
+
+Here (cid:15) > 0 is a small constant that is introduced to prevent
+numerical issues, and µB and σ2
+B are the empirical mean
+and variance of the activation unit x, respectively, computed
+with respect to the minibatch B, i.e.
+
+µB =
+
+xj ,
+
+σ2
+B =
+
+(xj − µB)2 .
+
+1
+m
+
+m
+(cid:88)
+
+j=1
+
+1
+m
+
+m
+(cid:88)
+
+j=1
+
+The whitened activations ˆxi are then scaled and shifted by
+learnable parameters γ and β, obtaining
+
+yi = BNγ,β(xi) = γ ˆxi + β .
+
+The BN transformation described above can in principle
+be applied to any activation in the network and is typi-
+cally adopted with channel-speciﬁc (γ, β)-parameters. Us-
+ing BN renders training resilient to the scale of parameters,
+thus enabling the use of higher learning rates.
+
+At test time, the BN statistics are ﬁxed to µT and σT ,
+estimated from the entire training set T . These statistics
+are typically updated at training time with a running mean
+over the respective minibatch statistics, but could also be re-
+computed before starting the testing phase. Also, the com-
+putation of networks trained with batch normalization can
+be sped up by absorbing BN parameters into the preceding
+CONV layer, by performing a simple update of the convo-
+lution weights and biases. This is possible because at test-
+time BN becomes a linear operation.
+
+3.2. Memory Optimization Strategies
+
+(a) Standard building block (memory-inefﬁcient)
+
+(b) Checkpointing [4, 21]
+
+(c) Checkpointing (proposed version)
+
+(d) In-Place Activated Batch Normalization I (proposed method)
+
+Here we sketch our proposed memory optimization
+strategies after introducing both, the standard (memory-
+inefﬁcient) use of batch normalization and the state-of-the-
+art coined checkpointing [4, 21].
+
+(e) In-Place Activated Batch Normalization II (proposed method)
+
+Figure 2. Comparison of standard BN, state-of-the-art checkpoint-
+ing from [4, 21] and our proposed methods. See § 3.2 for a detailed
+description.
+
+In Figure 2, we provide diagrams showing the for-
+ward and backward passes of a typical building block
+BN+ACT+CONV3 that we ﬁnd in modern deep architec-
+tures. The activation function (e.g. RELU) is denoted by φ.
+Computations occurring during the forward pass are shown
+in green and involve the entire minibatch B (we omit the
+subscript B). Computations happening during the backward
+pass are shown in cyan and gray. The gray part aims at
+better highlighting the additional computation that has been
+introduced to compensate for the memory savings. Rectan-
+gles are in general volatile buffers holding intermediate re-
+sults, except for rectangles surrounded by a dashed frame,
+which represent buffers that need to be stored for the back-
+ward pass and thus signiﬁcantly impact the training mem-
+ory footprint. E.g., in Figure 2(a) only x and z will be stored
+for the backward pass, while in Figure 2(b) only x is stored.
+For the sake of presentation clarity, we have omitted two
+additional buffers holding µB and σB for the BN backward
+phase. Nevertheless, these buffers represent in general a
+small fraction of the total allocated memory. Moreover, we
+have also omitted the gradients with respect to the model
+parameters (i.e. γ, β and CONV weights).
+
+Standard. In Figure 2(a) we present the standard imple-
+mentation of the reference building block, as used in all
+deep learning frameworks. During the forward pass both,
+the input x to BN and the output of the activation function
+φ need to be stored for the backward pass. Variable x is
+used during the backward pass through BNγ,β to compute
+both the gradient w.r.t. its input and γ, i.e. ∂L
+∂γ where
+L denotes the loss, while z is required for the backward pass
+through the activation φ as well as potential subsequent op-
+erations like e.g. the convolution shown in the ﬁgure.
+
+∂x and ∂L
+
+Checkpointing [4, 21]. This technique allows to trade com-
+putation for memory when training neural networks, appli-
+cable in a very broad setting. In Figure 2(b), we limit its
+application to the building block under consideration like
+in [24]. In contrast to the standard implementation, which
+occupies two buffers for the backward pass of the shown
+building block, checkpointing requires only a single buffer.
+The trick consists in storing only x and recomputing z dur-
+ing the backward pass by reiterating the forward operations
+starting from x (see gray-colored operations). Clearly, the
+computational overhead to be paid comprises both, recom-
+putation of the BN and activation layers. It is worth ob-
+serving that recomputing BNγ,β (gray) during the backward
+phase can reuse values for µB and σB available from the
+forward pass and fuse together the normalization and sub-
+sequent afﬁne transformation into a single scale-and-shift
+operation. Accordingly, the cost of the second forward pass
+over BNγ,β becomes less expensive (see also [24]).
+
+3Having the convolution at the end of the block is not strictly necessary,
+
+but supports comprehension.
+
+The three approaches that follow are all contributions of
+this work. The ﬁrst represents a variation of checkpoint-
+ing, which allows us to save additional computations in the
+context of BN. The second and third are our main contri-
+butions, providing strategies that yield the same memory
+savings and even lower computational costs compared to
+the proposed, optimized checkpointing, but are both self-
+contained and thus much easier to integrate in existing deep
+learning frameworks.
+
+Checkpointing (proposed version). Direct application of
+the checkpointing technique in the sketched building block,
+which is adopted also in [24], is not computationally opti-
+mal since additional operations could be saved by storing
+ˆx, i.e. the normalized value of x as per Eq. (1), instead of
+x. Indeed, as we will see in the next subsection, the back-
+ward pass through BN requires recomputing ˆx if not already
+stored. For this reason, we propose in Figure 2(c) an alter-
+native implementation that is computationally more efﬁcient
+by retaining ˆx from the forward pass through the BN layer.
+From ˆx we can recover z during the backward pass by ap-
+plying the scale-and-shift operation πγ,β(ˆx) = γ ˆx + β, fol-
+lowed by the activation function φ (see gray-colored oper-
+ations). In this way, the computation of z becomes slightly
+more efﬁcient than the one shown in Figure 2(b), for we
+save the fusion operation. Finally, an additional saving of
+the normalization step derives from using the stored ˆx in the
+backward implementation of BN rather than recomputing it
+from x. To distinguish the efﬁcient backward implementa-
+tion of BN from the standard one we write BN∗
+γ,β in place
+of BNγ,β (cyan-colored, see additionally § 3.3).
+
+In-Place Activated Batch Normalization I. A limitation
+of the memory-reduction strategy described above is that
+the last layer, namely CONV in the example, depends on
+non-local quantities like x (or ˆx) for the computation of the
+gradient. This makes the implementation of the approach
+within standard frameworks somewhat cumbersome, be-
+cause the backward pass of any layer that follows φ, which
+relies on the existence of z, has to somehow trigger its
+recomputation. To render the implementation of the pro-
+posed memory savings easier and self-contained, we sug-
+gest an alternative strategy shown in Figure 2(d), which re-
+lies on having only z as the saved buffer during the forward
+pass, thus operating an in-place computation through the
+BN layer (therefrom the paper’s title). By doing so, any
+layer that follows the activation φ would have the informa-
+tion for the gradient computation locally available. Having
+stored z, we need to recompute ˆx backwards, for it will be
+needed in the backward pass through the BN layer.4 How-
+ever, this operation is only possible if the activation func-
+
+4This solution can technically still be considered as a form of check-
+pointing, but instead of recovering information forwards as in [4, 21], we
+recover it backwards, thus bearing a similarity to reversible nets [9].
+
+tion is invertible. Even though this requirement does not
+hold for RELU, i.e. one of the most dominantly used activa-
+tion functions, we show in § 4.1 that an invertible function
+like LEAKY RELU [20] with a small slope works well as
+a surrogate of RELU without compromising on the model
+quality. We also need to invert the scale-and-shift operation
+πγ,β, which is in general possible if γ (cid:54)= 0.
+
+γ
+
+∂γ and ∂L
+
+γ,β(y) = y−β
+
+In-Place Activated Batch Normalization II. The com-
+plexity of the computation of ˆx = π−1
+used
+in the backward pass of INPLACE-ABN I can be further
+reduced by rewriting the gradients ∂L
+∂x directly as
+functions of y instead of ˆx. The explicit inversion of πγ,β
+to recover ˆx applies m scale-and-shift operations (per fea-
+ture channel). If the partial derivatives are however based
+on y directly, the resulting modiﬁed gradients (derivations
+given in the Appendix) show that the same computation can
+be absorbed into the gradient ∂L
+at O(1) cost (per feature
+∂xi
+channel). In Figure 2(e) we show the diagram of this opti-
+mization, where we denote as BN†
+γ,β the implementation of
+the backward pass as a function of y.
+
+3.3. Technical Details
+
+The key components of our method are the computation
+of the inverse of both the activation function (INPLACE-
+ABN I & II) and πγ,β (INPLACE-ABN I), and the imple-
+mentation of a backward pass through the batch normaliza-
+tion layer that depends on y, i.e. the output of the forward
+pass through the same layer.
+
+Invertible activation function. Many activation functions
+are actually invertible and can be computed in-place (e.g.
+sigmoid, hyperbolic tangent, LEAKY RELU, and others),
+but the probably most commonly used one, namely RELU,
+is not invertible. However, we can replace it with LEAKY
+RELU (see, Figure 3) with slope 0.01 without impacting
+the quality of the trained models [33]. This will be the ac-
+tivation function that we use in our experimental evaluation
+due to its afﬁnity to standard RELU, even though other acti-
+vation functions could be used. The corresponding forward
+
+given as follows:
+
+f (y) =
+
+(cid:40)
+y
+ay
+
+if y ≥ 0
+if y < 0
+
+,
+
+f −1(z) =
+
+(cid:40)
+
+z
+z
+a
+
+if z ≥ 0
+if z < 0
+
+.
+
+LEAKY RELU and its inverse share the same computa-
+tional cost, i.e. an elementwise sign check and scaling op-
+eration. Hence, the overhead deriving from the recompu-
+tation of φ in the backward pass of the previously shown,
+checkpointing-based approaches and its inverse φ−1 em-
+ployed in the backward pass of our method are equivalent.
+To give further evidence of the interchangeability of RELU
+and LEAKY RELU with slope a = 0.01, we have suc-
+cessfully retrained well-known models like ResNeXt and
+WideResNet on ImageNet using LEAKY RELU (see § 4.1).
+
+∂x = { ∂L
+∂x1
+
+INPLACE-ABN I: Backward pass through BN. The gra-
+dient ∂L
+}, which is obtained from the
+backward pass through the BN layer, can be written as a
+function of ˆx = {ˆx1, . . . , ˆxm} and ∂L
+}
+as
+
+∂y = { ∂L
+∂y1
+
+, . . . , ∂L
+∂xm
+
+, . . . , ∂L
+∂ym
+
+∂L
+∂xi
+
+=
+
+(cid:26) ∂L
+∂yi
+
+−
+
+1
+m
+
+∂L
+∂γ
+
+ˆxi −
+
+(cid:27)
+
+1
+m
+
+∂L
+∂β
+
+(cid:112)
+
+γ
+σ2
+B + (cid:15)
+
+,
+
+where the gradients of the BN parameters are given by
+
+∂L
+∂γ
+
+=
+
+m
+(cid:88)
+
+i=1
+
+∂L
+∂yi
+
+ˆxi ,
+
+∂L
+∂β
+
+=
+
+m
+(cid:88)
+
+i=1
+
+∂L
+∂yi
+
+.
+
+The expression above differs from what is found in the orig-
+inal BN paper [17], but the refactoring was already used in
+the Caffe [18] framework. It is implemented by BN∗
+γ,β in
+the proposed solutions in Figures 2(c) and 2(d) and does
+not depend on µB. Hence, we store during the forward pass
+only σB (this dependency was omitted from the diagrams).
+Instead, BNγ,β in Figures 2(a) and 2(b), which depends on
+x, requires the additional recomputation of ˆx from x via
+Eq. (1). Hence, it also requires storing µB. Our solution is
+hence memory-wise more efﬁcient than the state-of-the-art
+from Figure 2(b).
+
+Inversion of πγ,β. In the conﬁguration of INPLACE-ABN
+I, the inversion of πγ,β becomes critical if γ = 0 since
+γ,β(y) = y−β
+π−1
+γ . While we never encountered such a case
+in practice, one can protect against it by preventing γ from
+getting less than a given tolerance. We can even avoid this
+problem by simply not considering γ a learnable parame-
+ter and by ﬁxing it to 1, in case the activation function is
+scale covariant (e.g. all RELU-like activations) and when a
+CONV layer follows. Indeed, it is easy to show that the net-
+work retains the exact same capacity in that case, for γ can
+be absorbed into the subsequent CONV layer.
+
+Figure 3. LEAKY RELU with slope a (left) and its inverse (right).
+
+pass through the activation function with slope a for neg-
+ative inputs and its inverse used in our backward pass are
+
+INPLACE-ABN II: Backward pass through BN. We ob-
+tain additional memory savings for our solution illustrated
+
+Algorithm 1 INPLACE-ABN Forward
+Require: x, γ, β
+
+1: y, σB ← BNγ,β(x)
+2: z ← φ(y)
+3: save for backward z, σB
+4: return z
+
+Algorithm 2 INPLACE-ABN Backward
+Require: ∂L
+
+∂z , γ, β
+
+∂y ← φbackward(z, ∂L
+∂z )
+
+1: z, σB ← saved tensors during forward
+2: ∂L
+3: y ← φ−1(z)
+4: if INPLACE-ABN I (see Fig. 2(d)) then
+5:
+
+ˆx ← π−1
+∂x , ∂L
+∂L
+
+γ,β(y)
+∂γ , ∂L
+
+∂β ← BN∗
+
+6:
+7: else if INPLACE-ABN II (see Fig. 2(e)) then
+8:
+
+∂y , σB)
+
+γ,β(ˆx, ∂L
+
+∂L
+
+γ,β(y, ∂L
+
+∂y , σB)
+
+∂x , ∂L
+9: return ∂L
+
+∂γ , ∂L
+∂x , ∂L
+
+∂β ← BN†
+∂γ , ∂L
+
+∂β
+
+in Figure 2(e) and as outlined in § 3.2. The gradient ∂L
+∂x
+when written as a function of y instead of ˆx becomes
+
+∂L
+∂xi
+
+=
+
+(cid:20) ∂L
+∂yi
+
+−
+
+1
+γm
+
+∂L
+∂γ
+
+yi −
+
+1
+m
+
+(cid:18) ∂L
+∂β
+
+−
+
+β
+γ
+
+∂L
+∂γ
+
+(cid:19)(cid:21)
+
+(cid:112)
+
+γ
+σ2
+B + (cid:15)
+
+.
+
+For the gradients of the BN parameters, ∂L
+
+∂β remains as
+
+4. Experiments
+
+above but we get
+
+∂L
+∂γ
+
+=
+
+
+
+
+
+m
+(cid:88)
+
+j=1
+
+1
+γ
+
+∂L
+∂yj
+
+
+
+
+
+∂L
+∂β
+
+yj − β
+
+and we write BN†
+γ,β for the actual backward implementa-
+tion in Figure 2(e). Detailed derivations are provided in the
+Appendix of this paper.
+
+In summary, both of our optimized main contributions
+are memory-wise more efﬁcient than the state-of-the-art so-
+lution in Figure 2(b) and INPLACE-ABN II is computa-
+tionally even more efﬁcient than the proposed, optimized
+checkpointing from Figure 2(c).
+
+3.4. Implementation Details
+
+We have implemented the proposed INPLACE-ABN I
+layer in PyTorch, by simply creating a new layer that fuses
+batch normalization with an (invertible) activation function.
+In this way we can deal with the computation of ˆx from z
+internally in the layer, thus keeping the implementation self-
+contained. We have released code at https://github.
+com/mapillary/inplace_abn for easy plug-in re-
+placement of the block BN+ACT in modern architectures.
+The forward and backward implementations are also given
+as pseudocode in Algorithm 1 and 2. In the forward pass, in
+line 3, we explicitly indicate the buffers that are stored and
+needed for the backward pass. Any other buffer can be over-
+written with in-place computations, e.g. x, y and z can point
+to the same memory location. In the backward pass, we re-
+cover the stored buffers in line 1 and, again, every computa-
+tion can be done in-place if the buffer is not needed anymore
+(e.g. ∂L
+∂z can share the same memory location as
+well as ˆx, y and z). As opposed to Figure 2, the pseudocode
+shows also the dependencies on additional, small, buffers
+like σB and reports the gradients with respect to the BN
+layer parameters γ and β. Please note the difference during
+backward computation when applying INPLACE-ABN I or
+INPLACE-ABN II, respectively.
+
+∂x , ∂L
+
+∂y , ∂L
+
+We assess the effectiveness of our proposed, memory ef-
+ﬁcient INPLACE-ABN layer for the tasks of image classiﬁ-
+cation and semantic segmentation in § 4.1 and 4.2, respec-
+tively. Additionally, we provide timing analyses in § 4.3.
+Experiments were run and timed on machines comprising
+four NVIDIA Titan Xp cards (with 12GB of RAM each).
+Where not otherwise noted, the activation function used in
+all experiments is LEAKY RELU with slope a = 0.01.
+
+4.1. Image Classiﬁcation
+
+We have trained several residual-unit-based models
+on ImageNet-1k [26] to demonstrate the effectiveness of
+INPLACE-ABN for the task of image classiﬁcation. In par-
+ticular, we focus our attention on two main questions:
+i)
+whether using an invertible activation function (i.e. LEAKY
+RELU in our experiments) impacts on the performance of
+the models, and ii) how the memory savings obtained with
+our method can be exploited to improve classiﬁcation accu-
+racy. Our results are summarized in Table 2 and described
+in this subsection.
+
+ResNeXt-101/ResNeXt-152. This is a variant of the
+original ResNet [11] architecture in which the bottleneck
+residual units are replaced with a multi-branch version. In
+practice, this equates to “grouping” the 3 × 3 convolutions
+of each residual unit. The number of groups, i.e. paral-
+lel branches, is known as cardinality and is an additional
+hyperparameter to be set. We follow the best performing
+design guidelines described in [32] and train models with
+cardinality 64, while considering the 101- and 152-layers
+conﬁgurations. During training, we proportionally scale in-
+put images so that their smallest side equals 256 pixels, be-
+fore randomly taking 224 × 224 crops. Additionally, we
+perform per-channel mean and variance normalization and
+color augmentation as described in [32]. We train using
+stochastic gradient descent (SGD) with Nesterov updates,
+initial learning rate 0.1, weight decay 10−4 and momentum
+0.9. The training is run for a total of 90 epochs, reducing
+the learning rate every 30 epochs by a factor 10.
+
+WideResNet-38. This is another modern architecture
+built by stacking residual units. Compared to the original
+ResNet, WideResNet trades depth for width, i.e. it uses units
+with an increased number of feature channels while reduc-
+ing the total number of stacked units. For training, we use
+the same setup and hyperparameters as for ResNeXt, with
+one exception: following [31] we train for 90 epochs, lin-
+early decreasing the learning rate from 0.1 to 10−6.
+
+Discussion of results.
+In our experiments we also com-
+pared the validation accuracy obtained when replacing
+RELU with LEAKY RELU in a ResNeXt-101 trained
+with RELU. We also considered the opposite case, replac-
+ing LEAKY RELU with RELU in a LEAKY RELU-trained
+network (see Table 1). Our results are in line with [33], and
+never differ by more than a single point per training except
+for the 3202 center crop evaluation top-1 results, probably
+also due to non-deterministic training behaviour.
+
+Our results may slightly differ from what was reported
+in the original papers, as our training protocol does not
+exactly match the one in [32] (e.g. data augmentation re-
+garding scale and aspect ratio settings, learning rate sched-
+ule, etc.) or due to changes in reference implementations.5
+Next, we focus on how to better exploit the memory savings
+due to our proposed INPLACE-ABN for improving classi-
+ﬁcation accuracy. As a baseline, we train ResNeXt-101
+with standard Batch Normalization and the maximum batch
+size that ﬁts in GPU memory, i.e. 256 images per batch.
+Then, we consider two different options: i) using the ex-
+tra memory to ﬁt more images per training batch while
+ﬁxing the network architecture, or ii) ﬁxing the batch size
+while training a larger network. For option i) we double the
+batch size to 512 (ResNeXt-101, INPLACE-ABN, 512
+in Table 2), while for option ii) we train ResNeXt-152
+and WideResNet-38. Note that neither ResNeXt-152
+nor WideResNet-38 would ﬁt in memory when using
+256 images per training batch and when using standard
+BN. As it is clear from the table, both i) and ii) result
+in a noticeable performance increase. Interestingly, train-
+ing ResNeXt-101 with an increased batch size results in
+similar accuracy to the deeper (and computationally more
+expensive) ResNeXt-152 model. As an additional ref-
+erence, we train ResNeXt-101 with synchronized Batch
+Normalization (INPLACE-ABNsync), which can be seen as
+a “virtual” increase of batch size applied to the computation
+of BN statistics. In this case we only observe small accu-
+racy improvements when compared to the baseline model.
+For the future, we plan to conduct further experiments with
+deeper variants of DenseNet [14], and investigate effects of
+INPLACE-ABN on Squeeze & Excitation networks [13] or
+deformable convolutional networks [7].
+
+5See note in https://github.com/itijyou/ademxapp men-
+tioning subtle differences in implementation, e.g., different cropping strate-
+gies, interpolation methods, and padding strategies.
+
+4.2. Semantic Segmentation
+
+The goal of semantic segmentation is to assign cate-
+gorical labels to each pixel in an image. State-of-the-art
+segmentations are typically obtained by combining classi-
+ﬁcation models pretrained on ImageNet (typically referred
+to as body) with segmentation-speciﬁc head architectures
+and jointly ﬁne-tuning them on suitable, (densely) anno-
+tated training data like Cityscapes [5], COCO-Stuff [1],
+ADE20K [37] or Mapillary Vistas [23].
+
+Datasets used for Evaluation. We report results on
+Cityscapes [5], COCO-Stuff [1] and Mapillary Vistas [23],
+since these datasets have complementary properties in terms
+of image content, size, number of class labels and annota-
+tion quality. Cityscapes shows street-level images captured
+in central Europe and comprises a total of 5k densely an-
+notated images (19 object categories + 1 void class, all im-
+ages sized 2048×1024), split into 2975/500/1525 images
+for training, validation and test, respectively. While there
+exist additional 20k images with so-called coarse annota-
+tions, we learn only from the high-quality (ﬁne) annotations
+in the training set and test on the corresponding validation
+set (for which ground truth is publicly available). We also
+show results on COCO-Stuff, which provides stuff -class an-
+notations for the well-known MS COCO dataset [19]. This
+dataset comprises 65k COCO images (with 40k for train-
+ing, 5k for validation, 5k for test-dev and 15k as challenge
+test set) with annotations for 91 stuff classes and 1 void
+class. Images are smaller than in Cityscapes and with vary-
+ing sizes, and the provided semantic annotations are based
+on superpixel segmentations, consequently suffering from
+considerable mislabelings. Finally, we also report results on
+Mapillary Vistas (research edition), a novel and large-scale
+street-level image dataset comprising 25k densely annota-
+tion images (65 object categories + 1 void class, images
+have varying aspect ratios and sizes up to 22 Megapixel),
+split into 18k/2k/5k images for training, validation and test,
+respectively. Similar to the aforementioned datasets, we
+train on training data and test on validation data.
+
+Segmentation approach. We chose to adopt the recently
+introduced DeepLabV3 [3] segmentation approach as head,
+and evaluate its performance with body networks from
+§ 4.1. DeepLabV3 is exploiting atrous (dilated) convo-
+lutions in a cascaded way for capturing contextual infor-
+mation, together with crop-level features encoding global
+context (close in spirit to PSPNet’s [36] global feature).
+We follow the parameter choices suggested in [3], assem-
+bling the head as 4 parallel CONV blocks with 256 out-
+put channels each and dilation rates (1, 12, 24, 36) (with x8
+downsampled crop sizes from the body) and kernel sizes
+(12, 32, 32, 32), respectively. The global 1 × 1 features
+are computed in a channel-speciﬁc way and CONVed into
+256 additional channels. Each output block is followed
+
+activation
+
+2242 center
+
+2242 10-crops
+
+3202 center
+
+validation
+
+top-1
+
+top-5
+
+top-1
+
+top-5
+
+top-1
+
+top-5
+
+Network
+
+ResNeXt-101
+ResNeXt-101
+
+training
+
+RELU
+RELU
+
+ResNeXt-101
+ResNeXt-101
+
+LEAKY RELU LEAKY RELU 77.04
+76.81
+LEAKY RELU
+
+RELU
+
+RELU
+
+77.74
+LEAKY RELU 76.88
+
+93.86
+93.42
+
+93.50
+93.53
+
+79.21
+78.74
+
+78.72
+78.46
+
+94.67
+94.46
+
+94.47
+94.38
+
+79.17
+78.37
+
+77.92
+77.84
+
+94.67
+94.25
+
+94.28
+94.20
+
+Table 1. Imagenet validation set results using ResNeXt-101 and RELU/LEAKY RELU exchanged activation functions during training
+and validation.
+
+Network
+
+2242 center
+
+2242 10-crops
+
+3202 center
+
+batch size
+
+top-1
+
+top-5
+
+top-1
+
+top-5
+
+top-1
+
+top-5
+
+ResNeXt-101, STD-BN
+
+77.04
+
+93.50
+
+78.72
+
+94.47
+
+77.92
+
+94.28
+
+ResNeXt-101, INPLACE-ABN
+ResNeXt-152, INPLACE-ABN
+WideResNet-38, INPLACE-ABN
+
+ResNeXt-101, INPLACE-ABNsync
+
+78.08
+78.28
+79.72
+
+93.79
+94.04
+94.78
+
+79.52
+79.73
+81.03
+
+94.66
+94.82
+95.43
+
+79.38
+79.56
+80.69
+
+94.67
+94.67
+95.27
+
+77.70
+
+93.78
+
+79.18
+
+94.60
+
+78.98
+
+94.56
+
+256
+
+512
+256
+256
+
+256
+
+Table 2. Imagenet validation set results using different architectures and training batch sizes.
+
+by BatchNorm before all 1280 features are stacked and re-
+duced by another CONV+BN+ACT block (into 256 fea-
+tures) and ﬁnally CONVed to the number of target classes.
+We exploit our proposed INPLACE-ABN strategy also in
+the head architecture. Finally, we apply bilinear upsampling
+to the logits to obtain the original input crop resolution be-
+fore computing the loss using an online bootstrapping strat-
+egy as described in [25, 30] (setting p = 1.0 and m = 25%).
+We did not apply hybrid dilated convolutions [29] nor added
+an auxiliary loss as proposed in [36]. Training data is
+sampled in a uniform way (by shufﬂing the database in
+each epoch) and all Cityscapes experiments are run for 360
+epochs using an initial learning rate of 2.5 × 10−3 and poly-
+nomial learning rate decay (1 − iter
+max_iter )0.9, following [3].
+COCO-Stuff experiments were trained only for 30 epochs,
+which however approximately matches the number of iter-
+ations on Cityscapes due to the considerably larger dataset
+size. For optimization, we use stochastic gradient descent
+with momentum 0.9 and weight decay 10−4. For train-
+ing data augmentation, we apply random horizontal ﬂipping
+(with prob. 0.5) and random scaling selected from 0.7 - 2.0
+before cropping the actual patches.
+
+Discussion of Results.
+In Table 3, we provide re-
+sults on validation data for Cityscapes and COCO-Stuff
+under different BN layer conﬁgurations. We distin-
+guish between standard BN layers [17] (coined STD-BN)
+and our proposed variants using in-place, activated BN
+(INPLACE-ABN) as well as its gradient-synchronized ver-
+sion INPLACE-ABNsync. All experiments are based on
+LEAKY RELU activations. Trainings were conducted in a
+
+way to maximize GPU memory utilization by i) ﬁxing the
+training crop size and therefore pushing the amount of crops
+per minibatch to the limit (denoted as FIXED CROP) or ii)
+ﬁxing the number of crops per minibatch and maximizing
+the training crop resolutions (FIXED BATCH). Experiments
+are conducted for ResNeXt-101 and WideResNet-38
+network bodies, where the latter seems preferable for seg-
+mentation tasks. Both body networks were solely trained
+on ImageNet-1k. All results derive from single-scale test-
+ing without horizontal image ﬂipping, deliberately avoiding
+dilution of results by well-known bells and whistles. Ta-
+ble 3 shows the positive effects of applying more training
+data (in terms of both, #training crops per minibatch and
+input crop resolutions) on the validation results. The in-
+crease of data (w.r.t. pixels/minibatch) we can put in GPU
+memory, relative to the baseline (top row) is reported in
+square brackets. We observe that higher input resolution
+is in general even more beneﬁcial than adding more crops
+to the batch. For the sake of direct comparability we
+left the learning rates unchanged, but there might be bet-
+ter hyper-parameters for our variants of INPLACE-ABN
+and INPLACE-ABNsync.
+In essence, our results closely
+approach reported numbers for Cityscapes in e.g. [8, 36],
+which however include more training data in the body
+model training or are based on already trained models like
+DeepLabV2 [2]. For COCO-Stuff, results are not directly
+comparable to the original publication [1] since they used
+a lower-performing VGG-16 [27] network for the body.
+However, all experiments show signiﬁcant improvements
+w.r.t. the baseline method in the ﬁrst line of Table 3.
+
+BATCHNORM
+
+ResNeXt-101
+
+WideResNet-38
+
+STD-BN + LEAKY RELU
+
+INPLACE-ABN, FIXED CROP
+INPLACE-ABN, FIXED BATCH
+INPLACE-ABNsync, FIXED BATCH
+
+Cityscapes
+
+16 × 5122
+28 × 5122 [+75%]
+16 × 6722 [+72%]
+16 × 6722 [+72%]
+
+74.42
+
+75.80
+77.04
+77.58
+
+COCO-Stuff
+
+16 × 4802
+24 × 4802 [+50%]
+16 × 6002 [+56%]
+16 × 6002 [+56%]
+
+20.30
+
+22.63
+23.35
+24.91
+
+Cityscapes
+
+20 × 5122
+28 × 5122 [+40%]
+20 × 6402 [+56%]
+20 × 6402 [+56%]
+
+COCO-Stuff
+
+75.82
+
+77.75
+78.31
+78.06
+
+20 × 4962
+28 × 4962 [+40%]
+20 × 5762 [+35%]
+20 × 5762 [+35%]
+
+22.44
+
+22.96
+24.10
+25.11
+
+Table 3. Validation data results (single scale test) for semantic segmentation experiments on Cityscapes and COCO-Stuff, using
+ResNeXt-101 and WideResNet-38 network bodies and different batch normalization settings (see text). All result numbers in [%].
+
+Optimizing Settings for Cityscapes and Vistas Datasets.
+Here we show further experiments when tuning settings
+like #training crops and crop sizes in favor of our method
+(as opposed to maintaining comparability with baselines
+above). First, we report Cityscapes results in Table 4 when
+ﬁne-tuning our INPLACE-ABN ResNeXt-152 ImageNet
+model from § 4.1, using 12 crops of size 680×680 per mini-
+batch (using the gradient-synchronized variant INPLACE-
+ABNsync). Going deeper with the body results in a vali-
+dation set score of 78.49%, improving over the score of
+77.58% obtained by ResNeXt-101, INPLACE-ABNsync.
+We provide additional results using WideResNet-38
+INPLACE-ABNsync-based settings, where we trained the
+model with i) 16 crops at 712 × 712 yielding 79.02% and
+ii) 12 crops at 872 × 872, resulting in 79.16%. As can
+be seen, the combination of INPLACE-ABNsync with larger
+crop sizes improves by ≈ 0.9% over the best perform-
+ing setting in Table 3 (INPLACE-ABN with 20 crops at
+640 × 640). We also list a non-gradient synchronized exper-
+iment (as this gave the highest score on Cityscapes before),
+where an increase of the crop size yields to minor improve-
+ments, climbing from 78.31% to 78.45%.
+
+Finally, we have run another experiment with 12 crops
+at 872 × 872 where we however used a different training
+data sampling strategy. Instead of just randomly perturb-
+ing the dataset and taking training crops from random po-
+sitions, we compiled the minibatches per epoch in a way
+to show all classes approximately uniformly (thus follow-
+ing an oversampling strategy for underrepresented cate-
+gories).
+In practice, we tracked object class presence for
+all images and eventually class-uniformly sampled from
+eligible image candidates, making sure to take training
+crops from areas containing the class of interest. Apply-
+ing this sampling strategy coined CLASS-UNIFORM SAM-
+PLING yields 79.40%, which matches the highest reported
+score on Cityscapes validation data reported in [8], without
+however using additional training data.
+Next, we provide results for the Mapillary Vistas dataset,
+using hyperparameter settings inspired by our highest scor-
+ing conﬁguration for Cityscapes. Vistas is considerably
+larger than Cityscapes (in terms of #classes, #images and
+image resolution), so running an exhaustive amount of ex-
+periments is prohibitive in terms of training time. Due to
+
+the increase of object classes (19 for Cityscapes and 65 for
+Vistas), we used minibatches of 12 crops at 776 × 776 (with
+INPLACE-ABNsync), increased the initial learning rate to
+3.5 × 10−3 and trained for 90 epochs. This setting leads to
+the highest reported single-scale score of 53.12% on val-
+idation data so far, signiﬁcantly outperforming the LSUN
+2017 segmentation winner’s single-scale approach [35] of
+51.59%. As also listed in Table 4, their approach addition-
+ally used hybrid dilated convolutions [29], applied an in-
+verse frequency weighting for correcting training data class
+imbalance as well as pretrained on Cityscapes.
+
+4.3. Timing analyses
+
+Besides the discussed memory improvements and their
+impact on computer vision applications, we also provide
+actual runtime comparisons and analyses for the INPLACE-
+ABN I setting shown in 2(d), as this is the implemen-
+tation we made publicly available6.
+Isolating a single
+BN+ACT+CONV block, we evaluate the computational
+times required for a forward and backward pass over it
+(Figure 4). We compare the conventional approach of
+serially executing layers and storing intermediate results
+(STANDARD), our proposed INPLACE-ABN I and the
+CHECKPOINTING approach. In order to obtain fair timing
+
+6https://github.com/mapillary/inplace_abn
+
+Figure 4. Computation time required for a forward and
+backward pass through basic BN+ACT+CONV blocks from
+ResNeXt-101, using different BN strategies.
+
+ResNeXt-152
+
+WideResNet-38
+
+Cityscapes
+INPLACE-ABNsync
+INPLACE-ABN
+INPLACE-ABNsync
+INPLACE-ABNsync
+INPLACE-ABNsync + CLASS-UNIFORM SAMPLING
+
+12 × 6802
+–
+–
+–
+–
+
+78.49
+
+–
+16 × 7122
+16 × 7122
+12 × 8722
+12 × 8722
+
+78.45
+79.02
+79.16
+79.40
+
+Mapillary Vistas
+INPLACE-ABNsync + CLASS-UNIFORM SAMPLING
+
+LSUN 2017 winner [35] (based on PSPNet)
+PSPNet + auxiliary loss
+
++ Hybrid dilated convolutions [29]
++ Inverse frequency label reweighting
++ Cityscapes pretraining
+
+–
+
+12 × 7762
+
+53.12
+
+ResNet-101
+
+16 × 7132
+16 × 7132
+16 × 7132
+16 × 7132
+
+49.76
+50.28
+51.50
+51.59
+
+Table 4. Validation data results (single scale test, no horizontal ﬂipping) for semantic segmentation experiments on Cityscapes and Vistas,
+using ResNeXt-152 and WideResNet-38 bodies with different settings for #crops per minibatch and crop sizes. All results in [%].
+
+comparisons, we re-implemented the checkpointing idea in
+PyTorch. The results are obtained by running all opera-
+tions over a batch comprising 32-images and setting the
+meta-parameters (number of feature channels, spatial di-
+mensions) to those encountered in the four modules of
+ResNeXt-101, denoted as CONV1-CONV4. The actual
+runtimes were averaged over 200 iterations.
+
+We observe consistent speed advantages in favor of our
+method when comparing against CHECKPOINTING, with
+the actual percentage difference depending on block’s meta-
+parameters. As we can see, INPLACE-ABN induces com-
+putation time increase between 0.8 − 2% over STANDARD
+while CHECKPOINTING is almost doubling our overheads.
+
+5. Conclusions
+
+In this work we have presented INPLACE-ABN, which
+fusion of batch
+is a novel, computationally efﬁcient
+normalization and activation layers,
+targeting memory-
+optimization for modern deep neural networks during train-
+ing time. We reconstruct necessary quantities for the back-
+ward pass by inverting the forward computation from the
+storage buffer, and manage to free up almost 50% of the
+
+memory needed in conventional BN+ACT implementations
+at little additional computational costs. In contrast to state-
+of-the-art checkpointing attempts, our method is recon-
+structing discarded buffers backwards during the backward
+pass, thus allowing us to encapsulate BN+ACT as self-
+contained layer, which is easy to implement and deploy in
+virtually all modern deep learning frameworks. We have
+validated our approach with experiments for image clas-
+siﬁcation on ImageNet-1k and semantic segmentation on
+Cityscapes, COCO-Stuff and Mapillary Vistas. Our ob-
+tained networks have performed consistently and consider-
+ably better when trained with larger batch sizes (or training
+crop sizes), leading to a new high-score on the challeng-
+ing Mapillary Vistas dataset in a single-scale, single-model
+inference setting. In future works, we will investigate the
+consequences of our approach for problems like object de-
+tection, instance-speciﬁc segmentation and learning in 3D.
+Derivations for gradient computation are provided in the
+Appendix.
+
+Acknowledgements. We acknowledge ﬁnancial support
+from project DIGIMAP, funded under grant #860375 by the
+Austrian Research Promotion Agency (FFG).
+
+Appendix – Derivation of Gradient ∂L
+∂x
+
+We follow the gradient derivations as provided in the original batch normalization paper [17] and rewrite them as a function
+
+of ˆx, starting with generally required derivatives for INPLACE-ABN and particular ones of INPLACE-ABN I.
+
+∂yj
+∂γ
+
+∂L
+∂γ
+
+= ˆxj ,
+
+=
+
+m
+(cid:88)
+
+j=1
+
+∂L
+∂yj
+
+∂yj
+∂γ
+
+=
+
+m
+(cid:88)
+
+j=1
+
+∂L
+∂yj
+
+ˆxj ,
+
+∂L
+∂yj
+
+∂yj
+∂β
+
+=
+
+m
+(cid:88)
+
+j=1
+
+∂L
+∂yj
+
+,
+
+∂yj
+∂β
+
+∂L
+∂β
+
+= 1 ,
+
+=
+
+m
+(cid:88)
+
+j=1
+
+= γ ,
+
+∂yj
+∂ ˆxj
+
+∂L
+∂ ˆxj
+
+=
+
+∂L
+∂yj
+
+∂yj
+∂ ˆxj
+
+=
+
+∂L
+∂yj
+
+γ ,
+
+∂ ˆxj
+∂σ2
+B
+
+= −
+
+1
+2(σ2
+B + (cid:15))
+
+xj − µB
+(cid:112)
+σ2
+B + (cid:15)
+
+= −
+
+ˆxj
+2(σ2
+B + (cid:15))
+
+,
+
+∂ ˆxj
+∂µB
+
+= −
+
+(cid:112)
+
+1
+σ2
+B + (cid:15)
+
+,
+
+∂L
+∂σ2
+B
+
+∂L
+∂µB
+
+=
+
+=
+
+m
+(cid:88)
+
+j=1
+m
+(cid:88)
+
+j=1
+
+∂L
+∂ ˆxj
+
+∂ ˆxj
+∂σ2
+B
+
+= −
+
+γ
+2(σ2
+B + (cid:15))
+
+ˆxj = −
+
+γ
+2(σ2
+B + (cid:15))
+
+∂L
+∂γ
+
+,
+
+∂L
+∂ ˆxj
+
+∂ ˆxj
+∂µB
+
+= −
+
+(cid:112)
+
+γ
+σ2
+B + (cid:15)
+
+= −
+
+(cid:112)
+
+γ
+σ2
+B + (cid:15)
+
+∂L
+∂β
+
+,
+
+m
+(cid:88)
+
+j=1
+m
+(cid:88)
+
+j=1
+
+∂L
+∂yj
+
+∂L
+∂yj
+
+∂σ2
+B
+∂xi
+
+=
+
+2(xi − µB)
+m
+
+,
+
+∂µB
+∂xi
+
+=
+
+1
+m
+
+,
+
+∂ ˆxi
+∂xi
+
+=
+
+(cid:112)
+
+1
+σ2
+B + (cid:15)
+
+,
+
+∂L
+∂xi
+
+=
+
+∂L
+∂ ˆxi
+
+∂ ˆxi
+∂xi
+
++
+
+∂L
+∂σ2
+B
+
+∂σ2
+B
+∂xi
+
++
+
+∂L
+∂µB
+
+∂µB
+∂xi
+
+=
+
+(cid:18) ∂L
+∂yi
+
+−
+
+1
+m
+
+∂L
+∂γ
+
+ˆxi −
+
+(cid:19)
+
+1
+m
+
+∂L
+∂β
+
+(cid:112)
+
+γ
+σ2
+B + (cid:15)
+
+.
+
+For INPLACE-ABN II, we write gradients ∂L
+
+∂γ and ∂L
+
+∂x as functions of y instead of ˆx in the following way:
+
+∂L
+∂γ
+
+=
+
+m
+(cid:88)
+
+j=1
+
+∂L
+∂yj
+
+ˆxj =
+
+m
+(cid:88)
+
+j=1
+
+∂L
+∂yj
+
+yj − β
+γ
+
+=
+
+1
+γ
+
+m
+(cid:88)
+
+j=1
+
+∂L
+∂yj
+
+yj −
+
+β
+γ
+
+m
+(cid:88)
+
+j=1
+
+∂L
+∂yj
+
+=
+
+
+
+
+
+m
+(cid:88)
+
+j=1
+
+1
+γ
+
+∂L
+∂yj
+
+
+
+ ,
+
+∂L
+∂β
+
+yj − β
+
+∂L
+∂xi
+
+=
+
+=
+
+=
+
+(cid:18) ∂L
+∂yi
+(cid:18) ∂L
+∂yi
+(cid:20) ∂L
+∂yi
+
+−
+
+−
+
+1
+m
+
+1
+m
+
+∂L
+∂γ
+
+∂L
+∂γ
+
+ˆxi −
+
+1
+m
+yi − β
+γ
+
+−
+
+1
+γm
+
+∂L
+∂γ
+
+yi −
+
+(cid:19)
+
+∂L
+∂β
+
+(cid:112)
+
+−
+
+∂L
+∂β
+
+1
+m
+(cid:18) ∂L
+∂β
+
+−
+
+1
+m
+
+γ
+σ2
+B + (cid:15)
+(cid:19)
+γ
+σ2
+B + (cid:15)
+(cid:19)(cid:21)
+∂L
+∂γ
+
+β
+γ
+
+(cid:112)
+
+(cid:112)
+
+γ
+σ2
+B + (cid:15)
+
+.
+
+References
+
+[1] H. Caesar, J. R. R. Uijlings, and V. Ferrari. COCO-Stuff:
+Thing and stuff classes in context. CoRR, abs/1612.03716,
+2016.
+
+[2] L. Chen, G. Papandreou, I. Kokkinos, K. Murphy, and A. L.
+Yuille. Deeplab: Semantic image segmentation with deep
+convolutional nets, atrous convolution, and fully connected
+CRFs. CoRR, abs/1606.00915, 2016.
+
+[3] L. Chen, G. Papandreou, F. Schroff, and H. Adam. Re-
+thinking atrous convolution for semantic image segmenta-
+tion. CoRR, abs/1706.05587, 2017.
+
+[4] T. Chen, B. Xu, C. Zhang, and C. Guestrin. Training deep
+nets with sublinear memory cost. CoRR, abs/1604.06174,
+2016.
+
+[5] M. Cordts, M. Omran, S. Ramos, T. Rehfeld, M. Enzweiler,
+R. Benenson, U. Franke, S. Roth, and B. Schiele. The
+Cityscapes dataset for semantic urban scene understanding.
+In (CVPR), 2016.
+
+[6] M. Courbariaux, Y. Bengio, and J.-P. David. Binaryconnect:
+Training deep neural networks with binary weights during
+propagations. In (NIPS). 2015.
+
+[7] J. Dai, H. Qi, Y. Xiong, Y. Li, G. Zhang, H. Hu, and
+
+Y. Wei.
+abs/1703.06211, 2017.
+
+Deformable convolutional networks.
+
+CoRR,
+
+[8] R. Gadde, V. Jampani, and P. V. Gehler. Semantic video cnns
+through representation warping. CoRR, abs/1708.03088,
+2017.
+
+[9] A. N. Gomez, M. Ren, R. Urtasun, and R. B. Grosse. The re-
+versible residual network: Backpropagation without storing
+activations. In (NIPS), December 2017.
+
+[10] A. Gruslys, R. Munos,
+
+I. Danihelka, M. Lanctot, and
+A. Graves. Memory-efﬁcient backpropagation through time.
+In (NIPS), 2016.
+
+[11] K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learning
+for image recognition. CoRR, abs/1512.03385, 2015.
+[12] K. He, X. Zhang, S. Ren, and J. Sun. Identity mappings in
+deep residual networks. CoRR, abs/1603.05027, 2016.
+[13] J. Hu, L. Shen, and G. Sun. Squeeze-and-excitation net-
+
+works. CoRR, abs/1709.01507, 2017.
+
+[14] G. Huang, Z. Liu, L. van der Maaten, and K. Q. Weinberger.
+Densely connected convolutional networks. In (CVPR), July
+2017.
+
+[15] I. Hubara, M. Courbariaux, D. Soudry, R. El-Yaniv, and
+Y. Bengio. Binarized neural networks. In (NIPS). 2016.
+[16] I. Hubara, M. Courbariaux, D. Soudry, R. El-Yaniv, and
+
+Y. Bengio. Quantized neural networks: Training neural net-
+works with low precision weights and activations. CoRR,
+abs/1609.07061, 2016.
+
+[17] S. Ioffe and C. Szegedy. Batch normalization: Accelerating
+deep network training by reducing internal covariate shift.
+CoRR, abs/1502.03167, 2015.
+
+[18] Y. Jia, E. Shelhamer, J. Donahue, S. Karayev, J. Long, R. Gir-
+shick, S. Guadarrama, and T. Darrell. Caffe: Convolu-
+tional architecture for fast feature embedding. arXiv preprint
+arXiv:1408.5093, 2014.
+
+[19] T. Lin, M. Maire, S. J. Belongie, L. D. Bourdev, R. B.
+Girshick, J. Hays, P. Perona, D. Ramanan, P. Dollár, and
+C. L. Zitnick. Microsoft COCO: Common objects in con-
+text. CoRR, abs/1405.0312, 2014.
+
+[20] A. L. Maas, A. Y. Hannun, and A. Y. Ng. Rectiﬁer non-
+In in
+linearities improve neural network acoustic models.
+ICML Workshop on Deep Learning for Audio, Speech and
+Language Processing, 2013.
+
+[21] J. Martens and I. Sutskever. Training Deep and Recurrent
+Networks with Hessian-Free Optimization, pages 479–535.
+Springer Berlin Heidelberg, 2012.
+
+[22] P. Micikevicius, S. Narang, J. Alben, G. F. Diamos,
+E. Elsen, D. Garcia, B. Ginsburg, M. Houston, O. Kuchaiev,
+G. Venkatesh, and H. Wu. Mixed precision training. CoRR,
+abs/1710.03740, 2017.
+
+[23] G. Neuhold, T. Ollmann, S. Rota Bulò, and P. Kontschieder.
+The mapillary vistas dataset for semantic understanding of
+street scenes. In (ICCV), October 2017.
+
+[24] G. Pleiss, D. Chen, G. Huang, T. Li, L. van der Maaten,
+and K. Q. Weinberger. Memory-efﬁcient implementation of
+densenets. CoRR, abs/1707.06990, 2017.
+
+[25] S. Rota Bulò, G. Neuhold, and P. Kontschieder. Loss max-
+pooling for semantic image segmentation. In (CVPR), July
+2017.
+
+[26] O. Russakovsky, J. Deng, H. Su, J. Krause, S. Satheesh,
+S. Ma, Z. Huang, A. Karphathy, A. Khosla, M. Bernstein,
+A. C. Berg, and L. Fei-Fei. Imagenet large scale visual recog-
+nition challenge. (IJCV), 2015.
+[27] K. Simonyan and A. Zisserman.
+
+Very deep convolu-
+tional networks for large-scale image recognition. CoRR,
+abs/1409.1556, 2014.
+
+[28] C. Szegedy, S. Ioffe, and V. Vanhoucke.
+
+Inception-v4,
+inception-resnet and the impact of residual connections on
+learning. CoRR, abs/1602.07261, 2016.
+
+[29] P. Wang, P. Chen, Y. Yuan, D. Liu, Z. Huang, X. Hou, and
+G. W. Cottrell. Understanding convolution for semantic seg-
+mentation. CoRR, abs/1702.08502, 2017.
+
+[30] Z. Wu, C. Shen, and A. van den Hengel. High-performance
+semantic segmentation using very deep fully convolutional
+networks. CoRR, abs/1604.04339, 2016.
+
+[31] Z. Wu, C. Shen, and A. van den Hengel. Wider or deeper:
+Revisiting the resnet model for visual recognition. CoRR,
+abs/1611.10080, 2016.
+
+[32] S. Xie, R. Girshick, P. Dollár, Z. Tu, and K. He. Aggregated
+residual transformations for deep neural networks. CoRR,
+abs/1611.05431, 2016.
+
+[33] B. Xu, N. Wang, T. Chen, and M. Li. Empirical evalua-
+tion of rectiﬁed activations in convolutional network. CoRR,
+abs/1505.00853, 2015.
+
+[34] S. Zagoruyko and N. Komodakis. Wide residual networks.
+
+In (BMVC), 2016.
+
+[35] Y. Zhang, H. Zhao, and J. Shi. LSUN2017 segmentation
+
+challenge winning team PSPNet, July 2017.
+
+[36] H. Zhao, J. Shi, X. Qi, X. Wang, and J. Jia. Pyramid scene
+
+parsing network. CoRR, abs/1612.01105, 2016.
+
+[37] B. Zhou, H. Zhao, X. Puig, S. Fidler, A. Barriuso, and
+A. Torralba. Semantic understanding of scenes through the
+ADE20K dataset. CoRR, abs/1608.05442, 2016.
+

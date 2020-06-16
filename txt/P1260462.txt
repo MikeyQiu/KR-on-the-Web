@@ -1,0 +1,3634 @@
+9
+1
+0
+2
+ 
+r
+p
+A
+ 
+5
+2
+ 
+ 
+]
+
+G
+L
+.
+s
+c
+[
+ 
+ 
+4
+v
+9
+2
+5
+4
+0
+.
+3
+0
+7
+1
+:
+v
+i
+X
+r
+a
+
+Task-based End-to-end Model Learning
+in Stochastic Optimization
+
+Priya L. Donti
+Dept. of Computer Science
+Dept. of Engr. & Public Policy
+Carnegie Mellon University
+Pittsburgh, PA 15213
+pdonti@cs.cmu.edu
+
+Brandon Amos
+Dept. of Computer Science
+Carnegie Mellon University
+Pittsburgh, PA 15213
+bamos@cs.cmu.edu
+
+J. Zico Kolter
+Dept. of Computer Science
+Carnegie Mellon University
+Pittsburgh, PA 15213
+zkolter@cs.cmu.edu
+
+Abstract
+
+With the increasing popularity of machine learning techniques, it has become com-
+mon to see prediction algorithms operating within some larger process. However,
+the criteria by which we train these algorithms often differ from the ultimate crite-
+ria on which we evaluate them. This paper proposes an end-to-end approach for
+learning probabilistic machine learning models in a manner that directly captures
+the ultimate task-based objective for which they will be used, within the context
+of stochastic programming. We present three experimental evaluations of the pro-
+posed approach: a classical inventory stock problem, a real-world electrical grid
+scheduling task, and a real-world energy storage arbitrage task. We show that the
+proposed approach can outperform both traditional modeling and purely black-box
+policy optimization approaches in these applications.
+
+1
+
+Introduction
+
+While prediction algorithms commonly operate within some larger process, the criteria by which
+we train these algorithms often differ from the ultimate criteria on which we evaluate them: the
+performance of the full “closed-loop” system on the ultimate task at hand. For instance, instead of
+merely classifying images in a standalone setting, one may want to use these classiﬁcations within
+planning and control tasks such as autonomous driving. While a typical image classiﬁcation algorithm
+might optimize accuracy or log likelihood, in a driving task we may ultimately care more about the
+difference between classifying a pedestrian as a tree vs. classifying a garbage can as a tree. Similarly,
+when we use a probabilistic prediction algorithm to generate forecasts of upcoming electricity demand,
+we then want to use these forecasts to minimize the costs of a scheduling procedure that allocates
+generation for a power grid. As these examples suggest, instead of using a “generic loss,” we instead
+may want to learn a model that approximates the ultimate task-based “true loss.”
+
+This paper considers an end-to-end approach for learning probabilistic machine learning models
+that directly capture the objective of their ultimate task. Formally, we consider probabilistic models
+in the context of stochastic programming, where the goal is to minimize some expected cost over
+the models’ probabilistic predictions, subject to some (potentially also probabilistic) constraints.
+As mentioned above, it is common to approach these problems in a two-step fashion: ﬁrst to ﬁt a
+predictive model to observed data by minimizing some criterion such as negative log-likelihood,
+and then to use this model to compute or approximate the necessary expected costs in the stochastic
+programming setting. While this procedure can work well in many instances, it ignores the fact
+that the true cost of the system (the optimization objective evaluated on actual instantiations in the
+real world) may beneﬁt from a model that actually attains worse overall likelihood, but makes more
+accurate predictions over certain manifolds of the underlying space.
+
+31st Conference on Neural Information Processing Systems (NIPS 2017), Long Beach, CA, USA.
+
+We propose to train a probabilistic model not (solely) for predictive accuracy, but so that–when it is
+later used within the loop of a stochastic programming procedure–it produces solutions that minimize
+the ultimate task-based loss. This formulation may seem somewhat counterintuitive, given that a
+“perfect” predictive model would of course also be the optimal model to use within a stochastic
+programming framework. However, the reality that all models do make errors illustrates that we
+should indeed look to a ﬁnal task-based objective to determine the proper error tradeoffs within a
+machine learning setting. This paper proposes one way to evaluate task-based tradeoffs in a fully
+automated fashion, by computing derivatives through the solution to the stochastic programming
+problem in a manner that can improve the underlying model.
+
+We begin by presenting background material and related work in areas spanning stochastic program-
+ming, end-to-end training, and optimizing alternative loss functions. We then describe our approach
+within the formal context of stochastic programming, and give a generic method for propagating task
+loss through these problems in a manner that can update the models. We report on three experimental
+evaluations of the proposed approach: a classical inventory stock problem, a real-world electrical grid
+scheduling task, and a real-world energy storage arbitrage task. We show that the proposed approach
+outperforms traditional modeling and purely black-box policy optimization approaches.
+
+2 Background and related work
+
+Stochastic programming Stochastic programming is a method for making decisions under un-
+certainty by modeling or optimizing objectives governed by a random process. It has applications
+in many domains such as energy [1], ﬁnance [2], and manufacturing [3], where the underlying
+probability distributions are either known or can be estimated. Common considerations include how
+to best model or approximate the underlying random variable, how to solve the resulting optimization
+problem, and how to then assess the quality of the resulting (approximate) solution [4].
+
+In cases where the underlying probability distribution is known but the objective cannot be solved
+analytically, it is common to use Monte Carlo sample average approximation methods, which
+draw multiple iid samples from the underlying probability distribution and then use deterministic
+optimization methods to solve the resultant problems [5]. In cases where the underlying distribution
+is not known, it is common to learn or estimate some model from observed samples [6].
+
+End-to-end training Recent years have seen a dramatic increase in the number of systems building
+on so-called “end-to-end” learning. Generally speaking, this term refers to systems where the end
+goal of the machine learning process is directly predicted from raw inputs [e.g. 7, 8]. In the context
+of deep learning systems, the term now traditionally refers to architectures where, for example, there
+is no explicit encoding of hand-tuned features on the data, but the system directly predicts what the
+image, text, etc. is from the raw inputs [9, 10, 11, 12, 13]. The context in which we use the term
+end-to-end is similar, but slightly more in line with its older usage: instead of (just) attempting to learn
+an output (with known and typically straightforward loss functions), we are speciﬁcally attempting to
+learn a model based upon an end-to-end task that the user is ultimately trying to accomplish. We feel
+that this concept–of describing the entire closed-loop performance of the system as evaluated on the
+real task at hand–is beneﬁcial to add to the notion of end-to-end learning.
+
+Also highly related to our work are recent efforts in end-to-end policy learning [14], using value
+iteration effectively as an optimization procedure in similar networks [15], and multi-objective
+optimization [16, 17, 18, 19]. These lines of work ﬁt more with the “pure” end-to-end approach
+we discuss later on (where models are eschewed for pure function approximation methods), but
+conceptually the approaches have similar motivations in modifying typically-optimized policies to
+address some task(s) directly. Of course, the actual methodological approaches are quite different,
+given our speciﬁc focus on stochastic programming as the black box of interest in our setting.
+
+Optimizing alternative loss functions There has been a great deal of work in recent years on
+using machine learning procedures to optimize different loss criteria than those “naturally” optimized
+by the algorithm. For example, Stoyanov et al. [20] and Hazan et al. [21] propose methods for
+optimizing loss criteria in structured prediction that are different from the inference procedure of
+the prediction algorithm; this work has also recently been extended to deep networks [22]. Recent
+work has also explored using auxiliary prediction losses to satisfy multiple objectives [23], learning
+
+2
+
+dynamics models that maximize control performance in Bayesian optimization [24], and learning
+adaptive predictive models via differentiation through a meta-learning optimization objective [25].
+
+The work we have found in the literature that most closely resembles our approach is the work of
+Bengio [26], which uses a neural network model for predicting ﬁnancial prices, and then optimizes the
+model based on returns obtained via a hedging strategy that employs it. We view this approach–of both
+using a model and then tuning that model to adapt to a (differentiable) procedure–as a philosophical
+predecessor to our own work.
+In concurrent work, Elmachtoub and Grigas [27] also propose
+an approach for tuning model parameters given optimization results, but in the context of linear
+programming and outside the context of deep networks. Whereas Bengio [26] and Elmachtoub and
+Grigas [27] use hand-crafted (but differentiable) algorithms to approximately attain some objective
+given a predictive model, our approach is tightly coupled to stochastic programming, where the
+explicit objective is to attempt to optimize the desired task cost via an exact optimization routine, but
+given underlying randomness. The notions of stochasticity are thus naturally quite different in our
+work, but we do hope that our work can bring back the original idea of task-based model learning.
+(Despite Bengio [26]’s original paper being nearly 20 years old, virtually all follow-on work has
+focused on the ﬁnancial application, and not on what we feel is the core idea of using a surrogate
+model within a task-driven optimization procedure.)
+
+3 End-to-end model learning in stochastic programming
+
+We ﬁrst formally deﬁne the stochastic modeling and optimization problems with which we are
+concerned. Let (x ∈ X , y ∈ Y) ∼ D denote standard input-output pairs drawn from some
+(real, unknown) distribution D. We also consider actions z ∈ Z that incur some expected loss
+LD(z) = Ex,y∼D[f (x, y, z)]. For instance, a power systems operator may try to allocate power
+generators z given past electricity demand x and future electricity demand y; this allocation’s loss
+corresponds to the over- or under-generation penalties incurred given future demand instantiations.
+If we knew D, then we could select optimal actions z(cid:63)
+D = argminz LD(z). However, in practice,
+the true distribution D is unknown. In this paper, we are interested in modeling the conditional
+distribution y|x using some parameterized model p(y|x; θ) in order to minimize the real-world cost of
+the policy implied by this parameterization. Speciﬁcally, we ﬁnd some parameters θ to parameterize
+p(y|x; θ) (as in the standard statistical setting) and then determine optimal actions z(cid:63)(x; θ) (via
+stochastic optimization) that correspond to our observed input x and the speciﬁc choice of parameters
+θ in our probabilistic model. Upon observing the costs of these actions z(cid:63)(x; θ) relative to true
+instantiations of x and y, we update our parameterized model p(y|x; θ) accordingly, calculate the
+resultant new z(cid:63)(x; θ), and repeat. The goal is to ﬁnd parameters θ such that the corresponding policy
+z(cid:63)(x; θ) optimizes the loss under the true joint distribution of x and y.
+
+Explicitly, we wish to choose θ to minimize the task loss L(θ) in the context of x, y ∼ D, i.e.
+
+minimize
+θ
+
+L(θ) = Ex,y∼D[f (x, y, z(cid:63)(x; θ))].
+
+Since in reality we do not know the distribution D, we obtain z(cid:63)(x; θ) via a proxy stochastic
+optimization problem for a ﬁxed instantiation of parameters θ, i.e.
+
+(1)
+
+(2)
+
+z(cid:63)(x; θ) = argmin
+
+Ey∼p(y|x;θ)[f (x, y, z)].
+
+z
+
+The above setting speciﬁes z(cid:63)(x; θ) using a simple (unconstrained) stochastic program, but in reality
+our decision may be subject to both probabilistic and deterministic constraints. We therefore consider
+more general decisions produced through a generic stochastic programming problem1
+
+z(cid:63)(x; θ) = argmin
+
+Ey∼p(y|x;θ)[f (x, y, z)]
+
+z
+
+subject to Ey∼p(y|x;θ)[gi(x, y, z)] ≤ 0,
+i = 1, . . . , neq.
+
+hi(z) = 0,
+
+i = 1, . . . , nineq
+
+(3)
+
+1It is standard to presume in stochastic programming that equality constraints depend only on decision
+variables (not random variables), as non-trivial random equality constraints are typically not possible to satisfy.
+
+3
+
+In this setting, the full task loss is more complex, since it captures both the expected cost and any
+deviations from the constraints. We can write this, for instance, as
+
+neq
+(cid:88)
+
+i=1
+
+nineq
+(cid:88)
+
+i=1
+
+L(θ) = Ex,y∼D[f (x, y, z(cid:63)(x; θ))]+
+
+I{Ex,y∼D[gi(x, y, z(cid:63)(x; θ))] ≤ 0}+
+
+Ex[I{hi(z(cid:63)(x; θ)) = 0}]
+
+(4)
+(where I(·) is the indicator function that is zero when its constraints are satisﬁed and inﬁnite other-
+wise). However, the basic intuition behind our approach remains the same for both the constrained
+and unconstrained cases: in both settings, we attempt to learn parameters of a probabilistic model not
+to produce strictly “accurate” predictions, but such that when we use the resultant model within a
+stochastic programming setting, the resulting decisions perform well under the true distribution.
+Actually solving this problem requires that we differentiate through the “argmin” operator z(cid:63)(x; θ)
+of the stochastic programming problem. This differentiation is not possible for all classes of opti-
+mization problems (the argmin operator may be discontinuous), but as we will show shortly, in many
+practical cases–including cases where the function and constraints are strongly convex–we can indeed
+efﬁciently compute these gradients even in the context of constrained optimization.
+
+3.1 Discussion and alternative approaches
+
+We highlight our approach in contrast to two alternative existing methods: traditional model learning
+and model-free black-box policy optimization. In traditional machine learning approaches, it is
+common to use θ to minimize the (conditional) log-likelihood of observed data under the model
+p(y|x; θ). This method corresponds to approximately solving the optimization problem
+
+minimize
+θ
+
+Ex,y∼D [− log p(y|x; θ)] .
+
+(5)
+
+If we then need to use the conditional distribution y|x to determine actions z within some later
+optimization setting, we commonly use the predictive model obtained from (5) directly. This
+approach has obvious advantages, in that the model-learning phase is well-justiﬁed independent of
+any future use in a task. However, it is also prone to poor performance in the common setting where
+the true distribution y|x cannot be represented within the class of distributions parameterized by θ, i.e.
+where the procedure suffers from model bias. Conceptually, the log-likelihood objective implicitly
+trades off between model error in different regions of the input/output space, but does so in a manner
+largely opaque to the modeler, and may ultimately not employ the correct tradeoffs for a given task.
+
+In contrast, there is an alternative approach to solving (1) that we describe as the model-free
+“black-box” policy optimization approach. Here, we forgo learning any model at all of the ran-
+dom variable y. Instead, we attempt to learn a policy mapping directly from inputs x to actions
+z(cid:63)(x; ¯θ) that minimize the loss L(¯θ) presented in (4) (where here ¯θ deﬁnes the form of the pol-
+icy itself, not a predictive model). While such model-free methods can perform well in many
+settings, they are often very data-inefﬁcient, as the policy class must have enough representa-
+tional power to describe sufﬁciently complex policies without recourse to any underlying model.2
+Algorithm 1 Task Loss Optimization
+Our approach offers an intermediate setting,
+where we do still use a surrogate model to deter-
+mine an optimal decision z(cid:63)(x; θ), yet we adapt
+this model based on the task loss instead of any
+model prediction accuracy. In practice, we typi-
+cally want to minimize some weighted combina-
+tion of log-likelihood and task loss, which can
+be easily accomplished given our approach.
+
+1: input: D // samples from true distribution
+2: initialize θ // some initial parameterization
+
+sample (x, y) ∼ D
+compute z(cid:63)(x; θ) via Equation (3)
+
+3: for t = 1, . . . , T do
+4:
+5:
+
+// step in violated constraint or objective
+if ∃i s.t. gi(x, y, z(cid:63)(x; θ)) > 0 then
+
+update θ with ∇θgi(x, y, z(cid:63)(x; θ))
+
+update θ with ∇θf (x, y, z(cid:63)(x; θ))
+
+6:
+7:
+8:
+9:
+10:
+end if
+11:
+12: end for
+
+else
+
+3.2 Optimizing task loss
+
+To solve the generic optimization problem (4),
+we can in principle adopt a straightforward (con-
+strained) stochastic gradient approach, as de-
+tailed in Algorithm 1. At each iteration, we
+
+2This distinction is roughly analogous to the policy search vs. model-based settings in reinforcement learning.
+However, for the purposes of this paper, we consider much simpler stochastic programs without the multiple
+rounds that occur in RL, and the extension of these techniques to a full RL setting remains as future work.
+
+4
+
+(a) Inventory stock problem
+
+(b) Load forecasting problem
+
+(c) Price forecasting problem
+
+Figure 1: Features x, model predictions y, and policy z for the three experiments.
+
+solve the proxy stochastic programming problem (3) to obtain z(cid:63)(x, θ), using the distribution deﬁned
+by our current values of θ. Then, we compute the true loss L(θ) using the observed value of y.
+If any of the inequality constraints gi in L(θ) are violated, we take a gradient step in the violated
+constraint; otherwise, we take a gradient step in the optimization objective f . We note that if any
+inequality constraints are probabilistic, Algorithm 1 must be adapted to employ mini-batches in order
+to determine whether these probabilistic constraints are satisﬁed. Alternatively, because even the gi
+constraints are probabilistic, it is common in practice to simply move a weighted version of these
+constraints to the objective, i.e., we modify the objective by adding some appropriate penalty times
+the positive part of the function, λgi(x, y, z)+, for some λ > 0. In practice, this has the effect of
+taking gradient steps jointly in all the violated constraints and the objective in the case that one or
+more inequality constraints are violated, often resulting in faster convergence. Note that we need
+only move stochastic constraints into the objective; deterministic constraints on the policy itself will
+always be satisﬁed by the optimizer, as they are independent of the model.
+
+3.3 Differentiating the optimization solution to a stochastic programming problem
+
+While the above presentation highlights the simplicity of the proposed approach, it avoids the issue
+of chief technical challenge to this approach, which is computing the gradient of an objective that
+depends upon the argmin operation z(cid:63)(x; θ). Speciﬁcally, we need to compute the term
+∂L
+∂θ
+
+∂z(cid:63)
+∂θ
+
+∂L
+∂z(cid:63)
+
+(6)
+
+=
+
+which involves the Jacobian ∂z(cid:63)
+∂θ . This is the Jacobian of the optimal solution with respect to the
+distribution parameters θ. Recent approaches have looked into similar argmin differentiations [28, 29],
+though the methodology we present here is more general and handles the stochasticity of the objective.
+
+At a high level, we begin by writing the KKT optimality conditions of the general stochastic
+programming problem (3). Differentiating these equations and applying the implicit function theorem
+gives a set of linear equations that we can solve to obtain the necessary Jacobians (with expectations
+over the distribution y ∼ p(y|x; θ) denoted Eyθ , and where g is the vector of inequality constraints)
+
+
++ ∂ (cid:80)nineq
+λi∇zEyθ gi(z)
+∂θ
+diag(λ) ∂Eyθ g(z)
+0
+
+i=1
+diag(λ) (∇zEyθ g(z))
+A
+
+diag(Eyθ g(z))
+0
+
+(∇zEyθ g(z))T AT
+
+∂∇zEyθ f (z)
+∂θ
+
+
+ = −
+
+zEyθ f (z) +
+
+zEyθ gi(z)
+
+nineq
+(cid:88)
+
+λi∇2
+
+
+
+
+
+
+
+
+
+
+
+
+
+∇2
+
+
+
+
+
+
+
+0
+0
+
+∂θ
+
+i=1
+
+∂z
+∂θ
+∂λ
+∂θ
+∂ν
+∂θ
+
+
+
+
+ .
+
+(7)
+The terms in these equations look somewhat complex, but fundamentally, the left side gives the
+optimality conditions of the convex problem, and the right side gives the derivatives of the relevant
+functions at the achieved solution with respect to the governing parameter θ. In practice, we calculate
+the right-hand terms by employing sequential quadratic programming [30] to ﬁnd the optimal policy
+z(cid:63)(x; θ) for the given parameters θ, using a recently-proposed approach for fast solution of the argmin
+differentiation for QPs [31] to solve the necessary linear equations; we then take the derivatives at the
+optimum produced by this strategy. Details of this approach are described in the appendix.
+
+4 Experiments
+
+We consider three applications of our task-based method: a synthetic inventory stock problem, a
+real-world energy scheduling task, and a real-world battery arbitrage task. We demonstrate that the
+task-based end-to-end approach can substantially improve upon other alternatives. Source code for
+all experiments is available at https://github.com/locuslab/e2e-model-learning.
+
+5
+
+4.1
+
+Inventory stock problem
+
+Problem deﬁnition To highlight the performance of the algorithm in a setting where the true
+underlying model is known to us, we consider a “conditional” variation of the classical inventory
+stock problem [4]. In this problem, a company must order some quantity z of a product to minimize
+costs over some stochastic demand y, whose distribution in turn is affected by some observed features
+x (Figure 1a). There are linear and quadratic costs on the amount of product ordered, plus different
+linear/quadratic costs on over-orders [z − y]+ and under-orders [y − z]+. The objective is given by
+
+fstock(y, z) = c0z +
+
+q0z2 + cb[y − z]+ +
+
+qb([y − z]+)2 + ch[z − y]+ +
+
+qh([z − y]+)2, (8)
+
+1
+2
+
+1
+2
+
+where [v]+ ≡ max{v, 0}. For a speciﬁc choice of probability model p(y|x; θ), our proxy stochastic
+programming problem can then be written as
+
+minimize
+z
+
+Ey∼p(y|x;θ)[fstock(y, z)].
+
+(9)
+
+To simplify the setting, we further assume that the demands are discrete, taking on values d1, . . . , dk
+with probabilities (conditional on x) (pθ)i ≡ p(y = di|x; θ). Thus our stochastic programming
+problem (9) can be written succinctly as a joint quadratic program3
+
+minimize
+z∈R,zb,zh∈Rk
+
+c0z +
+
+q0z2 +
+
+(pθ)i
+
+cb(zb)i +
+
+qb(zb)2
+
+i + ch(zh)i +
+
+qh(zh)2
+i
+
+1
+2
+
+(cid:18)
+
+k
+(cid:88)
+
+i=1
+
+1
+2
+
+(cid:19)
+
+(10)
+
+1
+2
+
+1
+2
+
+subject to d − z1 ≤ zb, z1 − d ≤ zh, z, zh, zb ≥ 0.
+
+Further details of this approach are given in the appendix.
+
+Experimental setup We examine our algorithm under two main conditions: where the true model
+is linear, and where it is nonlinear. In all cases, we generate problem instances by randomly sampling
+some x ∈ Rn and then generating p(y|x; θ) according to either p(y|x; θ) ∝ exp(ΘT x) (linear true
+model) or p(y|x; θ) ∝ exp((ΘT x)2) (nonlinear true model) for some Θ ∈ Rn×k. We compare the
+following approaches on these tasks: 1) the QP allocation based upon the true model (which performs
+optimally); 2) MLE approaches (with linear or nonlinear probability models) that ﬁt a model to
+the data, and then compute the allocation by solving the QP; 3) pure end-to-end policy-optimizing
+models (using linear or nonlinear hypotheses for the policy); and 4) our task-based learning models
+(with linear or nonlinear probability models). In all cases, we evaluate test performance by running
+on 1000 random examples, and evaluate performance over 10 folds of different true θ(cid:63) parameters.
+
+Figures 2(a) and (b) show the performance of these methods given a linear true model, with linear
+and nonlinear model hypotheses, respectively. As expected, the linear MLE approach performs best,
+as the true underlying model is in the class of distributions that it can represent and thus solving the
+stochastic programming problem is a very strong proxy for solving the true optimization problem
+under the real distribution. While the true model is also contained within the nonlinear MLE’s generic
+nonlinear distribution class, we see that this method requires more data to converge, and when given
+less data makes error tradeoffs that are ultimately not the correct tradeoffs for the task at hand; our
+task-based approach thus outperforms this approach. The task-based approach also substantially
+outperforms the policy-optimizing neural network, highlighting the fact that it is more data-efﬁcient
+to run the learning process “through” a reasonable model. Note that here it does not make a difference
+whether we use the linear or nonlinear model in the task-based approach.
+
+Figures 2(c) and (d) show performance in the case of a nonlinear true model, with linear and
+nonlinear model hypotheses, respectively. Case (c) represents the “non-realizable” case, where the
+true underlying distribution cannot be represented by the model hypothesis class. Here, the linear
+MLE, as expected, performs very poorly: it cannot capture the true underlying distribution, and thus
+the resultant stochastic programming solution would not be expected to perform well. The linear
+policy model similarly performs poorly. Importantly, the task-based approach with the linear model
+performs much better here: despite the fact that it still has a misspeciﬁed model, the task-based
+nature of the learning process lets us learn a different linear model than the MLE version, which is
+
+3This is referred to as a two-stage stochastic programming problem (though a very trivial example of one),
+where ﬁrst stage variables consist of the amount of product to buy before observing demand, and second-stage
+variables consist of how much to sell back or additionally purchase once the true demand has been revealed.
+
+6
+
+Figure 2: Inventory problem results for 10 runs over a representative instantiation of true parameters
+(c0 = 10, q0 = 2, cb = 30, qb = 14, ch = 10, qh = 2). Cost is evaluated over 1000 testing samples
+(lower is better). The linear MLE performs best for a true linear model. In all other cases, the
+task-based models outperform their MLE and policy counterparts.
+
+particularly tuned to the distribution and loss of the task. Finally, also as to be expected, the non-linear
+models perform better than the linear models in this scenario, but again with the task-based non-linear
+model outperforming the nonlinear MLE and end-to-end policy approaches.
+
+4.2 Load forecasting and generator scheduling
+
+We next consider a more realistic grid-scheduling task, based upon over 8 years of real electrical
+grid data. In this setting, a power system operator must decide how much electricity generation
+z ∈ R24 to schedule for each hour in the next 24 hours based on some (unknown) distribution over
+electricity demand (Figure 1b). Given a particular realization y of demand, we impose penalties for
+both generation excess (γe) and generation shortage (γs), with γs (cid:29) γe. We also add a quadratic
+regularization term, indicating a preference for generation schedules that closely match demand
+realizations. Finally, we impose a ramping constraint cr restricting the change in generation between
+consecutive timepoints, reﬂecting physical limitations associated with quick changes in electricity
+output levels. These are reasonable proxies for the actual economic costs incurred by electrical grid
+operators when scheduling generation, and can be written as the stochastic programming problem
+
+minimize
+z∈R24
+
+24
+(cid:88)
+
+i=1
+
+(cid:20)
+
+subject to |zi − zi−1| ≤ cr ∀i,
+
+Ey∼p(y|x;θ)
+
+γs[yi − zi]+ + γe[zi − yi]+ +
+
+(cid:21)
+
+(zi − yi)2
+
+1
+2
+
+(11)
+
+where [v]+ ≡ max{v, 0}. Assuming (as we will in our model), that yi is a Gaussian random
+variable with mean µi and variance σ2
+i , then this expectation has a closed form that can be computed
+via analytically integrating the Gaussian PDF.4 We then use sequential quadratic programming
+(SQP) to iteratively approximate the resultant convex objective as a quadratic objective, iterate until
+convergence, and then compute the necessary Jacobians using the quadratic approximation at the
+solution, which gives the correct Hessian and gradient terms. Details are given in the appendix.
+
+To develop a predictive model, we make use of a highly-tuned load forecasting methodology. Speciﬁ-
+cally, we input the past day’s electrical load and temperature, the next day’s temperature forecast,
+and additional features such as non-linear functions of the temperatures, binary indicators of week-
+ends or holidays, and yearly sinusoidal features. We then predict the electrical load over all 24
+
+4 Part of the philosophy behind applying this approach here is that we know the Gaussian assumption
+is incorrect: the true underlying load is neither Gaussian distributed nor homoskedastic. However, these
+assumptions are exceedingly common in practice, as they enable easy model learning and exact analytical
+solutions. Thus, training the (still Gaussian) system with a task-based loss retains computational tractability
+while still allowing us to modify the distribution’s parameters to improve actual performance on the task at hand.
+
+7
+
+Figure 4: Results for 10 runs of the generation-scheduling problem for representative decision
+parameters γe = 0.5, γs = 50, and cr = 0.4. (Lower loss is better.) As expected, the RMSE net
+achieves the lowest RMSE for its predictions. However, the task net outperforms the RMSE net on
+task loss by 38.6%, and the cost-weighted RMSE on task loss by 8.6%.
+
+hours of the next day. We employ a 2-hidden-layer neural network for this purpose, with an addi-
+tional residual connection from the inputs to the outputs initialized to the linear regression solution.
+An illustration of the architecture is shown in Fig-
+ure 3. We train the model to minimize the mean
+squared error between its predictions and the actual
+load (giving the mean prediction µi), and compute
+σ2
+i as the (constant) empirical variance between the
+predicted and actual values. In all cases we use 7
+years of data to train the model, and 1.75 subsequent
+years for testing.
+
+Using the (mean and variance) predictions of this
+base model, we obtain z(cid:63)(x; θ) by solving the gen-
+erator scheduling problem (11) and then adjusting
+network parameters to minimize the resultant task
+loss. We compare against a traditional stochastic
+programming model that minimizes just the RMSE,
+as well as a cost-weighted RMSE that periodically
+reweights training samples given their task loss.5 (A
+pure policy-optimizing network is not shown, as it could not sufﬁciently learn the ramp constraints.
+We could not obtain good performance for the policy optimizer even ignoring this infeasibility.)
+
+Figure 3: 2-hidden-layer neural network to
+predict hourly electric load for the next day.
+
+Figure 4 shows the performance of the three models on the testing dataset. As expected, the RMSE
+model performs best with respect to the RMSE of its predictions (its objective). However, the
+task-based model substantially outperforms the RMSE model when evaluated on task loss, the actual
+objective that the system operator cares about: speciﬁcally, we improve upon the performance of the
+traditional stochastic programming method by 38.6%. The cost-weighted RMSE’s performance is
+extremely variable, and overall, the task net improves upon this method by 8.6%.
+
+4.3 Price forecasting and battery storage
+
+Finally, we consider a battery arbitrage task, based upon 6 years of real electrical grid data. Here, a
+grid-scale battery must operate over a 24 hour period based on some (unknown) distribution over
+future electricity prices (Figure 1c). For each hour, the operator must decide how much to charge
+(zin ∈ R24) or discharge (zout ∈ R24) the battery, thus inducing a particular state of charge in the
+battery (zstate ∈ R24). Given a particular realization y of prices, the operator optimizes over: 1)
+proﬁts, 2) ﬂexibility to participate in other markets, by keeping the battery near half its capacity B
+(with weight λ), and 3) battery health, by discouraging rapid charging/discharging (with weight (cid:15),
+
+5It is worth noting that a cost-weighted RMSE approach is only possible when direct costs can be assigned
+independently to each decision point, i.e. when costs do not depend on multiple decision points (as in this
+experiment). Our task-based method, however, accommodates the (typical) more general setting.
+
+8
+
+Hyperparameters
+λ
+0.1
+1
+10
+35
+
+(cid:15)
+0.05
+0.5
+5
+15
+
+RMSE net
+
+Task-based net (our method) % Improvement
+
+−1.45 ± 4.67
+4.96 ± 4.85
+131 ± 145
+173 ± 7.38
+
+−2.92 ± 0.30
+2.28 ± 2.99
+95.9 ± 29.8
+170 ± 2.16
+
+102
+54
+27
+2
+
+Table 1: Task loss results for 10 runs each of the battery storage problem, given a lithium-ion battery
+with attributes B = 1, γeff = 0.9, cin = 0.5, and cout = 0.2. (Lower loss is better.) Our task-based net
+on average somewhat improves upon the RMSE net, and demonstrates more reliable performance.
+
+(cid:15) < λ). The battery also has a charging efﬁciency (γeff), limits on speed of charge (cin) and discharge
+(cout), and begins at half charge. This can be written as the stochastic programming problem
+(cid:35)
+
+minimize
+zin,zout,zstate∈R24
+
+Ey∼p(y|x;θ)
+
+yi(zin − zout)i + λ
+
+zstate −
+
++ (cid:15)(cid:107)zin(cid:107)2 + (cid:15)(cid:107)zout(cid:107)2
+
+(cid:13)
+(cid:13)
+(cid:13)
+(cid:13)
+
+B
+2
+
+(cid:13)
+2
+(cid:13)
+(cid:13)
+(cid:13)
+
+(cid:34) 24
+(cid:88)
+
+i=1
+
+(12)
+
+subject to zstate,i+1 = zstate,i − zout,i + γeffzin,i ∀i, zstate,1 = B/2,
+
+0 ≤ zin ≤ cin, 0 ≤ zout ≤ cout, 0 ≤ zstate ≤ B.
+
+Assuming (as we will in our model) that yi is a random variable with mean µi, then this expectation
+has a closed form that depends only on the mean. Further details are given in the appendix.
+
+To develop a predictive model for the mean, we use an architecture similar to that described in
+Section 4.2. In this case, we input the past day’s prices and temperature, the next day’s load forecasts
+and temperature forecasts, and additional features such as non-linear functions of the temperatures
+and temporal features similar to those in Section 4.2. We again train the model to minimize the
+mean squared error between the model’s predictions and the actual prices (giving the mean prediction
+µi), using about 5 years of data to train the model and 1 subsequent year for testing. Using the
+mean predictions of this base model, we then solve the storage scheduling problem by solving the
+optimization problem (12), again learning network parameters by minimizing the task loss. We
+compare against a traditional stochastic programming model that minimizes just the RMSE.
+
+Table 1 shows the performance of the two models on the testing dataset. As energy prices are difﬁcult
+to predict due to numerous outliers and price spikes, the models in this case are not as well-tuned as in
+our load forecasting experiment; thus, their performance is relatively variable. Even then, in all cases,
+our task-based model demonstrates better average performance than the RMSE model when evaluated
+on task loss, the objective most important to the battery operator (although the improvements are
+not statistically signiﬁcant). More interestingly, our task-based method shows less (and in some
+cases, far less) variability in performance than the RMSE-minimizing method. Qualitatively, our
+task-based method hedges against perverse events such as price spikes that could substantially affect
+the performance of a battery charging schedule. The task-based method thus yields more reliable
+performance than a pure RMSE-minimizing method in the case the models are inaccurate due to a
+high level of stochasticity in the prediction task.
+
+5 Conclusions and future work
+
+This paper proposes an end-to-end approach for learning machine learning models that will be used in
+the loop of a larger process. Speciﬁcally, we consider training probabilistic models in the context of
+stochastic programming to directly capture a task-based objective. Preliminary experiments indicate
+that our task-based learning model substantially outperforms MLE and policy-optimizing approaches
+in all but the (rare) case that the MLE model “perfectly” characterizes the underlying distribution.
+Our method also achieves a 38.6% performance improvement over a highly-optimized real-world
+stochastic programming algorithm for scheduling electricity generation based on predicted load.
+In the case of energy price prediction, where there is a high degree of inherent stochasticity in
+the problem, our method demonstrates more reliable task performance than a traditional predictive
+method. The task-based approach thus demonstrates promise in optimizing in-the-loop predictions.
+Future work includes an extension of our approach to stochastic learning models with multiple rounds,
+and further to model predictive control and full reinforcement learning settings.
+
+9
+
+Acknowledgments
+
+This material is based upon work supported by the National Science Foundation Graduate Research
+Fellowship Program under Grant No. DGE1252522, and by the Department of Energy Computational
+Science Graduate Fellowship under Grant No. DE-FG02-97ER25308. We thank Arunesh Sinha for
+providing helpful corrections.
+
+References
+
+[1] Stein W Wallace and Stein-Erik Fleten. Stochastic programming models in energy. Handbooks
+
+in operations research and management science, 10:637–677, 2003.
+
+[2] William T Ziemba and Raymond G Vickson. Stochastic optimization models in ﬁnance,
+
+volume 1. World Scientiﬁc, 2006.
+
+[3] John A Buzacott and J George Shanthikumar. Stochastic models of manufacturing systems,
+
+volume 4. Prentice Hall Englewood Cliffs, NJ, 1993.
+
+[4] Alexander Shapiro and Andy Philpott. A tutorial on stochastic programming. Manuscript.
+Available at www2.isye.gatech.edu/ashapiro/publications.html, 17, 2007.
+
+[5] Jeff Linderoth, Alexander Shapiro, and Stephen Wright. The empirical behavior of sampling
+methods for stochastic programming. Annals of Operations Research, 142(1):215–241, 2006.
+
+[6] R Tyrrell Rockafellar and Roger J-B Wets. Scenarios and policy aggregation in optimization
+
+under uncertainty. Mathematics of operations research, 16(1):119–147, 1991.
+
+[7] Yann LeCun, Urs Muller, Jan Ben, Eric Cosatto, and Beat Flepp. Off-road obstacle avoidance
+
+through end-to-end learning. In NIPS, pages 739–746, 2005.
+
+[8] Ryan W Thomas, Daniel H Friend, Luiz A Dasilva, and Allen B Mackenzie. Cognitive networks:
+adaptation and learning to achieve end-to-end performance objectives. IEEE Communications
+Magazine, 44(12):51–57, 2006.
+
+[9] Kai Wang, Boris Babenko, and Serge Belongie. End-to-end scene text recognition. In Computer
+Vision (ICCV), 2011 IEEE International Conference on, pages 1457–1464. IEEE, 2011.
+
+[10] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for im-
+age recognition. In Proceedings of the IEEE Conference on Computer Vision and Pattern
+Recognition, pages 770–778, 2016.
+
+[11] Tao Wang, David J Wu, Adam Coates, and Andrew Y Ng. End-to-end text recognition
+with convolutional neural networks. In Pattern Recognition (ICPR), 2012 21st International
+Conference on, pages 3304–3308. IEEE, 2012.
+
+[12] Alex Graves and Navdeep Jaitly. Towards end-to-end speech recognition with recurrent neural
+
+networks. In ICML, volume 14, pages 1764–1772, 2014.
+
+[13] Dario Amodei, Rishita Anubhai, Eric Battenberg, Carl Case, Jared Casper, Bryan Catanzaro,
+Jingdong Chen, Mike Chrzanowski, Adam Coates, Greg Diamos, et al. Deep speech 2: End-to-
+end speech recognition in english and mandarin. arXiv preprint arXiv:1512.02595, 2015.
+
+[14] Sergey Levine, Chelsea Finn, Trevor Darrell, and Pieter Abbeel. End-to-end training of deep
+
+visuomotor policies. Journal of Machine Learning Research, 17(39):1–40, 2016.
+
+[15] Aviv Tamar, Sergey Levine, Pieter Abbeel, YI WU, and Garrett Thomas. Value iteration
+
+networks. In Advances in Neural Information Processing Systems, pages 2146–2154, 2016.
+
+[16] Ken Harada, Jun Sakuma, and Shigenobu Kobayashi. Local search for multiobjective function
+optimization: pareto descent method. In Proceedings of the 8th annual conference on Genetic
+and evolutionary computation, pages 659–666. ACM, 2006.
+
+[17] Kristof Van Moffaert and Ann Nowé. Multi-objective reinforcement learning using sets of
+pareto dominating policies. Journal of Machine Learning Research, 15(1):3483–3512, 2014.
+
+10
+
+[18] Hossam Mossalam, Yannis M Assael, Diederik M Roijers, and Shimon Whiteson. Multi-
+
+objective deep reinforcement learning. arXiv preprint arXiv:1610.02707, 2016.
+
+[19] Marco A Wiering, Maikel Withagen, and M˘ad˘alina M Drugan. Model-based multi-objective
+In Adaptive Dynamic Programming and Reinforcement Learning
+
+reinforcement learning.
+(ADPRL), 2014 IEEE Symposium on, pages 1–6. IEEE, 2014.
+
+[20] Veselin Stoyanov, Alexander Ropson, and Jason Eisner. Empirical risk minimization of graphical
+model parameters given approximate inference, decoding, and model structure. International
+Conference on Artiﬁcial Intelligence and Statistics, 15:725–733, 2011. ISSN 15324435.
+
+[21] Tamir Hazan, Joseph Keshet, and David A McAllester. Direct loss minimization for structured
+
+prediction. In Advances in Neural Information Processing Systems, pages 1594–1602, 2010.
+
+[22] Yang Song, Alexander G Schwing, Richard S Zemel, and Raquel Urtasun. Training deep neural
+networks via direct loss minimization. In Proceedings of The 33rd International Conference on
+Machine Learning, pages 2169–2177, 2016.
+
+[23] Max Jaderberg, Volodymyr Mnih, Wojciech Marian Czarnecki, Tom Schaul, Joel Z Leibo,
+David Silver, and Koray Kavukcuoglu. Reinforcement learning with unsupervised auxiliary
+tasks. arXiv preprint arXiv:1611.05397, 2016.
+
+[24] Somil Bansal, Roberto Calandra, Ted Xiao, Sergey Levine, and Claire J Tomlin. Goal-driven
+dynamics learning via bayesian optimization. arXiv preprint arXiv:1703.09260, 2017.
+
+[25] Chelsea Finn, Pieter Abbeel, and Sergey Levine. Model-agnostic meta-learning for fast adapta-
+
+tion of deep networks. arXiv preprint arXiv:1703.03400, 2017.
+
+[26] Yoshua Bengio. Using a ﬁnancial training criterion rather than a prediction criterion. Interna-
+
+tional Journal of Neural Systems, 8(04):433–443, 1997.
+
+[27] Adam N Elmachtoub and Paul Grigas. Smart "predict, then optimize". arXiv preprint
+
+arXiv:1710.08005, 2017.
+
+[28] Stephen Gould, Basura Fernando, Anoop Cherian, Peter Anderson, Rodrigo Santa Cruz, and
+Edison Guo. On differentiating parameterized argmin and argmax problems with application to
+bi-level optimization. arXiv preprint arXiv:1607.05447, 2016.
+
+[29] Brandon Amos, Lei Xu, and J Zico Kolter. Input convex neural networks. arXiv preprint
+
+[30] Paul T Boggs and Jon W Tolle. Sequential quadratic programming. Acta numerica, 4:1–51,
+
+arXiv:1609.07152, 2016.
+
+1995.
+
+[31] Brandon Amos and J Zico Kolter. Optnet: Differentiable optimization as a layer in neural
+
+networks. arXiV preprint arXiv:1703.00443, 2017.
+
+[32] Sergey Ioffe and Christian Szegedy. Batch normalization: Accelerating deep network training
+
+by reducing internal covariate shift. arXiv preprint arXiv:1502.03167, 2015.
+
+[33] Diederik Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint
+
+arXiv:1412.6980, 2014.
+
+11
+
+A Appendix
+
+We present some computational and architectural details for the proposed task-based learning model,
+both in the general case and for the experiments described in Section 4.
+
+A.1 Differentiating the optimization solution to a stochastic programming problem
+
+The issue of chief technical challenge to our approach is computing the gradient of an objective that
+depends upon the argmin operation z(cid:63)(x; θ). Speciﬁcally, we need to compute the term
+∂L
+∂θ
+
+∂z(cid:63)
+∂θ
+
+∂L
+∂z(cid:63)
+
+(A.1)
+
+=
+
+which involves the Jacobian ∂z(cid:63)
+∂θ . This is the Jacobian of the optimal solution with respect to the
+distribution parameters θ. Recent approaches have looked into similar argmin differentiations [28, 29],
+though the methodology we present here is more general and handles the stochasticity of the objective.
+
+We begin by writing the KKT optimality conditions of the general stochastic programming problem
+(3), where all expectations are taken with respect to the modeled distribution y ∼ p(y|x; θ) (for
+compactness, denoted here as Eyθ ). Further, assuming the problem is convex means we can replace
+the general equality constraints h(z) = 0 with the linear constraint Az = b. A point (z, λ, ν) is a
+primal-dual optimal point if it satisﬁes
+
+Eyθ g(z) ≤ 0
+Az = b
+λ ≥ 0
+λ ◦ Eyθ g(z) = 0
+∇zEyθ f (z) + λT ∇zEyθ g(z) + AT ν = 0
+where here g denotes the vector of all inequality constraints (represented as a vector-valued function),
+and where we wrap the dependence on x and y into the functions f and gi themselves.
+
+(A.2)
+
+Differentiating these equations and applying the implicit function theorem gives a set of linear
+equations that we can solve to obtain the necessary Jacobians
+
+
+
+
+
+
+
+
+
+
+
+
+∇2
+
+zEyθ f (z) +
+
+λi∇2
+
+zEyθ gi(z)
+
+(∇zEyθ g(z))T AT
+
+nineq
+(cid:88)
+
+i=1
+diag(λ) (∇zEyθ g(z))
+A
+
+diag(Eyθ g(z))
+0
+
+0
+0
+
+
+
+
+∂z
+∂θ
+∂λ
+∂θ
+∂ν
+∂θ
+
+
+
+
+
+
+
+
+ = −
+
+
+
+
+∂∇zEyθ f (z)
+∂θ
+
+i=1
+
++ ∂ (cid:80)nineq
+λi∇zEyθ gi(z)
+∂θ
+diag(λ) ∂Eyθ g(z)
+0
+
+∂θ
+
+
+ .
+
+(A.3)
+
+The terms on the left side are the optimality conditions of the convex problem, and the terms on
+right side are the derivatives of the relevant functions at the achieved solution, with respect to the
+governing parameter θ. These equations will take slightly different forms depending on how the
+stochastic programming problem is solved, but are usually fairly straightforward to compute if the
+solution is solved in some “exact” manner (i.e., where second order information is used). In practice,
+we calculate the right side of this equation by employing sequential quadratic programming [30] to
+ﬁnd the optimal policy z(cid:63) for the given parameters θ, using a recently-proposed approach for fast
+solution of argmin differentiation for QPs [31] to solve the necessary linear equations; we then take
+the derivatives at the optimum produced by this strategy.
+
+A.2 Details on computation for inventory stock problem
+
+The objective for our “conditional” variation of the classical inventory stock problem is
+
+fstock(y, z) = c0z +
+
+q0z2 + cb[y − z]+ +
+
+qb([y − z]+)2 + ch[z − y]+ +
+
+qh([z − y]+)2 (A.4)
+
+1
+2
+
+1
+2
+
+1
+2
+
+where z is the amount of product ordered; y is the stochastic electricity demand (which is affected
+by features x); [v]+ ≡ max{v, 0}; and (c0, q0), (cb, qb), and (ch, qh) are linear and quadratic costs
+on the amount of product ordered, over-orders, and under-orders, respectively. Our proxy stochastic
+programming problem can then be written as
+
+minimize
+z
+
+L(θ) = Ey∼p(y|x;θ)[fstock(y, z)].
+
+(A.5)
+
+A1
+
+To simplify the setting, we further assume that the demands are discrete, taking on values d1, . . . , dk
+with probabilities (conditional on x) (pθ)i ≡ p(y = di|x; θ). Thus our stochastic programming
+problem (A.5) can be written succinctly as a joint quadratic program
+
+minimize
+z∈R,zb,zh∈Rk
+
+c0z +
+
+q0z2 +
+
+(pθ)i
+
+cb(zb)i +
+
+qb(zb)2
+
+i + ch(zh)i +
+
+qh(zh)2
+i
+
+1
+2
+
+(cid:18)
+
+k
+(cid:88)
+
+i=1
+
+1
+2
+
+1
+2
+
+(cid:19)
+
+(A.6)
+
+subject to d − z1 ≤ zb, z1 − d ≤ zh, z, zh, zb ≥ 0.
+
+To demonstrate the explicit formula for argmin operation Jacobians for this particular case (e.g.,
+to compute the terms in (A.3)), note that we can write the above QP in inequality form as
+minimize{z:Gz≤h}
+
+2 zT Qz + cT z with
+
+1
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+z =
+
+q0
+0
+0
+
+z
+zb
+zh
+
+ , Q =
+
+−d
+d
+0
+0
+0
+(A.7)
+Thus, for an optimal primal-dual solution (z(cid:63), λ(cid:63)), we can compute the Jacobian ∂z(cid:63)
+(the Jacobian
+∂pθ
+of the optimal solution with respect to the probability vector pθ mentioned above), via the formula
+
+−1 −I
+0
+0 −I
+1
+0
+0
+−1
+0 −I
+0
+0 −I
+0
+
+0
+0
+qhpθ
+
+c0
+cbpθ
+chpθ
+
+0
+qbpθ
+0
+
+ , G =
+
+ , c =
+
+, h =
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+.
+
+
+
+
+
+
+
+
+
+(cid:34) ∂z(cid:63)
+∂pθ
+∂λ(cid:63)
+∂pθ
+
+(cid:35)
+
+(cid:20)
+
+=
+
+Q
+
+GT
+
+D(λ(cid:63))G D(Gz(cid:63) − h)
+
+(cid:21)−1
+
+
+
+
+
+
+qbz(cid:63)
+qhz(cid:63)
+
+b + cb1
+h + ch1
+
+0
+
+0
+
+
+
+
+ ,
+
+(A.8)
+
+where D(·) denotes a diagonal matrix for an input vector. After solving the problem and computing
+these Jacobians, we can compute the overall gradient with respect to the task loss L(θ) via the chain
+rule
+
+∂z(cid:63)
+∂pθ
+where ∂pθ
+∂θ denotes the Jacobian of the model probabilities with respect to its parameters, which are
+computed in the typical manner. Note that in practice, these Jacobians need not be computed explicitly,
+but can be computed efﬁciently via backpropagation; we use a recently-developed differentiable
+batch QP solver [31] to both solve the optimization problem in QP form and compute its derivatives.
+
+∂L
+∂z(cid:63)
+
+∂pθ
+∂θ
+
+∂L
+∂θ
+
+(A.9)
+
+=
+
+A.3 Details on computation for power scheduling problem
+
+The objective for the load forecasting problem is given by
+
+minimize
+z∈R24
+
+24
+(cid:88)
+
+i=1
+
+Ey∼p(y|x;θ)
+
+(cid:20)
+γs[yi − zi]+ + γe[zi − yi]+ +
+
+(cid:21)
+
+(zi − yi)2
+
+1
+2
+
+(A.10)
+
+subject to |zi − zi−1| ≤ cr ∀i,
+
+where z is the generator schedule, y is the stochastic demand (which is affected by features x),
+[v]+ ≡ max{v, 0}, γe is an over-generation penalty, γs is an under-generation penalty, and cr is a
+ramping constraint. Assuming that yi is a Gaussian random variable with mean µi and variance σ2
+i ,
+then this expectation has a closed form that can be computed via analytically integrating the Gaussian
+PDF. Speciﬁcally, this closed form is
+
+Ey∼p(y|x;θ)
+
+(cid:20)
+γs[yi − zi]+ + γe[zi − yi]+ +
+
+(cid:21)
+
+(zi − yi)2
+
+1
+2
+
+= (γs + γe)(σ2p(zi; µ, σ2) + (zi − µ)F (zi; µ, σ2)) − γs(zi − µ)
+(cid:123)(cid:122)
+(cid:125)
+α(zi)
+
+(cid:124)
+
++
+
+((zi − µi)2 + σ2
+
+i ),
+
+1
+2
+
+(A.11)
+
+where p(z; µ, σ2) and F (z; µ, σ2) denote the Gaussian PDF and CDF, respectively with the given
+mean and variance. This is a convex function of z (not apparent in this form, but readily established
+
+A2
+
+because it is an expectation of a convex function), and we can thus optimize it efﬁciently and compute
+the necessary Jacobians.
+
+Speciﬁcally, we use sequential quadratic programming (SQP) to iteratively approximate the resultant
+convex objective as a quadratic objective, and iterate until convergence; speciﬁcally, we repeatedly
+solve
+
+z(k+1) = argmin
+
+zT diag
+
+1
+2
+
+z
+
+(cid:32)
+
+∂2α(z(k)
+i
+∂z2
+
+)
+
+(cid:33)
+
++ 1
+
+z +
+
+(cid:18) ∂α(z(k))
+∂z
+
+(cid:19)T
+
+− µ
+
+z
+
+subject to |zi − zi−1| ≤ cr ∀i
+
+until ||z(k+1) − z(k)|| < δ for a small δ, where
+
+(A.12)
+
+(A.13)
+
+= (γs + γe)F (z; µ, σ) − γs,
+
+∂α
+∂z
+∂2α
+∂z2 = (γs + γe)p(z; µ, σ).
+
+We then compute the necessary Jacobians using the quadratic approximation (A.12) at the solution,
+which gives the correct Hessian and gradient terms. We can furthermore differentiate the gradient and
+Hessian with respect to the underlying model parameters µ and σ2, again using a recently-developed
+batch QP solver [31].
+
+A.4 Details on computation for battery storage problem
+
+The objective for the battery storage problem is given by
+
+minimize
+zin,zout,zstate∈R24
+
+Ey∼p(y|x;θ)
+
+yi(zin − zout)i + λ
+
+zstate −
+
++ (cid:15)(cid:107)zin(cid:107)2 + (cid:15)(cid:107)zout(cid:107)2
+
+(cid:13)
+(cid:13)
+(cid:13)
+(cid:13)
+
+B
+2
+
+(cid:13)
+2
+(cid:13)
+(cid:13)
+(cid:13)
+
+(cid:34) 24
+(cid:88)
+
+i=1
+
+(cid:35)
+
+(A.14)
+
+subject to zstate,i+1 = zstate,i − zout,i + γeffzin,i ∀i, zstate,1 = B/2,
+
+0 ≤ zin ≤ cin, 0 ≤ zout ≤ cout, 0 ≤ zstate ≤ B,
+
+where zin, zout, zstate are decisions over the charge amount, discharge amount, and resultant state of
+the battery, respectively; y is the stochastic electricity price (which is affected by features x); B is the
+battery capacity; γeff is the battery charging efﬁciency; cin and cout are maximum hourly charge and
+discharge amounts, respectively; and λ and (cid:15) are hyperparameters related to ﬂexibility and battery
+health, respectively.
+
+Assuming yi is a random variable with mean µi, the expectation in the objective has a closed form:
+
+Ey∼p(y|x;θ)
+
+yi(zin − zout)i + λ
+
+zstate −
+
++ (cid:15)(cid:107)zin(cid:107)2 + (cid:15)(cid:107)zout(cid:107)2
+
+(cid:34) 24
+(cid:88)
+
+i=1
+
+24
+(cid:88)
+
+i=1
+
+(cid:13)
+(cid:13)
+(cid:13)
+(cid:13)
+
+(cid:13)
+(cid:13)
+(cid:13)
+(cid:13)
+
+B
+2
+
+(cid:13)
+2
+(cid:13)
+(cid:13)
+(cid:13)
+
+B
+2
+
+(cid:13)
+2
+(cid:13)
+(cid:13)
+(cid:13)
+
+=
+
+µi(zin − zout)i + λ
+
+zstate −
+
++ (cid:15)(cid:107)zin(cid:107)2 + (cid:15)(cid:107)zout(cid:107)2.
+
+(cid:35)
+
+(A.15)
+
+We can then write this expression in QP form as minimize{z:Gz≤h, Az=b}
+
+1
+
+2 zT Qz + cT z with
+
+0
+(cid:15)I
+0
+
+0
+0
+λI
+
+
+
+
+
+ , c =
+
+
+
+
+
+ ,
+
+µ
+−µ
+−λB1
+
+z =
+
+G =
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ , Q =
+
+
+
+zin
+zout
+zstate
+
+0
+0
+I
+0
+0
+−I
+0
+0
+I
+0
+0 −I
+0
+0
+I
+0 −I
+0
+
+(cid:15)I
+0
+0
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+cin
+0
+cout
+0
+B
+0
+
+where D1 =
+
+∈ R24×23 and D2 =
+
+∈ R24×23.
+
+(cid:21)
+
+(cid:20) I
+0
+
+(cid:21)
+
+(cid:20) 0
+I
+
+A3
+
+, h =
+
+, A =
+
+(cid:20)
+
+0
+γeffDT
+
+0
+
+1 −DT
+
+1 DT
+
+0, . . . , 0, 1
+1 − DT
+2
+
+(cid:21)
+
+b =
+
+(cid:20) B/2
+0
+
+(cid:21)
+
+,
+
+(A.16)
+
+For this experiment, we assume that yi is a lognormal random variable (with mean µi); thus, to
+obtain our predictions, we predict the mean of log(y) (i.e., we predict log(µ)). After obtaining
+these predictions, we solve (A.4), compute the necessary Jacobians at the solution, and update the
+underlying model parameter µ via backpropagation, again using [31].
+
+A.5
+
+Implementation notes
+
+For all linear models, we use a one-layer linear neural network with the appropriate input and output
+layer dimensions. For all nonlinear models, we use a two-hidden-layer neural network, where each
+“layer” is actually a combination of linear, batch norm [32], ReLU, and dropout (p = 0.2) layers
+with dimension 200. In both cases, we add an additional softmax layer in cases where probability
+distributions are being predicted.
+All models are implemented using PyTorchA.1 and employ the Adam optimizer [33]. All QPs
+are solved using a recently-developed differentiable batch QP solver [31], and Jacobians are also
+computed automatically using backpropagation via the same.
+
+Source code for all experiments is available at https://github.com/locuslab/
+e2e-model-learning.
+
+A.1https://pytorch.org
+
+A4
+
+9
+1
+0
+2
+ 
+r
+p
+A
+ 
+5
+2
+ 
+ 
+]
+
+G
+L
+.
+s
+c
+[
+ 
+ 
+4
+v
+9
+2
+5
+4
+0
+.
+3
+0
+7
+1
+:
+v
+i
+X
+r
+a
+
+Task-based End-to-end Model Learning
+in Stochastic Optimization
+
+Priya L. Donti
+Dept. of Computer Science
+Dept. of Engr. & Public Policy
+Carnegie Mellon University
+Pittsburgh, PA 15213
+pdonti@cs.cmu.edu
+
+Brandon Amos
+Dept. of Computer Science
+Carnegie Mellon University
+Pittsburgh, PA 15213
+bamos@cs.cmu.edu
+
+J. Zico Kolter
+Dept. of Computer Science
+Carnegie Mellon University
+Pittsburgh, PA 15213
+zkolter@cs.cmu.edu
+
+Abstract
+
+With the increasing popularity of machine learning techniques, it has become com-
+mon to see prediction algorithms operating within some larger process. However,
+the criteria by which we train these algorithms often differ from the ultimate crite-
+ria on which we evaluate them. This paper proposes an end-to-end approach for
+learning probabilistic machine learning models in a manner that directly captures
+the ultimate task-based objective for which they will be used, within the context
+of stochastic programming. We present three experimental evaluations of the pro-
+posed approach: a classical inventory stock problem, a real-world electrical grid
+scheduling task, and a real-world energy storage arbitrage task. We show that the
+proposed approach can outperform both traditional modeling and purely black-box
+policy optimization approaches in these applications.
+
+1
+
+Introduction
+
+While prediction algorithms commonly operate within some larger process, the criteria by which
+we train these algorithms often differ from the ultimate criteria on which we evaluate them: the
+performance of the full “closed-loop” system on the ultimate task at hand. For instance, instead of
+merely classifying images in a standalone setting, one may want to use these classiﬁcations within
+planning and control tasks such as autonomous driving. While a typical image classiﬁcation algorithm
+might optimize accuracy or log likelihood, in a driving task we may ultimately care more about the
+difference between classifying a pedestrian as a tree vs. classifying a garbage can as a tree. Similarly,
+when we use a probabilistic prediction algorithm to generate forecasts of upcoming electricity demand,
+we then want to use these forecasts to minimize the costs of a scheduling procedure that allocates
+generation for a power grid. As these examples suggest, instead of using a “generic loss,” we instead
+may want to learn a model that approximates the ultimate task-based “true loss.”
+
+This paper considers an end-to-end approach for learning probabilistic machine learning models
+that directly capture the objective of their ultimate task. Formally, we consider probabilistic models
+in the context of stochastic programming, where the goal is to minimize some expected cost over
+the models’ probabilistic predictions, subject to some (potentially also probabilistic) constraints.
+As mentioned above, it is common to approach these problems in a two-step fashion: ﬁrst to ﬁt a
+predictive model to observed data by minimizing some criterion such as negative log-likelihood,
+and then to use this model to compute or approximate the necessary expected costs in the stochastic
+programming setting. While this procedure can work well in many instances, it ignores the fact
+that the true cost of the system (the optimization objective evaluated on actual instantiations in the
+real world) may beneﬁt from a model that actually attains worse overall likelihood, but makes more
+accurate predictions over certain manifolds of the underlying space.
+
+31st Conference on Neural Information Processing Systems (NIPS 2017), Long Beach, CA, USA.
+
+We propose to train a probabilistic model not (solely) for predictive accuracy, but so that–when it is
+later used within the loop of a stochastic programming procedure–it produces solutions that minimize
+the ultimate task-based loss. This formulation may seem somewhat counterintuitive, given that a
+“perfect” predictive model would of course also be the optimal model to use within a stochastic
+programming framework. However, the reality that all models do make errors illustrates that we
+should indeed look to a ﬁnal task-based objective to determine the proper error tradeoffs within a
+machine learning setting. This paper proposes one way to evaluate task-based tradeoffs in a fully
+automated fashion, by computing derivatives through the solution to the stochastic programming
+problem in a manner that can improve the underlying model.
+
+We begin by presenting background material and related work in areas spanning stochastic program-
+ming, end-to-end training, and optimizing alternative loss functions. We then describe our approach
+within the formal context of stochastic programming, and give a generic method for propagating task
+loss through these problems in a manner that can update the models. We report on three experimental
+evaluations of the proposed approach: a classical inventory stock problem, a real-world electrical grid
+scheduling task, and a real-world energy storage arbitrage task. We show that the proposed approach
+outperforms traditional modeling and purely black-box policy optimization approaches.
+
+2 Background and related work
+
+Stochastic programming Stochastic programming is a method for making decisions under un-
+certainty by modeling or optimizing objectives governed by a random process. It has applications
+in many domains such as energy [1], ﬁnance [2], and manufacturing [3], where the underlying
+probability distributions are either known or can be estimated. Common considerations include how
+to best model or approximate the underlying random variable, how to solve the resulting optimization
+problem, and how to then assess the quality of the resulting (approximate) solution [4].
+
+In cases where the underlying probability distribution is known but the objective cannot be solved
+analytically, it is common to use Monte Carlo sample average approximation methods, which
+draw multiple iid samples from the underlying probability distribution and then use deterministic
+optimization methods to solve the resultant problems [5]. In cases where the underlying distribution
+is not known, it is common to learn or estimate some model from observed samples [6].
+
+End-to-end training Recent years have seen a dramatic increase in the number of systems building
+on so-called “end-to-end” learning. Generally speaking, this term refers to systems where the end
+goal of the machine learning process is directly predicted from raw inputs [e.g. 7, 8]. In the context
+of deep learning systems, the term now traditionally refers to architectures where, for example, there
+is no explicit encoding of hand-tuned features on the data, but the system directly predicts what the
+image, text, etc. is from the raw inputs [9, 10, 11, 12, 13]. The context in which we use the term
+end-to-end is similar, but slightly more in line with its older usage: instead of (just) attempting to learn
+an output (with known and typically straightforward loss functions), we are speciﬁcally attempting to
+learn a model based upon an end-to-end task that the user is ultimately trying to accomplish. We feel
+that this concept–of describing the entire closed-loop performance of the system as evaluated on the
+real task at hand–is beneﬁcial to add to the notion of end-to-end learning.
+
+Also highly related to our work are recent efforts in end-to-end policy learning [14], using value
+iteration effectively as an optimization procedure in similar networks [15], and multi-objective
+optimization [16, 17, 18, 19]. These lines of work ﬁt more with the “pure” end-to-end approach
+we discuss later on (where models are eschewed for pure function approximation methods), but
+conceptually the approaches have similar motivations in modifying typically-optimized policies to
+address some task(s) directly. Of course, the actual methodological approaches are quite different,
+given our speciﬁc focus on stochastic programming as the black box of interest in our setting.
+
+Optimizing alternative loss functions There has been a great deal of work in recent years on
+using machine learning procedures to optimize different loss criteria than those “naturally” optimized
+by the algorithm. For example, Stoyanov et al. [20] and Hazan et al. [21] propose methods for
+optimizing loss criteria in structured prediction that are different from the inference procedure of
+the prediction algorithm; this work has also recently been extended to deep networks [22]. Recent
+work has also explored using auxiliary prediction losses to satisfy multiple objectives [23], learning
+
+2
+
+dynamics models that maximize control performance in Bayesian optimization [24], and learning
+adaptive predictive models via differentiation through a meta-learning optimization objective [25].
+
+The work we have found in the literature that most closely resembles our approach is the work of
+Bengio [26], which uses a neural network model for predicting ﬁnancial prices, and then optimizes the
+model based on returns obtained via a hedging strategy that employs it. We view this approach–of both
+using a model and then tuning that model to adapt to a (differentiable) procedure–as a philosophical
+predecessor to our own work.
+In concurrent work, Elmachtoub and Grigas [27] also propose
+an approach for tuning model parameters given optimization results, but in the context of linear
+programming and outside the context of deep networks. Whereas Bengio [26] and Elmachtoub and
+Grigas [27] use hand-crafted (but differentiable) algorithms to approximately attain some objective
+given a predictive model, our approach is tightly coupled to stochastic programming, where the
+explicit objective is to attempt to optimize the desired task cost via an exact optimization routine, but
+given underlying randomness. The notions of stochasticity are thus naturally quite different in our
+work, but we do hope that our work can bring back the original idea of task-based model learning.
+(Despite Bengio [26]’s original paper being nearly 20 years old, virtually all follow-on work has
+focused on the ﬁnancial application, and not on what we feel is the core idea of using a surrogate
+model within a task-driven optimization procedure.)
+
+3 End-to-end model learning in stochastic programming
+
+We ﬁrst formally deﬁne the stochastic modeling and optimization problems with which we are
+concerned. Let (x ∈ X , y ∈ Y) ∼ D denote standard input-output pairs drawn from some
+(real, unknown) distribution D. We also consider actions z ∈ Z that incur some expected loss
+LD(z) = Ex,y∼D[f (x, y, z)]. For instance, a power systems operator may try to allocate power
+generators z given past electricity demand x and future electricity demand y; this allocation’s loss
+corresponds to the over- or under-generation penalties incurred given future demand instantiations.
+If we knew D, then we could select optimal actions z(cid:63)
+D = argminz LD(z). However, in practice,
+the true distribution D is unknown. In this paper, we are interested in modeling the conditional
+distribution y|x using some parameterized model p(y|x; θ) in order to minimize the real-world cost of
+the policy implied by this parameterization. Speciﬁcally, we ﬁnd some parameters θ to parameterize
+p(y|x; θ) (as in the standard statistical setting) and then determine optimal actions z(cid:63)(x; θ) (via
+stochastic optimization) that correspond to our observed input x and the speciﬁc choice of parameters
+θ in our probabilistic model. Upon observing the costs of these actions z(cid:63)(x; θ) relative to true
+instantiations of x and y, we update our parameterized model p(y|x; θ) accordingly, calculate the
+resultant new z(cid:63)(x; θ), and repeat. The goal is to ﬁnd parameters θ such that the corresponding policy
+z(cid:63)(x; θ) optimizes the loss under the true joint distribution of x and y.
+
+Explicitly, we wish to choose θ to minimize the task loss L(θ) in the context of x, y ∼ D, i.e.
+
+minimize
+θ
+
+L(θ) = Ex,y∼D[f (x, y, z(cid:63)(x; θ))].
+
+Since in reality we do not know the distribution D, we obtain z(cid:63)(x; θ) via a proxy stochastic
+optimization problem for a ﬁxed instantiation of parameters θ, i.e.
+
+(1)
+
+(2)
+
+z(cid:63)(x; θ) = argmin
+
+Ey∼p(y|x;θ)[f (x, y, z)].
+
+z
+
+The above setting speciﬁes z(cid:63)(x; θ) using a simple (unconstrained) stochastic program, but in reality
+our decision may be subject to both probabilistic and deterministic constraints. We therefore consider
+more general decisions produced through a generic stochastic programming problem1
+
+z(cid:63)(x; θ) = argmin
+
+Ey∼p(y|x;θ)[f (x, y, z)]
+
+z
+
+subject to Ey∼p(y|x;θ)[gi(x, y, z)] ≤ 0,
+i = 1, . . . , neq.
+
+hi(z) = 0,
+
+i = 1, . . . , nineq
+
+(3)
+
+1It is standard to presume in stochastic programming that equality constraints depend only on decision
+variables (not random variables), as non-trivial random equality constraints are typically not possible to satisfy.
+
+3
+
+In this setting, the full task loss is more complex, since it captures both the expected cost and any
+deviations from the constraints. We can write this, for instance, as
+
+neq
+(cid:88)
+
+i=1
+
+nineq
+(cid:88)
+
+i=1
+
+L(θ) = Ex,y∼D[f (x, y, z(cid:63)(x; θ))]+
+
+I{Ex,y∼D[gi(x, y, z(cid:63)(x; θ))] ≤ 0}+
+
+Ex[I{hi(z(cid:63)(x; θ)) = 0}]
+
+(4)
+(where I(·) is the indicator function that is zero when its constraints are satisﬁed and inﬁnite other-
+wise). However, the basic intuition behind our approach remains the same for both the constrained
+and unconstrained cases: in both settings, we attempt to learn parameters of a probabilistic model not
+to produce strictly “accurate” predictions, but such that when we use the resultant model within a
+stochastic programming setting, the resulting decisions perform well under the true distribution.
+Actually solving this problem requires that we differentiate through the “argmin” operator z(cid:63)(x; θ)
+of the stochastic programming problem. This differentiation is not possible for all classes of opti-
+mization problems (the argmin operator may be discontinuous), but as we will show shortly, in many
+practical cases–including cases where the function and constraints are strongly convex–we can indeed
+efﬁciently compute these gradients even in the context of constrained optimization.
+
+3.1 Discussion and alternative approaches
+
+We highlight our approach in contrast to two alternative existing methods: traditional model learning
+and model-free black-box policy optimization. In traditional machine learning approaches, it is
+common to use θ to minimize the (conditional) log-likelihood of observed data under the model
+p(y|x; θ). This method corresponds to approximately solving the optimization problem
+
+minimize
+θ
+
+Ex,y∼D [− log p(y|x; θ)] .
+
+(5)
+
+If we then need to use the conditional distribution y|x to determine actions z within some later
+optimization setting, we commonly use the predictive model obtained from (5) directly. This
+approach has obvious advantages, in that the model-learning phase is well-justiﬁed independent of
+any future use in a task. However, it is also prone to poor performance in the common setting where
+the true distribution y|x cannot be represented within the class of distributions parameterized by θ, i.e.
+where the procedure suffers from model bias. Conceptually, the log-likelihood objective implicitly
+trades off between model error in different regions of the input/output space, but does so in a manner
+largely opaque to the modeler, and may ultimately not employ the correct tradeoffs for a given task.
+
+In contrast, there is an alternative approach to solving (1) that we describe as the model-free
+“black-box” policy optimization approach. Here, we forgo learning any model at all of the ran-
+dom variable y. Instead, we attempt to learn a policy mapping directly from inputs x to actions
+z(cid:63)(x; ¯θ) that minimize the loss L(¯θ) presented in (4) (where here ¯θ deﬁnes the form of the pol-
+icy itself, not a predictive model). While such model-free methods can perform well in many
+settings, they are often very data-inefﬁcient, as the policy class must have enough representa-
+tional power to describe sufﬁciently complex policies without recourse to any underlying model.2
+Algorithm 1 Task Loss Optimization
+Our approach offers an intermediate setting,
+where we do still use a surrogate model to deter-
+mine an optimal decision z(cid:63)(x; θ), yet we adapt
+this model based on the task loss instead of any
+model prediction accuracy. In practice, we typi-
+cally want to minimize some weighted combina-
+tion of log-likelihood and task loss, which can
+be easily accomplished given our approach.
+
+1: input: D // samples from true distribution
+2: initialize θ // some initial parameterization
+
+sample (x, y) ∼ D
+compute z(cid:63)(x; θ) via Equation (3)
+
+3: for t = 1, . . . , T do
+4:
+5:
+
+// step in violated constraint or objective
+if ∃i s.t. gi(x, y, z(cid:63)(x; θ)) > 0 then
+
+update θ with ∇θgi(x, y, z(cid:63)(x; θ))
+
+update θ with ∇θf (x, y, z(cid:63)(x; θ))
+
+6:
+7:
+8:
+9:
+10:
+end if
+11:
+12: end for
+
+else
+
+3.2 Optimizing task loss
+
+To solve the generic optimization problem (4),
+we can in principle adopt a straightforward (con-
+strained) stochastic gradient approach, as de-
+tailed in Algorithm 1. At each iteration, we
+
+2This distinction is roughly analogous to the policy search vs. model-based settings in reinforcement learning.
+However, for the purposes of this paper, we consider much simpler stochastic programs without the multiple
+rounds that occur in RL, and the extension of these techniques to a full RL setting remains as future work.
+
+4
+
+(a) Inventory stock problem
+
+(b) Load forecasting problem
+
+(c) Price forecasting problem
+
+Figure 1: Features x, model predictions y, and policy z for the three experiments.
+
+solve the proxy stochastic programming problem (3) to obtain z(cid:63)(x, θ), using the distribution deﬁned
+by our current values of θ. Then, we compute the true loss L(θ) using the observed value of y.
+If any of the inequality constraints gi in L(θ) are violated, we take a gradient step in the violated
+constraint; otherwise, we take a gradient step in the optimization objective f . We note that if any
+inequality constraints are probabilistic, Algorithm 1 must be adapted to employ mini-batches in order
+to determine whether these probabilistic constraints are satisﬁed. Alternatively, because even the gi
+constraints are probabilistic, it is common in practice to simply move a weighted version of these
+constraints to the objective, i.e., we modify the objective by adding some appropriate penalty times
+the positive part of the function, λgi(x, y, z)+, for some λ > 0. In practice, this has the effect of
+taking gradient steps jointly in all the violated constraints and the objective in the case that one or
+more inequality constraints are violated, often resulting in faster convergence. Note that we need
+only move stochastic constraints into the objective; deterministic constraints on the policy itself will
+always be satisﬁed by the optimizer, as they are independent of the model.
+
+3.3 Differentiating the optimization solution to a stochastic programming problem
+
+While the above presentation highlights the simplicity of the proposed approach, it avoids the issue
+of chief technical challenge to this approach, which is computing the gradient of an objective that
+depends upon the argmin operation z(cid:63)(x; θ). Speciﬁcally, we need to compute the term
+∂L
+∂θ
+
+∂z(cid:63)
+∂θ
+
+∂L
+∂z(cid:63)
+
+(6)
+
+=
+
+which involves the Jacobian ∂z(cid:63)
+∂θ . This is the Jacobian of the optimal solution with respect to the
+distribution parameters θ. Recent approaches have looked into similar argmin differentiations [28, 29],
+though the methodology we present here is more general and handles the stochasticity of the objective.
+
+At a high level, we begin by writing the KKT optimality conditions of the general stochastic
+programming problem (3). Differentiating these equations and applying the implicit function theorem
+gives a set of linear equations that we can solve to obtain the necessary Jacobians (with expectations
+over the distribution y ∼ p(y|x; θ) denoted Eyθ , and where g is the vector of inequality constraints)
+
+
++ ∂ (cid:80)nineq
+λi∇zEyθ gi(z)
+∂θ
+diag(λ) ∂Eyθ g(z)
+0
+
+i=1
+diag(λ) (∇zEyθ g(z))
+A
+
+diag(Eyθ g(z))
+0
+
+(∇zEyθ g(z))T AT
+
+∂∇zEyθ f (z)
+∂θ
+
+
+ = −
+
+zEyθ f (z) +
+
+zEyθ gi(z)
+
+nineq
+(cid:88)
+
+λi∇2
+
+
+
+
+
+
+
+
+
+
+
+
+
+∇2
+
+
+
+
+
+
+
+0
+0
+
+∂θ
+
+i=1
+
+∂z
+∂θ
+∂λ
+∂θ
+∂ν
+∂θ
+
+
+
+
+ .
+
+(7)
+The terms in these equations look somewhat complex, but fundamentally, the left side gives the
+optimality conditions of the convex problem, and the right side gives the derivatives of the relevant
+functions at the achieved solution with respect to the governing parameter θ. In practice, we calculate
+the right-hand terms by employing sequential quadratic programming [30] to ﬁnd the optimal policy
+z(cid:63)(x; θ) for the given parameters θ, using a recently-proposed approach for fast solution of the argmin
+differentiation for QPs [31] to solve the necessary linear equations; we then take the derivatives at the
+optimum produced by this strategy. Details of this approach are described in the appendix.
+
+4 Experiments
+
+We consider three applications of our task-based method: a synthetic inventory stock problem, a
+real-world energy scheduling task, and a real-world battery arbitrage task. We demonstrate that the
+task-based end-to-end approach can substantially improve upon other alternatives. Source code for
+all experiments is available at https://github.com/locuslab/e2e-model-learning.
+
+5
+
+4.1
+
+Inventory stock problem
+
+Problem deﬁnition To highlight the performance of the algorithm in a setting where the true
+underlying model is known to us, we consider a “conditional” variation of the classical inventory
+stock problem [4]. In this problem, a company must order some quantity z of a product to minimize
+costs over some stochastic demand y, whose distribution in turn is affected by some observed features
+x (Figure 1a). There are linear and quadratic costs on the amount of product ordered, plus different
+linear/quadratic costs on over-orders [z − y]+ and under-orders [y − z]+. The objective is given by
+
+fstock(y, z) = c0z +
+
+q0z2 + cb[y − z]+ +
+
+qb([y − z]+)2 + ch[z − y]+ +
+
+qh([z − y]+)2, (8)
+
+1
+2
+
+1
+2
+
+where [v]+ ≡ max{v, 0}. For a speciﬁc choice of probability model p(y|x; θ), our proxy stochastic
+programming problem can then be written as
+
+minimize
+z
+
+Ey∼p(y|x;θ)[fstock(y, z)].
+
+(9)
+
+To simplify the setting, we further assume that the demands are discrete, taking on values d1, . . . , dk
+with probabilities (conditional on x) (pθ)i ≡ p(y = di|x; θ). Thus our stochastic programming
+problem (9) can be written succinctly as a joint quadratic program3
+
+minimize
+z∈R,zb,zh∈Rk
+
+c0z +
+
+q0z2 +
+
+(pθ)i
+
+cb(zb)i +
+
+qb(zb)2
+
+i + ch(zh)i +
+
+qh(zh)2
+i
+
+1
+2
+
+(cid:18)
+
+k
+(cid:88)
+
+i=1
+
+1
+2
+
+(cid:19)
+
+(10)
+
+1
+2
+
+1
+2
+
+subject to d − z1 ≤ zb, z1 − d ≤ zh, z, zh, zb ≥ 0.
+
+Further details of this approach are given in the appendix.
+
+Experimental setup We examine our algorithm under two main conditions: where the true model
+is linear, and where it is nonlinear. In all cases, we generate problem instances by randomly sampling
+some x ∈ Rn and then generating p(y|x; θ) according to either p(y|x; θ) ∝ exp(ΘT x) (linear true
+model) or p(y|x; θ) ∝ exp((ΘT x)2) (nonlinear true model) for some Θ ∈ Rn×k. We compare the
+following approaches on these tasks: 1) the QP allocation based upon the true model (which performs
+optimally); 2) MLE approaches (with linear or nonlinear probability models) that ﬁt a model to
+the data, and then compute the allocation by solving the QP; 3) pure end-to-end policy-optimizing
+models (using linear or nonlinear hypotheses for the policy); and 4) our task-based learning models
+(with linear or nonlinear probability models). In all cases, we evaluate test performance by running
+on 1000 random examples, and evaluate performance over 10 folds of different true θ(cid:63) parameters.
+
+Figures 2(a) and (b) show the performance of these methods given a linear true model, with linear
+and nonlinear model hypotheses, respectively. As expected, the linear MLE approach performs best,
+as the true underlying model is in the class of distributions that it can represent and thus solving the
+stochastic programming problem is a very strong proxy for solving the true optimization problem
+under the real distribution. While the true model is also contained within the nonlinear MLE’s generic
+nonlinear distribution class, we see that this method requires more data to converge, and when given
+less data makes error tradeoffs that are ultimately not the correct tradeoffs for the task at hand; our
+task-based approach thus outperforms this approach. The task-based approach also substantially
+outperforms the policy-optimizing neural network, highlighting the fact that it is more data-efﬁcient
+to run the learning process “through” a reasonable model. Note that here it does not make a difference
+whether we use the linear or nonlinear model in the task-based approach.
+
+Figures 2(c) and (d) show performance in the case of a nonlinear true model, with linear and
+nonlinear model hypotheses, respectively. Case (c) represents the “non-realizable” case, where the
+true underlying distribution cannot be represented by the model hypothesis class. Here, the linear
+MLE, as expected, performs very poorly: it cannot capture the true underlying distribution, and thus
+the resultant stochastic programming solution would not be expected to perform well. The linear
+policy model similarly performs poorly. Importantly, the task-based approach with the linear model
+performs much better here: despite the fact that it still has a misspeciﬁed model, the task-based
+nature of the learning process lets us learn a different linear model than the MLE version, which is
+
+3This is referred to as a two-stage stochastic programming problem (though a very trivial example of one),
+where ﬁrst stage variables consist of the amount of product to buy before observing demand, and second-stage
+variables consist of how much to sell back or additionally purchase once the true demand has been revealed.
+
+6
+
+Figure 2: Inventory problem results for 10 runs over a representative instantiation of true parameters
+(c0 = 10, q0 = 2, cb = 30, qb = 14, ch = 10, qh = 2). Cost is evaluated over 1000 testing samples
+(lower is better). The linear MLE performs best for a true linear model. In all other cases, the
+task-based models outperform their MLE and policy counterparts.
+
+particularly tuned to the distribution and loss of the task. Finally, also as to be expected, the non-linear
+models perform better than the linear models in this scenario, but again with the task-based non-linear
+model outperforming the nonlinear MLE and end-to-end policy approaches.
+
+4.2 Load forecasting and generator scheduling
+
+We next consider a more realistic grid-scheduling task, based upon over 8 years of real electrical
+grid data. In this setting, a power system operator must decide how much electricity generation
+z ∈ R24 to schedule for each hour in the next 24 hours based on some (unknown) distribution over
+electricity demand (Figure 1b). Given a particular realization y of demand, we impose penalties for
+both generation excess (γe) and generation shortage (γs), with γs (cid:29) γe. We also add a quadratic
+regularization term, indicating a preference for generation schedules that closely match demand
+realizations. Finally, we impose a ramping constraint cr restricting the change in generation between
+consecutive timepoints, reﬂecting physical limitations associated with quick changes in electricity
+output levels. These are reasonable proxies for the actual economic costs incurred by electrical grid
+operators when scheduling generation, and can be written as the stochastic programming problem
+
+minimize
+z∈R24
+
+24
+(cid:88)
+
+i=1
+
+(cid:20)
+
+subject to |zi − zi−1| ≤ cr ∀i,
+
+Ey∼p(y|x;θ)
+
+γs[yi − zi]+ + γe[zi − yi]+ +
+
+(cid:21)
+
+(zi − yi)2
+
+1
+2
+
+(11)
+
+where [v]+ ≡ max{v, 0}. Assuming (as we will in our model), that yi is a Gaussian random
+variable with mean µi and variance σ2
+i , then this expectation has a closed form that can be computed
+via analytically integrating the Gaussian PDF.4 We then use sequential quadratic programming
+(SQP) to iteratively approximate the resultant convex objective as a quadratic objective, iterate until
+convergence, and then compute the necessary Jacobians using the quadratic approximation at the
+solution, which gives the correct Hessian and gradient terms. Details are given in the appendix.
+
+To develop a predictive model, we make use of a highly-tuned load forecasting methodology. Speciﬁ-
+cally, we input the past day’s electrical load and temperature, the next day’s temperature forecast,
+and additional features such as non-linear functions of the temperatures, binary indicators of week-
+ends or holidays, and yearly sinusoidal features. We then predict the electrical load over all 24
+
+4 Part of the philosophy behind applying this approach here is that we know the Gaussian assumption
+is incorrect: the true underlying load is neither Gaussian distributed nor homoskedastic. However, these
+assumptions are exceedingly common in practice, as they enable easy model learning and exact analytical
+solutions. Thus, training the (still Gaussian) system with a task-based loss retains computational tractability
+while still allowing us to modify the distribution’s parameters to improve actual performance on the task at hand.
+
+7
+
+Figure 4: Results for 10 runs of the generation-scheduling problem for representative decision
+parameters γe = 0.5, γs = 50, and cr = 0.4. (Lower loss is better.) As expected, the RMSE net
+achieves the lowest RMSE for its predictions. However, the task net outperforms the RMSE net on
+task loss by 38.6%, and the cost-weighted RMSE on task loss by 8.6%.
+
+hours of the next day. We employ a 2-hidden-layer neural network for this purpose, with an addi-
+tional residual connection from the inputs to the outputs initialized to the linear regression solution.
+An illustration of the architecture is shown in Fig-
+ure 3. We train the model to minimize the mean
+squared error between its predictions and the actual
+load (giving the mean prediction µi), and compute
+σ2
+i as the (constant) empirical variance between the
+predicted and actual values. In all cases we use 7
+years of data to train the model, and 1.75 subsequent
+years for testing.
+
+Using the (mean and variance) predictions of this
+base model, we obtain z(cid:63)(x; θ) by solving the gen-
+erator scheduling problem (11) and then adjusting
+network parameters to minimize the resultant task
+loss. We compare against a traditional stochastic
+programming model that minimizes just the RMSE,
+as well as a cost-weighted RMSE that periodically
+reweights training samples given their task loss.5 (A
+pure policy-optimizing network is not shown, as it could not sufﬁciently learn the ramp constraints.
+We could not obtain good performance for the policy optimizer even ignoring this infeasibility.)
+
+Figure 3: 2-hidden-layer neural network to
+predict hourly electric load for the next day.
+
+Figure 4 shows the performance of the three models on the testing dataset. As expected, the RMSE
+model performs best with respect to the RMSE of its predictions (its objective). However, the
+task-based model substantially outperforms the RMSE model when evaluated on task loss, the actual
+objective that the system operator cares about: speciﬁcally, we improve upon the performance of the
+traditional stochastic programming method by 38.6%. The cost-weighted RMSE’s performance is
+extremely variable, and overall, the task net improves upon this method by 8.6%.
+
+4.3 Price forecasting and battery storage
+
+Finally, we consider a battery arbitrage task, based upon 6 years of real electrical grid data. Here, a
+grid-scale battery must operate over a 24 hour period based on some (unknown) distribution over
+future electricity prices (Figure 1c). For each hour, the operator must decide how much to charge
+(zin ∈ R24) or discharge (zout ∈ R24) the battery, thus inducing a particular state of charge in the
+battery (zstate ∈ R24). Given a particular realization y of prices, the operator optimizes over: 1)
+proﬁts, 2) ﬂexibility to participate in other markets, by keeping the battery near half its capacity B
+(with weight λ), and 3) battery health, by discouraging rapid charging/discharging (with weight (cid:15),
+
+5It is worth noting that a cost-weighted RMSE approach is only possible when direct costs can be assigned
+independently to each decision point, i.e. when costs do not depend on multiple decision points (as in this
+experiment). Our task-based method, however, accommodates the (typical) more general setting.
+
+8
+
+Hyperparameters
+λ
+0.1
+1
+10
+35
+
+(cid:15)
+0.05
+0.5
+5
+15
+
+RMSE net
+
+Task-based net (our method) % Improvement
+
+−1.45 ± 4.67
+4.96 ± 4.85
+131 ± 145
+173 ± 7.38
+
+−2.92 ± 0.30
+2.28 ± 2.99
+95.9 ± 29.8
+170 ± 2.16
+
+102
+54
+27
+2
+
+Table 1: Task loss results for 10 runs each of the battery storage problem, given a lithium-ion battery
+with attributes B = 1, γeff = 0.9, cin = 0.5, and cout = 0.2. (Lower loss is better.) Our task-based net
+on average somewhat improves upon the RMSE net, and demonstrates more reliable performance.
+
+(cid:15) < λ). The battery also has a charging efﬁciency (γeff), limits on speed of charge (cin) and discharge
+(cout), and begins at half charge. This can be written as the stochastic programming problem
+(cid:35)
+
+minimize
+zin,zout,zstate∈R24
+
+Ey∼p(y|x;θ)
+
+yi(zin − zout)i + λ
+
+zstate −
+
++ (cid:15)(cid:107)zin(cid:107)2 + (cid:15)(cid:107)zout(cid:107)2
+
+(cid:13)
+(cid:13)
+(cid:13)
+(cid:13)
+
+B
+2
+
+(cid:13)
+2
+(cid:13)
+(cid:13)
+(cid:13)
+
+(cid:34) 24
+(cid:88)
+
+i=1
+
+(12)
+
+subject to zstate,i+1 = zstate,i − zout,i + γeffzin,i ∀i, zstate,1 = B/2,
+
+0 ≤ zin ≤ cin, 0 ≤ zout ≤ cout, 0 ≤ zstate ≤ B.
+
+Assuming (as we will in our model) that yi is a random variable with mean µi, then this expectation
+has a closed form that depends only on the mean. Further details are given in the appendix.
+
+To develop a predictive model for the mean, we use an architecture similar to that described in
+Section 4.2. In this case, we input the past day’s prices and temperature, the next day’s load forecasts
+and temperature forecasts, and additional features such as non-linear functions of the temperatures
+and temporal features similar to those in Section 4.2. We again train the model to minimize the
+mean squared error between the model’s predictions and the actual prices (giving the mean prediction
+µi), using about 5 years of data to train the model and 1 subsequent year for testing. Using the
+mean predictions of this base model, we then solve the storage scheduling problem by solving the
+optimization problem (12), again learning network parameters by minimizing the task loss. We
+compare against a traditional stochastic programming model that minimizes just the RMSE.
+
+Table 1 shows the performance of the two models on the testing dataset. As energy prices are difﬁcult
+to predict due to numerous outliers and price spikes, the models in this case are not as well-tuned as in
+our load forecasting experiment; thus, their performance is relatively variable. Even then, in all cases,
+our task-based model demonstrates better average performance than the RMSE model when evaluated
+on task loss, the objective most important to the battery operator (although the improvements are
+not statistically signiﬁcant). More interestingly, our task-based method shows less (and in some
+cases, far less) variability in performance than the RMSE-minimizing method. Qualitatively, our
+task-based method hedges against perverse events such as price spikes that could substantially affect
+the performance of a battery charging schedule. The task-based method thus yields more reliable
+performance than a pure RMSE-minimizing method in the case the models are inaccurate due to a
+high level of stochasticity in the prediction task.
+
+5 Conclusions and future work
+
+This paper proposes an end-to-end approach for learning machine learning models that will be used in
+the loop of a larger process. Speciﬁcally, we consider training probabilistic models in the context of
+stochastic programming to directly capture a task-based objective. Preliminary experiments indicate
+that our task-based learning model substantially outperforms MLE and policy-optimizing approaches
+in all but the (rare) case that the MLE model “perfectly” characterizes the underlying distribution.
+Our method also achieves a 38.6% performance improvement over a highly-optimized real-world
+stochastic programming algorithm for scheduling electricity generation based on predicted load.
+In the case of energy price prediction, where there is a high degree of inherent stochasticity in
+the problem, our method demonstrates more reliable task performance than a traditional predictive
+method. The task-based approach thus demonstrates promise in optimizing in-the-loop predictions.
+Future work includes an extension of our approach to stochastic learning models with multiple rounds,
+and further to model predictive control and full reinforcement learning settings.
+
+9
+
+Acknowledgments
+
+This material is based upon work supported by the National Science Foundation Graduate Research
+Fellowship Program under Grant No. DGE1252522, and by the Department of Energy Computational
+Science Graduate Fellowship under Grant No. DE-FG02-97ER25308. We thank Arunesh Sinha for
+providing helpful corrections.
+
+References
+
+[1] Stein W Wallace and Stein-Erik Fleten. Stochastic programming models in energy. Handbooks
+
+in operations research and management science, 10:637–677, 2003.
+
+[2] William T Ziemba and Raymond G Vickson. Stochastic optimization models in ﬁnance,
+
+volume 1. World Scientiﬁc, 2006.
+
+[3] John A Buzacott and J George Shanthikumar. Stochastic models of manufacturing systems,
+
+volume 4. Prentice Hall Englewood Cliffs, NJ, 1993.
+
+[4] Alexander Shapiro and Andy Philpott. A tutorial on stochastic programming. Manuscript.
+Available at www2.isye.gatech.edu/ashapiro/publications.html, 17, 2007.
+
+[5] Jeff Linderoth, Alexander Shapiro, and Stephen Wright. The empirical behavior of sampling
+methods for stochastic programming. Annals of Operations Research, 142(1):215–241, 2006.
+
+[6] R Tyrrell Rockafellar and Roger J-B Wets. Scenarios and policy aggregation in optimization
+
+under uncertainty. Mathematics of operations research, 16(1):119–147, 1991.
+
+[7] Yann LeCun, Urs Muller, Jan Ben, Eric Cosatto, and Beat Flepp. Off-road obstacle avoidance
+
+through end-to-end learning. In NIPS, pages 739–746, 2005.
+
+[8] Ryan W Thomas, Daniel H Friend, Luiz A Dasilva, and Allen B Mackenzie. Cognitive networks:
+adaptation and learning to achieve end-to-end performance objectives. IEEE Communications
+Magazine, 44(12):51–57, 2006.
+
+[9] Kai Wang, Boris Babenko, and Serge Belongie. End-to-end scene text recognition. In Computer
+Vision (ICCV), 2011 IEEE International Conference on, pages 1457–1464. IEEE, 2011.
+
+[10] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for im-
+age recognition. In Proceedings of the IEEE Conference on Computer Vision and Pattern
+Recognition, pages 770–778, 2016.
+
+[11] Tao Wang, David J Wu, Adam Coates, and Andrew Y Ng. End-to-end text recognition
+with convolutional neural networks. In Pattern Recognition (ICPR), 2012 21st International
+Conference on, pages 3304–3308. IEEE, 2012.
+
+[12] Alex Graves and Navdeep Jaitly. Towards end-to-end speech recognition with recurrent neural
+
+networks. In ICML, volume 14, pages 1764–1772, 2014.
+
+[13] Dario Amodei, Rishita Anubhai, Eric Battenberg, Carl Case, Jared Casper, Bryan Catanzaro,
+Jingdong Chen, Mike Chrzanowski, Adam Coates, Greg Diamos, et al. Deep speech 2: End-to-
+end speech recognition in english and mandarin. arXiv preprint arXiv:1512.02595, 2015.
+
+[14] Sergey Levine, Chelsea Finn, Trevor Darrell, and Pieter Abbeel. End-to-end training of deep
+
+visuomotor policies. Journal of Machine Learning Research, 17(39):1–40, 2016.
+
+[15] Aviv Tamar, Sergey Levine, Pieter Abbeel, YI WU, and Garrett Thomas. Value iteration
+
+networks. In Advances in Neural Information Processing Systems, pages 2146–2154, 2016.
+
+[16] Ken Harada, Jun Sakuma, and Shigenobu Kobayashi. Local search for multiobjective function
+optimization: pareto descent method. In Proceedings of the 8th annual conference on Genetic
+and evolutionary computation, pages 659–666. ACM, 2006.
+
+[17] Kristof Van Moffaert and Ann Nowé. Multi-objective reinforcement learning using sets of
+pareto dominating policies. Journal of Machine Learning Research, 15(1):3483–3512, 2014.
+
+10
+
+[18] Hossam Mossalam, Yannis M Assael, Diederik M Roijers, and Shimon Whiteson. Multi-
+
+objective deep reinforcement learning. arXiv preprint arXiv:1610.02707, 2016.
+
+[19] Marco A Wiering, Maikel Withagen, and M˘ad˘alina M Drugan. Model-based multi-objective
+In Adaptive Dynamic Programming and Reinforcement Learning
+
+reinforcement learning.
+(ADPRL), 2014 IEEE Symposium on, pages 1–6. IEEE, 2014.
+
+[20] Veselin Stoyanov, Alexander Ropson, and Jason Eisner. Empirical risk minimization of graphical
+model parameters given approximate inference, decoding, and model structure. International
+Conference on Artiﬁcial Intelligence and Statistics, 15:725–733, 2011. ISSN 15324435.
+
+[21] Tamir Hazan, Joseph Keshet, and David A McAllester. Direct loss minimization for structured
+
+prediction. In Advances in Neural Information Processing Systems, pages 1594–1602, 2010.
+
+[22] Yang Song, Alexander G Schwing, Richard S Zemel, and Raquel Urtasun. Training deep neural
+networks via direct loss minimization. In Proceedings of The 33rd International Conference on
+Machine Learning, pages 2169–2177, 2016.
+
+[23] Max Jaderberg, Volodymyr Mnih, Wojciech Marian Czarnecki, Tom Schaul, Joel Z Leibo,
+David Silver, and Koray Kavukcuoglu. Reinforcement learning with unsupervised auxiliary
+tasks. arXiv preprint arXiv:1611.05397, 2016.
+
+[24] Somil Bansal, Roberto Calandra, Ted Xiao, Sergey Levine, and Claire J Tomlin. Goal-driven
+dynamics learning via bayesian optimization. arXiv preprint arXiv:1703.09260, 2017.
+
+[25] Chelsea Finn, Pieter Abbeel, and Sergey Levine. Model-agnostic meta-learning for fast adapta-
+
+tion of deep networks. arXiv preprint arXiv:1703.03400, 2017.
+
+[26] Yoshua Bengio. Using a ﬁnancial training criterion rather than a prediction criterion. Interna-
+
+tional Journal of Neural Systems, 8(04):433–443, 1997.
+
+[27] Adam N Elmachtoub and Paul Grigas. Smart "predict, then optimize". arXiv preprint
+
+arXiv:1710.08005, 2017.
+
+[28] Stephen Gould, Basura Fernando, Anoop Cherian, Peter Anderson, Rodrigo Santa Cruz, and
+Edison Guo. On differentiating parameterized argmin and argmax problems with application to
+bi-level optimization. arXiv preprint arXiv:1607.05447, 2016.
+
+[29] Brandon Amos, Lei Xu, and J Zico Kolter. Input convex neural networks. arXiv preprint
+
+[30] Paul T Boggs and Jon W Tolle. Sequential quadratic programming. Acta numerica, 4:1–51,
+
+arXiv:1609.07152, 2016.
+
+1995.
+
+[31] Brandon Amos and J Zico Kolter. Optnet: Differentiable optimization as a layer in neural
+
+networks. arXiV preprint arXiv:1703.00443, 2017.
+
+[32] Sergey Ioffe and Christian Szegedy. Batch normalization: Accelerating deep network training
+
+by reducing internal covariate shift. arXiv preprint arXiv:1502.03167, 2015.
+
+[33] Diederik Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint
+
+arXiv:1412.6980, 2014.
+
+11
+
+A Appendix
+
+We present some computational and architectural details for the proposed task-based learning model,
+both in the general case and for the experiments described in Section 4.
+
+A.1 Differentiating the optimization solution to a stochastic programming problem
+
+The issue of chief technical challenge to our approach is computing the gradient of an objective that
+depends upon the argmin operation z(cid:63)(x; θ). Speciﬁcally, we need to compute the term
+∂L
+∂θ
+
+∂z(cid:63)
+∂θ
+
+∂L
+∂z(cid:63)
+
+(A.1)
+
+=
+
+which involves the Jacobian ∂z(cid:63)
+∂θ . This is the Jacobian of the optimal solution with respect to the
+distribution parameters θ. Recent approaches have looked into similar argmin differentiations [28, 29],
+though the methodology we present here is more general and handles the stochasticity of the objective.
+
+We begin by writing the KKT optimality conditions of the general stochastic programming problem
+(3), where all expectations are taken with respect to the modeled distribution y ∼ p(y|x; θ) (for
+compactness, denoted here as Eyθ ). Further, assuming the problem is convex means we can replace
+the general equality constraints h(z) = 0 with the linear constraint Az = b. A point (z, λ, ν) is a
+primal-dual optimal point if it satisﬁes
+
+Eyθ g(z) ≤ 0
+Az = b
+λ ≥ 0
+λ ◦ Eyθ g(z) = 0
+∇zEyθ f (z) + λT ∇zEyθ g(z) + AT ν = 0
+where here g denotes the vector of all inequality constraints (represented as a vector-valued function),
+and where we wrap the dependence on x and y into the functions f and gi themselves.
+
+(A.2)
+
+Differentiating these equations and applying the implicit function theorem gives a set of linear
+equations that we can solve to obtain the necessary Jacobians
+
+
+
+
+
+
+
+
+
+
+
+
+∇2
+
+zEyθ f (z) +
+
+λi∇2
+
+zEyθ gi(z)
+
+(∇zEyθ g(z))T AT
+
+nineq
+(cid:88)
+
+i=1
+diag(λ) (∇zEyθ g(z))
+A
+
+diag(Eyθ g(z))
+0
+
+0
+0
+
+
+
+
+∂z
+∂θ
+∂λ
+∂θ
+∂ν
+∂θ
+
+
+
+
+
+
+
+
+ = −
+
+
+
+
+∂∇zEyθ f (z)
+∂θ
+
+i=1
+
++ ∂ (cid:80)nineq
+λi∇zEyθ gi(z)
+∂θ
+diag(λ) ∂Eyθ g(z)
+0
+
+∂θ
+
+
+ .
+
+(A.3)
+
+The terms on the left side are the optimality conditions of the convex problem, and the terms on
+right side are the derivatives of the relevant functions at the achieved solution, with respect to the
+governing parameter θ. These equations will take slightly different forms depending on how the
+stochastic programming problem is solved, but are usually fairly straightforward to compute if the
+solution is solved in some “exact” manner (i.e., where second order information is used). In practice,
+we calculate the right side of this equation by employing sequential quadratic programming [30] to
+ﬁnd the optimal policy z(cid:63) for the given parameters θ, using a recently-proposed approach for fast
+solution of argmin differentiation for QPs [31] to solve the necessary linear equations; we then take
+the derivatives at the optimum produced by this strategy.
+
+A.2 Details on computation for inventory stock problem
+
+The objective for our “conditional” variation of the classical inventory stock problem is
+
+fstock(y, z) = c0z +
+
+q0z2 + cb[y − z]+ +
+
+qb([y − z]+)2 + ch[z − y]+ +
+
+qh([z − y]+)2 (A.4)
+
+1
+2
+
+1
+2
+
+1
+2
+
+where z is the amount of product ordered; y is the stochastic electricity demand (which is affected
+by features x); [v]+ ≡ max{v, 0}; and (c0, q0), (cb, qb), and (ch, qh) are linear and quadratic costs
+on the amount of product ordered, over-orders, and under-orders, respectively. Our proxy stochastic
+programming problem can then be written as
+
+minimize
+z
+
+L(θ) = Ey∼p(y|x;θ)[fstock(y, z)].
+
+(A.5)
+
+A1
+
+To simplify the setting, we further assume that the demands are discrete, taking on values d1, . . . , dk
+with probabilities (conditional on x) (pθ)i ≡ p(y = di|x; θ). Thus our stochastic programming
+problem (A.5) can be written succinctly as a joint quadratic program
+
+minimize
+z∈R,zb,zh∈Rk
+
+c0z +
+
+q0z2 +
+
+(pθ)i
+
+cb(zb)i +
+
+qb(zb)2
+
+i + ch(zh)i +
+
+qh(zh)2
+i
+
+1
+2
+
+(cid:18)
+
+k
+(cid:88)
+
+i=1
+
+1
+2
+
+1
+2
+
+(cid:19)
+
+(A.6)
+
+subject to d − z1 ≤ zb, z1 − d ≤ zh, z, zh, zb ≥ 0.
+
+To demonstrate the explicit formula for argmin operation Jacobians for this particular case (e.g.,
+to compute the terms in (A.3)), note that we can write the above QP in inequality form as
+minimize{z:Gz≤h}
+
+2 zT Qz + cT z with
+
+1
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+z =
+
+q0
+0
+0
+
+z
+zb
+zh
+
+ , Q =
+
+−d
+d
+0
+0
+0
+(A.7)
+Thus, for an optimal primal-dual solution (z(cid:63), λ(cid:63)), we can compute the Jacobian ∂z(cid:63)
+(the Jacobian
+∂pθ
+of the optimal solution with respect to the probability vector pθ mentioned above), via the formula
+
+−1 −I
+0
+0 −I
+1
+0
+0
+−1
+0 −I
+0
+0 −I
+0
+
+0
+0
+qhpθ
+
+c0
+cbpθ
+chpθ
+
+0
+qbpθ
+0
+
+ , G =
+
+ , c =
+
+, h =
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+.
+
+
+
+
+
+
+
+
+
+(cid:34) ∂z(cid:63)
+∂pθ
+∂λ(cid:63)
+∂pθ
+
+(cid:35)
+
+(cid:20)
+
+=
+
+Q
+
+GT
+
+D(λ(cid:63))G D(Gz(cid:63) − h)
+
+(cid:21)−1
+
+
+
+
+
+
+qbz(cid:63)
+qhz(cid:63)
+
+b + cb1
+h + ch1
+
+0
+
+0
+
+
+
+
+ ,
+
+(A.8)
+
+where D(·) denotes a diagonal matrix for an input vector. After solving the problem and computing
+these Jacobians, we can compute the overall gradient with respect to the task loss L(θ) via the chain
+rule
+
+∂z(cid:63)
+∂pθ
+where ∂pθ
+∂θ denotes the Jacobian of the model probabilities with respect to its parameters, which are
+computed in the typical manner. Note that in practice, these Jacobians need not be computed explicitly,
+but can be computed efﬁciently via backpropagation; we use a recently-developed differentiable
+batch QP solver [31] to both solve the optimization problem in QP form and compute its derivatives.
+
+∂L
+∂z(cid:63)
+
+∂pθ
+∂θ
+
+∂L
+∂θ
+
+(A.9)
+
+=
+
+A.3 Details on computation for power scheduling problem
+
+The objective for the load forecasting problem is given by
+
+minimize
+z∈R24
+
+24
+(cid:88)
+
+i=1
+
+Ey∼p(y|x;θ)
+
+(cid:20)
+γs[yi − zi]+ + γe[zi − yi]+ +
+
+(cid:21)
+
+(zi − yi)2
+
+1
+2
+
+(A.10)
+
+subject to |zi − zi−1| ≤ cr ∀i,
+
+where z is the generator schedule, y is the stochastic demand (which is affected by features x),
+[v]+ ≡ max{v, 0}, γe is an over-generation penalty, γs is an under-generation penalty, and cr is a
+ramping constraint. Assuming that yi is a Gaussian random variable with mean µi and variance σ2
+i ,
+then this expectation has a closed form that can be computed via analytically integrating the Gaussian
+PDF. Speciﬁcally, this closed form is
+
+Ey∼p(y|x;θ)
+
+(cid:20)
+γs[yi − zi]+ + γe[zi − yi]+ +
+
+(cid:21)
+
+(zi − yi)2
+
+1
+2
+
+= (γs + γe)(σ2p(zi; µ, σ2) + (zi − µ)F (zi; µ, σ2)) − γs(zi − µ)
+(cid:123)(cid:122)
+(cid:125)
+α(zi)
+
+(cid:124)
+
++
+
+((zi − µi)2 + σ2
+
+i ),
+
+1
+2
+
+(A.11)
+
+where p(z; µ, σ2) and F (z; µ, σ2) denote the Gaussian PDF and CDF, respectively with the given
+mean and variance. This is a convex function of z (not apparent in this form, but readily established
+
+A2
+
+because it is an expectation of a convex function), and we can thus optimize it efﬁciently and compute
+the necessary Jacobians.
+
+Speciﬁcally, we use sequential quadratic programming (SQP) to iteratively approximate the resultant
+convex objective as a quadratic objective, and iterate until convergence; speciﬁcally, we repeatedly
+solve
+
+z(k+1) = argmin
+
+zT diag
+
+1
+2
+
+z
+
+(cid:32)
+
+∂2α(z(k)
+i
+∂z2
+
+)
+
+(cid:33)
+
++ 1
+
+z +
+
+(cid:18) ∂α(z(k))
+∂z
+
+(cid:19)T
+
+− µ
+
+z
+
+subject to |zi − zi−1| ≤ cr ∀i
+
+until ||z(k+1) − z(k)|| < δ for a small δ, where
+
+(A.12)
+
+(A.13)
+
+= (γs + γe)F (z; µ, σ) − γs,
+
+∂α
+∂z
+∂2α
+∂z2 = (γs + γe)p(z; µ, σ).
+
+We then compute the necessary Jacobians using the quadratic approximation (A.12) at the solution,
+which gives the correct Hessian and gradient terms. We can furthermore differentiate the gradient and
+Hessian with respect to the underlying model parameters µ and σ2, again using a recently-developed
+batch QP solver [31].
+
+A.4 Details on computation for battery storage problem
+
+The objective for the battery storage problem is given by
+
+minimize
+zin,zout,zstate∈R24
+
+Ey∼p(y|x;θ)
+
+yi(zin − zout)i + λ
+
+zstate −
+
++ (cid:15)(cid:107)zin(cid:107)2 + (cid:15)(cid:107)zout(cid:107)2
+
+(cid:13)
+(cid:13)
+(cid:13)
+(cid:13)
+
+B
+2
+
+(cid:13)
+2
+(cid:13)
+(cid:13)
+(cid:13)
+
+(cid:34) 24
+(cid:88)
+
+i=1
+
+(cid:35)
+
+(A.14)
+
+subject to zstate,i+1 = zstate,i − zout,i + γeffzin,i ∀i, zstate,1 = B/2,
+
+0 ≤ zin ≤ cin, 0 ≤ zout ≤ cout, 0 ≤ zstate ≤ B,
+
+where zin, zout, zstate are decisions over the charge amount, discharge amount, and resultant state of
+the battery, respectively; y is the stochastic electricity price (which is affected by features x); B is the
+battery capacity; γeff is the battery charging efﬁciency; cin and cout are maximum hourly charge and
+discharge amounts, respectively; and λ and (cid:15) are hyperparameters related to ﬂexibility and battery
+health, respectively.
+
+Assuming yi is a random variable with mean µi, the expectation in the objective has a closed form:
+
+Ey∼p(y|x;θ)
+
+yi(zin − zout)i + λ
+
+zstate −
+
++ (cid:15)(cid:107)zin(cid:107)2 + (cid:15)(cid:107)zout(cid:107)2
+
+(cid:34) 24
+(cid:88)
+
+i=1
+
+24
+(cid:88)
+
+i=1
+
+(cid:13)
+(cid:13)
+(cid:13)
+(cid:13)
+
+(cid:13)
+(cid:13)
+(cid:13)
+(cid:13)
+
+B
+2
+
+(cid:13)
+2
+(cid:13)
+(cid:13)
+(cid:13)
+
+B
+2
+
+(cid:13)
+2
+(cid:13)
+(cid:13)
+(cid:13)
+
+=
+
+µi(zin − zout)i + λ
+
+zstate −
+
++ (cid:15)(cid:107)zin(cid:107)2 + (cid:15)(cid:107)zout(cid:107)2.
+
+(cid:35)
+
+(A.15)
+
+We can then write this expression in QP form as minimize{z:Gz≤h, Az=b}
+
+1
+
+2 zT Qz + cT z with
+
+0
+(cid:15)I
+0
+
+0
+0
+λI
+
+
+
+
+
+ , c =
+
+
+
+
+
+ ,
+
+µ
+−µ
+−λB1
+
+z =
+
+G =
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ , Q =
+
+
+
+zin
+zout
+zstate
+
+0
+0
+I
+0
+0
+−I
+0
+0
+I
+0
+0 −I
+0
+0
+I
+0 −I
+0
+
+(cid:15)I
+0
+0
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+cin
+0
+cout
+0
+B
+0
+
+where D1 =
+
+∈ R24×23 and D2 =
+
+∈ R24×23.
+
+(cid:21)
+
+(cid:20) I
+0
+
+(cid:21)
+
+(cid:20) 0
+I
+
+A3
+
+, h =
+
+, A =
+
+(cid:20)
+
+0
+γeffDT
+
+0
+
+1 −DT
+
+1 DT
+
+0, . . . , 0, 1
+1 − DT
+2
+
+(cid:21)
+
+b =
+
+(cid:20) B/2
+0
+
+(cid:21)
+
+,
+
+(A.16)
+
+For this experiment, we assume that yi is a lognormal random variable (with mean µi); thus, to
+obtain our predictions, we predict the mean of log(y) (i.e., we predict log(µ)). After obtaining
+these predictions, we solve (A.4), compute the necessary Jacobians at the solution, and update the
+underlying model parameter µ via backpropagation, again using [31].
+
+A.5
+
+Implementation notes
+
+For all linear models, we use a one-layer linear neural network with the appropriate input and output
+layer dimensions. For all nonlinear models, we use a two-hidden-layer neural network, where each
+“layer” is actually a combination of linear, batch norm [32], ReLU, and dropout (p = 0.2) layers
+with dimension 200. In both cases, we add an additional softmax layer in cases where probability
+distributions are being predicted.
+All models are implemented using PyTorchA.1 and employ the Adam optimizer [33]. All QPs
+are solved using a recently-developed differentiable batch QP solver [31], and Jacobians are also
+computed automatically using backpropagation via the same.
+
+Source code for all experiments is available at https://github.com/locuslab/
+e2e-model-learning.
+
+A.1https://pytorch.org
+
+A4
+

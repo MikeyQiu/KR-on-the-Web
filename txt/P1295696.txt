@@ -1,0 +1,3076 @@
+8
+1
+0
+2
+ 
+v
+o
+N
+ 
+6
+2
+ 
+ 
+]
+
+G
+L
+.
+s
+c
+[
+ 
+ 
+2
+v
+8
+3
+7
+1
+1
+.
+0
+1
+8
+1
+:
+v
+i
+X
+r
+a
+
+Gaussian Process Prior Variational Autoencoders
+
+Francesco Paolo Casale†∗, Adrian V Dalca‡§, Luca Saglietti†¶,
+Jennifer Listgarten(cid:93), Nicolo Fusi†
+
+† Microsoft Research New England, Cambridge (MA), USA
+‡ Computer Science and Artiﬁcial Intelligence Lab, MIT, Cambridge (MA), USA
+§ Martinos Center for Biomedical Imaging, MGH, HMS, Boston (MA), USA;
+¶ Italian Institute for Genomic Medicine, Torino, Italy
+(cid:93) EECS Department, University of California, Berkeley (CA), USA.
+∗ frcasale@microsoft.com
+
+Abstract
+
+Variational autoencoders (VAE) are a powerful and widely-used class of models
+to learn complex data distributions in an unsupervised fashion. One important
+limitation of VAEs is the prior assumption that latent sample representations are in-
+dependent and identically distributed. However, for many important datasets, such
+as time-series of images, this assumption is too strong: accounting for covariances
+between samples, such as those in time, can yield to a more appropriate model
+speciﬁcation and improve performance in downstream tasks. In this work, we
+introduce a new model, the Gaussian Process (GP) Prior Variational Autoencoder
+(GPPVAE), to speciﬁcally address this issue. The GPPVAE aims to combine the
+power of VAEs with the ability to model correlations afforded by GP priors. To
+achieve efﬁcient inference in this new class of models, we leverage structure in
+the covariance matrix, and introduce a new stochastic backpropagation strategy
+that allows for computing stochastic gradients in a distributed and low-memory
+fashion. We show that our method outperforms conditional VAEs (CVAEs) and an
+adaptation of standard VAEs in two image data applications.
+
+1
+
+Introduction
+
+Dimensionality reduction is a fundamental approach to compression of complex, large-scale data
+sets, either for visualization or for pre-processing before application of supervised approaches.
+Historically, dimensionality reduction has been framed in one of two modeling camps: the simple and
+rich capacity language of neural networks; or the probabilistic formalism of generative models, which
+enables Bayesian capacity control and provides uncertainty over latent encodings. Recently, these
+two formulations have been combined through the Variational Autoencoder (VAE) (Kingma and
+Welling, 2013), wherein the expressiveness of neural networks was used to model both the mean and
+the variance of a simple likelihood. In these models, latent encodings are assumed to be identically
+and independently distributed (iid ) across both latent dimensions and samples. Despite this simple
+prior, the model lacks conjugacy, exact inference is intractable and variational inference is used. In
+fact, the main contribution of the Kingma et al. paper is to introduce an improved, general approach
+for variational inference (also developed in Rezende et al. (2014)).
+
+One important limitation of the VAE model is the prior assumption that latent representations of
+samples are iid , whereas in many important problems, accounting for sample structure is crucial
+for correct model speciﬁcation and consequently, for optimal results. For example, in autonomous
+driving, or medical imaging (Dalca et al., 2015; Lonsdale et al., 2013), high dimensional images are
+correlated in time—an iid prior for these would not be sensible because, a priori, two images that
+were taken closer in time should have more similar latent representations than images taken further
+apart. More generally, one can have multiple sequences of images from different cars, or medical
+
+32nd Conference on Neural Information Processing Systems (NIPS 2018), Montréal, Canada.
+
+image sequences from multiple patients. Therefore, the VAE prior should be able to capture multiple
+levels of correlations at once, including time, object identities, etc. A natural solution to this problem
+is to replace the VAE iid prior over the latent space with a Gaussian Process (GP) prior (Rasmussen,
+2004), which enables the speciﬁcation of sample correlations through a kernel function (Durrande
+et al., 2011; Gönen and Alpaydın, 2011; Wilson and Adams, 2013; Wilson et al., 2016; Rakitsch
+et al., 2013; Bonilla et al., 2007). GPs are often amenable to exact inference, and a large body of work
+in making computationally challenging GP-based models tractable can be leveraged (GPs naively
+scale cubically in the number of samples) (Gal et al., 2014; Bauer et al., 2016; Hensman et al., 2013;
+Csató and Opper, 2002; Quiñonero-Candela and Rasmussen, 2005; Titsias, 2009).
+
+In this work, we introduce the Gaussian Process Prior Variational Autoencoder (GPPVAE), an
+extension of the VAE latent variable model where correlation between samples is modeled through a
+GP prior on the latent encodings. The introduction of the GP prior, however, introduces two main
+computational challenges. First, naive computations with the GP prior have cubic complexity in
+the number of samples, which is impractical in most applications. To mitigate this problem one can
+leverage several tactics commonly used in the GP literature, including the use of pseudo-inputs (Csató
+and Opper, 2002; Gal et al., 2014; Hensman et al., 2013; Quiñonero-Candela and Rasmussen, 2005;
+Titsias, 2009), Kronecker-factorized covariances (Casale et al., 2017; Stegle et al., 2011; Rakitsch
+et al., 2013), and low rank structures (Casale et al., 2015; Lawrence, 2005). Speciﬁcally, in the
+instantiations of GPPVAE considered in this paper, we focus on low-rank factorizations of the
+covariance matrix. A second challenge is that the iid assumption which guarantees unbiasedness
+of mini-batch gradient estimates (used to train standard VAEs) no longer holds due to the GP
+prior. Thus mini-batch GD is no longer applicable. However, for the applications we are interested
+in, comprising sequences of large-scale images, it is critical from a practical standpoint to avoid
+processing all samples simultaneously; we require a procedure that is both low in memory use and
+yields fast inference. Thus, we propose a new scheme for gradient descent that enables Monte Carlo
+gradient estimates in a distributable and memory-efﬁcient fashion. This is achieved by exploiting
+the fact that sample correlations are only modeled in the latent (low-dimensional) space, whereas
+high-dimensional representations are independent when conditioning on the latent ones.
+
+In the next sections we (i) discuss our model in the context of related work, (ii) formally develop
+the model and the associated inference procedure, (iii) compare GPPVAE with alternative models in
+empirical settings, demonstrating the advantages of our approach.
+
+2 Related work
+
+Our method is related to several extensions of the standard VAE that aim at improving the latent
+representation by leveraging auxiliary data, such as time annotations, pose information or lighting.
+An ad hoc attempt to induce structure on the latent space by grouping samples with speciﬁc properties
+in mini-batches was introduced in Kulkarni et al. (2015). More principled approaches proposed
+a semi-supervised model using a continuous-discrete mixture model that concatenates the input
+with auxiliary information (Kingma et al., 2014). Similarly, the conditional VAE (Sohn et al., 2015)
+incorporates auxiliary information in both the encoder and the decoder, and has been used successfully
+for sample generation with speciﬁc categorical attributes. Building on this approach, several models
+use the auxiliary information in an unconditional way (Suzuki et al., 2016; Pandey and Dukkipati,
+2017; Vedantam et al., 2017; Wang et al., 2016; Wu and Goodman, 2018).
+
+A separate body of related work aims at designing a more ﬂexible variational posterior distributions,
+either by considering a dependence on auxiliary variables (Maaløe et al., 2016), by allowing structured
+encoder models (Siddharth et al., 2016), or by considering chains of invertible transformations that
+can produce arbitrarily complex posteriors (Kingma et al., 2016; Nalisnick et al., 2016; Rezende
+and Mohamed, 2015). In other work, a dependency between latent variables is induced by way of
+hierarchical structures at the level of the parameters of the variational family (Ranganath et al., 2016;
+Tran et al., 2015).
+
+The extensions of VAEs most related to GPPVAE are those that move away from the assumption of
+an iid Gaussian prior on the latent representations to consider richer prior distributions (Jiang et al.,
+2016; Shu et al., 2016; Tomczak and Welling, 2017). These build on the observation that overly-
+simple priors can induce excessive regularization, limiting the success of such models (Chen et al.,
+2016; Hoffman and Johnson, 2016; Siddharth et al., 2017). For example, Johnson et al. proposed
+
+2
+
+composing latent graphical models with deep observational likelihoods. Within their framework, more
+ﬂexible priors over latent encodings are designed based on conditional independence assumptions,
+and a conditional random ﬁeld variational family is used to enable efﬁcient inference by way of
+message-passing algorithms (Johnson et al., 2016).
+
+In contrast to existing methods, we propose to model the relationship between the latent space
+and the auxiliary information using a GP prior, leaving the encoder and decoder as in a standard
+VAE (independent of the auxiliary information). Importantly, the proposed approach allows for
+modeling arbitrarily complex sample structure in the data. In this work, we speciﬁcally focus on
+disentangling sample correlations induced by different aspects of the data. Additionally, GPPVAE en-
+ables estimation of latent auxiliary information when such information is unobserved by leveraging
+previous work (Lawrence, 2005). Finally, using the encoder and decoder networks together with the
+GP predictive posterior, our model provides a natural framework for out-of-sample predictions of
+high-dimensional data, for virtually any conﬁguration of the auxiliary data.
+
+3 Gaussian Process Prior Variational Autoencoder
+
+Assume we are given a set of samples (e. g., images), each coupled with different types of auxiliary
+data (e. g., time, lighting, pose, person identity). In this work, we focus on the case of two types of
+auxiliary data: object and view entities. Speciﬁcally, we consider datasets with images of objects
+in different views. For example, images of faces in different poses or images of hand-written digits
+at different rotation angles. In these problems, we know both which object (person or hand-written
+digit) is represented in each image in the dataset, and in which view (pose or rotation angle). Finally,
+each unique object and view is attached to a feature vector, which we refer to as an object feature
+vector and a view feature vector, respectively. In the face dataset example, object feature vectors
+might contain face features such as skin color or hair style, while view feature vectors may contain
+pose features such as polar and azimuthal angles with respect to a reference position. Importantly, as
+described and shown below, we can learn these feature vectors if not observed.
+
+3.1 Formal description of the model
+
+p=1 denote M -dimensional object feature vectors for the P objects; and let {wq}Q
+
+Let N denote the number of samples, P the number of unique objects and Q the number of
+unique views. Additionally, let {yn}N
+n=1 denote K-dimensional representation for N samples;
+let {xp}P
+q=1 denote
+R-dimensional view feature vectors for the Q views. Finally, let {zn}N
+n=1 denote the L-dimensional
+latent representations. We consider the following generative process for the observed samples (Fig
+1a):
+
+• the latent representation of object pn in view qn is generated from object feature vector xpn
+
+and view feature vector wqn as
+
+zn = f (xpn , wqn ) + ηn, where ηn ∼ N (0, αIL) ;
+
+• image yn is generated from its latent representation zn as
+
+yn = g(zn) + (cid:15)n, where (cid:15)n ∼ N (cid:0)0, σ2
+
+(cid:1) .
+
+yIK
+
+(1)
+
+(2)
+
+The function f : RM × RR → RL deﬁnes how sample latent representations can be obtained in
+terms of object and view feature vectors, while g : RL → RK maps latent representations to the
+high-dimensional sample space.
+
+We use a Gaussian process (GP) prior on f , which allows us to model sample covariances in the
+latent space as a function of object and view feature vectors. Herein, we use a convolutional neural
+network for g, which is a natural choice for image data (LeCun et al., 1995). The resulting marginal
+likelihood of the GPPVAE, is
+
+p(Y | X, W , φ, σ2
+
+y, θ, α) =
+
+p(Y | Z, φ, σ2
+
+y)p (Z | X, W , θ, α) dZ,
+
+(3)
+
+where Y = [y1, . . . , yN ]T ∈ RN ×K, Z = [z1, . . . , zN ]T ∈ RN ×L, W = [w1, . . . , wQ]T ∈
+RQ×R, X = [x1, . . . , xP ]T ∈ RP ×M . Additionally, φ denotes the parameters of g and θ the GP
+kernel parameters.
+
+(cid:90)
+
+3
+
+Figure 1: (a) Generative model underlying the proposed GPPVAE. (b) Pictorial representation of
+the inference procedure in GPPVAE. Each sample (here an image) is encoded in a low-dimensional
+space and then decoded to the original space. Covariances between samples are modeled through a
+GP prior on each column of the latent representation matrix Z.
+
+Gaussian Process Model. The GP prior deﬁnes the following multivariate normal distribution on
+latent representations:
+
+p (Z | X, W , θ, α) =
+
+N (cid:0)zl | 0, Kθ(X, W ) + αIN
+
+(cid:1) ,
+
+L
+(cid:89)
+
+l=1
+
+where zl denotes the l-th column of Z. In the setting considered in this paper, the covariance
+function Kθ is composed of a view kernel that models covariances between views, and an object
+kernel that models covariances between objects. Speciﬁcally, the covariance between sample n (with
+corresponding feature vectors xpn and wqn) and sample m (with corresponding feature vectors xpm
+and wqm) is given by the factorized form (Bonilla et al., 2007; Rakitsch et al., 2013):
+
+Kθ(X, W )nm = K(view)
+
+θ
+
+(wqn , wqm)K(object)
+
+θ
+
+(xpn , xpm ).
+
+Observed versus unobserved feature vectors Our model can be used when either one, or both of
+the view/sample feature vectors are unobserved. In this setting, we regard the unobserved features
+as latent variables and obtain a point estimate for them, similar to Gaussian process latent variable
+models (Lawrence, 2005). We have done so in our experiments.
+
+3.2
+
+Inference
+
+As with a standard VAE, we make use of variational inference for our model. Speciﬁcally, we
+consider the following variational distribution over the latent variables
+
+qψ(Z | Y ) =
+
+(cid:16)
+
+(cid:89)
+
+N
+
+n
+
+zn | µz
+
+ψ(yn), diag(σz 2
+
+ψ(yn))
+
+(cid:17)
+
+,
+
+which approximates the true posterior on Z. In Eq. (6), µz
+ψ are the hyperparameters of the
+variational distribution and are neural network functions of the observed data, while ψ denotes the
+weights of such neural networks. We obtain the following evidence lower bound (ELBO):
+
+ψ and σz
+
+logp(Y | X, W , φ, σ2
+
+y, θ) ≥ EZ∼qψ
+
+log N (yn | gφ(zn), σ2
+
+(cid:35)
+yIK) + logp (Z | X, W , θ, α)
+
++
+
++
+
+1
+2
+
+(cid:88)
+
+nl
+
+log(σz 2
+
+ψ(yn)l) + const.
+
+(7)
+
+(cid:34)
+
+(cid:88)
+
+n
+
+4
+
+(4)
+
+(5)
+
+(6)
+
+Stochastic backpropagation. We use stochastic backpropagation to maximize the ELBO (Kingma
+and Welling, 2013; Rezende et al., 2014). Speciﬁcally, we approximate the expectation by sampling
+from a reparameterized variational posterior over the latent representations, obtaining the following
+loss function:
+l (cid:0)φ, ψ, θ, α, σ2
+
+(cid:1) =
+
+y
+
+= N Klog σ2
+
+y +
+
+(cid:88)
+
+n
+
+(cid:124)
+
+(cid:13)yn − gφ(zψ n)(cid:13)
+(cid:13)
+2
+(cid:13)
+2σ2
+y
+(cid:123)(cid:122)
+reconstruction term
+
+(cid:125)
+
+− logp (Zψ | X, W , θ, α)
+(cid:123)(cid:122)
+(cid:125)
+latent-space GP term
+
+(cid:124)
+
++
+
+(cid:88)
+
+nl
+
+1
+2
+(cid:124)
+
+log(σz 2
+
+,
+ψ(yn)l)
+
+(8)
+
+(cid:123)(cid:122)
+regularization term
+
+(cid:125)
+
+which we optimize with respect to φ, ψ, θ, α, σ2
+RN ×L are sampled using the re-parameterization trick Kingma and Welling (2013),
+
+y. Latent representations Zψ = (cid:2)zψ 1, . . . , zψ N
+
+(cid:3) ∈
+
+zψ n = µz
+
+ψ(yn) + (cid:15)n (cid:12) σz
+
+ψ(yn), (cid:15)n ∼ N (0, IL×L), n = 1, . . . , N,
+
+(9)
+
+where (cid:12) denotes the Hadamard product. Full details on the derivation of the loss can be found in
+Supplementary Information.
+
+Efﬁcient GP computations. Naive computations in Gaussian processes scale cubically with the
+number of samples (Rasmussen, 2004). In this work, we achieve linear computations in the number
+of samples by assuming that the overall GP kernel is low-rank. In order to meet this assumption, we (i)
+exploit that in our setting the number of views, Q, is much lower than the number of samples, N , and
+(ii) impose a low-rank form for the object kernel (M (cid:28) N ). Brieﬂy, as a result of these assumptions,
+the total covariance is the sum of a low-rank matrix and the identity matrix K = V V T + αI,
+where V ∈ RN ×H and H (cid:28) N 1. For this covariance, computation of the inverse and the log
+determinant, which have cubic complexity for general covariances, can be recast to have complexity,
+O(N H 2 + H 3 + HN K) and O(N H 2 + H 3), respectively, using the Woodbury identity (Henderson
+and Searle, 1981) and the determinant lemma (Harville, 1997):
+
+1
+α
+
+1
+α
+
+K−1M =
+
+I −
+
+V (αI + V T V )−1V T M ,
+
+log |K| = N L log α + log
+
+I +
+
+V T V
+
+,
+
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+
+1
+α
+
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+
+(10)
+
+(11)
+
+where M ∈ RN ×K. Note a low-rank approximation of an arbitrary kernel can be obtained through
+the fully independent training conditional approximation (Snelson and Ghahramani, 2006), which
+makes the proposed inference scheme applicable in a general setting.
+
+Low-memory stochastic backpropagation. Owing to the coupling between samples from the
+GP prior, mini-batch gradient descent is no longer applicable. However, a naive implementation
+of full gradient descent is impractical as it requires loading the entire dataset into memory, which
+is infeasible with most image datasets. To overcome this limitation, we propose a new strategy
+to compute gradients on the whole dataset in a low-memory fashion. We do so by computing the
+ﬁrst-order Taylor series expansion of the GP term of the loss with respect to both the latent encodings
+and the prior parameters, at each step of gradient descent. In doing so, we are able to use the following
+procedure:
+
+1. Compute latent encodings from the high-dimensional data using the encoder. This step can
+be performed in data mini-batches, thereby imposing only low-memory requirements.
+2. Compute the coefﬁcients of the GP-term Taylor series expansion using the latent encodings.
+Although this step involves computations across all samples, these have low-memory
+requirements as they only involve the low-dimensional representations.
+
+3. Compute a proxy loss by replacing the GP term by its ﬁrst-order Taylor series expansion,
+which locally has the same gradient as the original loss. Since the Taylor series expansion
+is linear in the latent representations, gradients can be easily accumulated across data
+mini-batches, making this step also memory-efﬁcient.
+
+1 For example,
+
+if both the view and the object kernels are linear, we have V
+
+=
+
+[X:,1 (cid:12) W:,1, X:,1 (cid:12) W:,2, . . . , X:,M (cid:12) W:,Q] ∈ RN ×H .
+
+5
+
+4. Update the parameters using these accumulated gradients.
+
+Full details on this procedure are given in Supplementary Information.
+
+3.3 Predictive posterior
+
+We derive an approximate predictive posterior for GPPVAE that enables out-of-sample predictions
+of high-dimensional samples. Speciﬁcally, given training samples Y , object feature vectors X, and
+view feature vectors W , the predictive posterior for image representation y(cid:63) of object p(cid:63) in view q(cid:63)
+is given by
+
+p(y(cid:63) | x(cid:63), w(cid:63), Y , X, W ) ≈
+
+(cid:90)
+
+p(y(cid:63) | z(cid:63))
+(cid:124)
+(cid:125)
+(cid:123)(cid:122)
+decode GP prediction
+
+p(z(cid:63) | x(cid:63), w(cid:63), Z, X, W )
+(cid:125)
+(cid:123)(cid:122)
+(cid:124)
+latent-space GP predictive posterior
+
+q(Z | Y )
+(cid:125)
+(cid:123)(cid:122)
+(cid:124)
+encode training data
+
+dz(cid:63)dZ(12)
+
+where x(cid:63) and w(cid:63) are object and feature vectors of object p(cid:63) and view q(cid:63) respectively, and we dropped
+the dependency on parameters for notational compactness. The approximation in Eq. (12) is obtained
+by replacing the exact posterior on Z with the variational distribution q(Z | Y ) (see Supplementary
+Information for full details). From Eq. (12), the mean of the GPPVAE predictive posterior can be
+obtained by the following procedure: (i) encode training image data in the latent space through the
+encoder, (ii) predict latent representation z(cid:63) of image y(cid:63) using the GP predictive posterior, and (iii)
+decode latent representation z(cid:63) to the high-dimensional image space through the decoder.
+
+4 Experiments
+
+We focus on the task of making predictions of unseen images, given speciﬁed auxiliary information.
+Speciﬁcally, we want to predict the image representation of object p in view q when that object was
+never observed in that view, but assuming that object p was observed in at least one other view, and
+that view had been observed for at least one other object. For example, we may want to predict the
+pose of a person appearing in our training data set without having seen that person in that pose. To do
+so, we need to have observed that pose for other people. This prediction task gets at the heart of what
+we want our model to achieve, and therefore serves as a good evaluation metric.
+
+4.1 Methods considered
+
+In addition to the GPPVAE presented (GPPVAE-joint), we also considered a version with a simpler
+optimization scheme (GPPVAE-dis). We also considered two extensions of the VAE that can be used
+for the task at hand. Speciﬁcally, we considered:
+
+• GPPVAE with joint optimization (GPPVAE-joint), where autoencoder and GP parame-
+ters were optimized jointly. We found that convergence was improved by ﬁrst training the
+encoder and the decoder through standard VAE, then optimizing the GP parameters with
+ﬁxed encoder and decoder for 100 epochs, and ﬁnally, optimizing all parameters jointly. Out-
+of-sample predictions from GPPVAE-joint were obtained by using the predictive posterior
+in Eq. (12);
+
+• GPPVAE with disjoint optimization (GPPVAE-dis), where we ﬁrst learned the encoder
+and decoder parameters through standard VAE, and then optimized the GP parameters with
+ﬁxed encoder and decoder. Again, out-of-sample predictions were obtained by using the
+predictive posterior in Eq. (12);
+
+• Conditional VAE (CVAE) (Sohn et al., 2015), where view auxiliary information was
+provided as input to both the encoder and decoder networks (Figure S1, S2). After training,
+we considered the following procedure to generate an image of object p in view q. First,
+we computed latent representations of all the images of object p across all the views in the
+training data (in this setting, CVAE latent representations are supposedly independent from
+the view). Second, we averaged all the obtained latent representations to obtain a unique
+representation of object p. Finally, we fed the latent representation of object p together with
+out-of-sample view q to the CVAE decoder. As an alternative implementation, we also tried
+to consider the latent representation of a random image of object p instead of averaging, but
+the performance was worse–these results are not included;
+
+6
+
+• Linear Interpolation in VAE latent space (LIVAE), which uses linear interpolation be-
+tween observed views of an object in the latent space learned through standard VAE in
+order to predict unobserved views of the same object. Speciﬁcally, denoting z1 and z2
+as the latent representations of images of a given object in views r1 and r2, a prediction
+for the image of that same object in an intermediate view, r(cid:63), is obtained by ﬁrst linearly
+interpolating between z1 and z2, and then projecting the interpolated latent representation
+to the high-dimensional image space.
+
+Consistent with the L2 reconstruction error appearing in the loss off all the aforementioned VAEs
+(e. g., Eq. (18)), we considered pixel-wise mean squared error (MSE) as the evaluation metric. We
+used the same architecture for encoder and decoder neural networks in all methods compared (see
+Figure S1, S2 in Supplementary Information). The architecture and σ2
+y, were chosen to minimize
+the ELBO loss for the standard VAE on a validation set (Figure S3, Supplementary Information).
+For CVAE and LIVAE, we also considered the alternative strategy of selecting the value of σ2
+y that
+maximizes out-of-sample prediction performance on the validation set (the results for these two
+methods are in Figure S4 and S5). All models were trained using the Adam optimizer (Kingma and
+Ba, 2014) with standard parameters and a learning rate of 0.001. When optimizing GP parameters
+with ﬁxed encoder and decoder, we observed that higher learning rates led to faster convergence
+without any loss in performance, and thus we used a higher learning rate of 0.01 in this setting.
+
+4.2 Rotated MNIST
+
+Setup. We considered a variation of the MNIST dataset, consisting of rotated images of hand-
+written "3" digits with different rotation angles. In this setup, objects correspond to different draws of
+the digit "3" while views correspond to different rotation states. View features are observed scalars,
+corresponding to the attached rotation angles. Conversely, object feature vectors are unobserved and
+learned from data—no draw-speciﬁc features are available.
+
+Dataset generation. We generated a dataset from 400 handwritten versions of the digit three by
+rotating through Q = 16 evenly separated rotation angles in [0, 2π), for a total of N = 6, 400
+samples. We then kept 90% of the data for training and test, and the rest for validation. From the
+training and test sets, we then randomly removed 25% of the images to consider the scenario of
+incomplete data. Finally, the set that we used for out-of-sample predictions (test set) was created by
+removing one of the views (i. e., rotation angles) from the remaining images. This procedure resulted
+in 4, 050 training images spanning 15 rotation angles and 270 test images spanning one rotation
+angle.
+
+Autoencoder and GP model. We set the dimension of the latent space to L = 16. For encoder
+and decoder neural networks we considered the convolutional architecture in Figure S1. As view
+kernel, we considered a periodic squared exponential kernel taking rotation angles as inputs. As
+object kernel, we considered a linear kernel taking the object feature vectors as inputs. As object
+feature vectors are unobserved, we learned from data—their dimensionality was set to M = 8. The
+resulting composite kernel K, expresses the covariance between images n and m in terms of the
+corresponding rotations angles wqn and wqm and object feature vectors xpn and xpm as
+
+Kθ(X, w)nm = β exp
+
+−
+
+(13)
+
+(cid:18)
+
+2sin2|wqn − wqm |
+ν2
+
+(cid:124)
+
+(cid:123)(cid:122)
+rotation kernel
+
+(cid:19)
+
+(cid:125)
+
+· xT
+pn
+
+xpm
+(cid:124) (cid:123)(cid:122) (cid:125)
+digit draw kernel
+
+,
+
+where β ≥ 0 and ν ≥ 0 are kernel hyper-parameters learned during training of the model (Rasmussen,
+2004), and we set θ = {β, ν}.
+
+Results. GPPVAE-joint and GPPVAE-dis yielded lower MSE than CVAE and LIVAE in the
+interpolation task, with GPPVAE-joint performing signiﬁcantly better than GPPVAE-dis (0.0280 ±
+0.0008 for GPVAE-joint vs 0.0306 ± 0.0009 for GPPVAE-dis, p < 0.02, Fig. 2a,b). Importantly,
+GPPVAE-joint learns different variational parameters than a standard VAE (Fig. 2c,d), used also by
+GPPVAE-dis, consistent with the fact that GPPVAE-joint performs better by adapting the VAE latent
+space using guidance from the prior.
+
+7
+
+Figure 2: Results from experiments on rotated MNIST. (a) Mean squared error on test set. Error
+bars represent standard error of per-sample MSE. (b) Empirical density of estimated means of qψ,
+aggregated over all latent dimensions. (c) Empirical density of estimated log variances of qψ. (d)
+Out-of-sample predictions for ten random draws of digit "3" at the out-of-sample rotation state. (e, f)
+Object and view covariances learned through GPPVAE-joint.
+
+4.3 Face dataset
+
+Setup. As second application, we considered the Face-Place Database (3.0) (Righi et al., 2012),
+which contains images of people faces in different poses. In this setting, objects correspond to the
+person identities while views correspond to different poses. Both view and object feature vectors are
+unobserved and learned from data. The task is to predict images of people face in orientations that
+remained unobserved.
+
+Data. We considered 4,835 images from the Face-Place Database (3.0), which includes images
+of faces for 542 people shown across nine different poses (frontal and 90, 60, 45, 30 degrees left
+and right2). We randomly selected 80% of the data for training (n = 3, 868), 10% for validation
+(n = 484) and 10% for testing (n = 483). All images were rescaled to 128 × 128.
+
+Autoencoder and GP model. We set the dimension of the latent space to L = 256. For encoder
+and decoder neural networks we considered the convolutional architecture in Figure S2. We consider
+a full-rank covariance as a view covariance (only nine poses are present in the dataset) and a linear
+covariance for the object covariance (M = 64).
+
+Results. GPPVAE-jointand GPPVAE-disyielded lower MSE than CVAE and LIVAE (Fig. 2a,b).
+In contrast to the MNIST problem, the difference between GPPVAE-joint andGPPVAE-dis was not
+signiﬁcant (0.0281 ± 0.0008 for GPPVAE-joint vs 0.0298 ± 0.0008 for GPPVAE-dis). Importantly,
+GPPVAE-joint was able to dissect people (object) and pose (view) covariances by learning people
+and pose kernel jointly (Fig. 2a,b).
+
+5 Discussion
+
+We introduced GPPVAE, a generative model that incorporates a GP prior over the latent space.
+We also presented a low-memory and computationally efﬁcient inference strategy for this model,
+which makes the model applicable to large high-dimensional datasets. GPPVAE outperforms natural
+baselines (CVAE and linear interpolations in the VAE latent space) when predicting out-of-sample
+test images of objects in speciﬁed views (e. g., pose of a face, rotation of a digit). Possible future
+
+2 We could have used the pose angles as view feature scalar similar to the application in rotated MNIST, but
+purposely ignored these features to consider a more challenging setting were neither object and view features are
+observed.
+
+8
+
+Figure 3: Results from experiments on the face dataset. (a) Mean squared error on test set (b)
+Out-of-sample predictions of people faces in out-of-sample poses. (c, d) Object and view covariances
+learned through GPPVAE-joint.
+
+work includes augmenting the GPPVAE loss with a discriminator function, similar in spirit to a
+GAN (Goodfellow et al., 2014), or changing the loss to be perception-aware (Hou et al., 2017) (see
+results from preliminary experiments in Figure S6). Another extension is to consider approximations
+of the GP likelihood that fully factorize over data points (Hensman et al., 2013); this could further
+improve the scalability of our method.
+
+An implementation of GPPVAE is available at https://github.com/fpcasale/GPPVAE.
+
+Stimulus images courtesy of Michael J. Tarr, Center for the Neural Basis of Cognition and Department
+of Psychology, Carnegie Mellon University, http:// www.tarrlab.org. Funding provided by NSF award
+0339122.
+
+Code availability
+
+Acknowledgments
+
+References
+
+Matthias Bauer, Mark van der Wilk, and Carl Edward Rasmussen. Understanding probabilistic sparse
+gaussian process approximations. In Advances in neural information processing systems, pages
+1533–1541, 2016.
+
+Edwin V Bonilla, Felix V Agakov, and Christopher KI Williams. Kernel multi-task learning using
+
+task-speciﬁc features. In Artiﬁcial Intelligence and Statistics, pages 43–50, 2007.
+
+Francesco Paolo Casale, Barbara Rakitsch, Christoph Lippert, and Oliver Stegle. Efﬁcient set tests
+
+for the genetic analysis of correlated traits. Nature methods, 12(8):755, 2015.
+
+9
+
+Francesco Paolo Casale, Danilo Horta, Barbara Rakitsch, and Oliver Stegle. Joint genetic analysis
+using variant sets reveals polygenic gene-context interactions. PLoS genetics, 13(4):e1006693,
+2017.
+
+Xi Chen, Diederik P Kingma, Tim Salimans, Yan Duan, Prafulla Dhariwal, John Schulman, Ilya
+Sutskever, and Pieter Abbeel. Variational lossy autoencoder. arXiv preprint arXiv:1611.02731,
+2016.
+
+Lehel Csató and Manfred Opper. Sparse on-line gaussian processes. Neural computation, 14(3):
+
+641–668, 2002.
+
+Adrian V Dalca, Ramesh Sridharan, Mert R Sabuncu, and Polina Golland. Predictive modeling of
+anatomy with genetic and clinical data. In International Conference on Medical Image Computing
+and Computer-Assisted Intervention, pages 519–526. Springer, 2015.
+
+Nicolas Durrande, David Ginsbourger, Olivier Roustant, and Laurent Carraro. Additive covariance
+kernels for high-dimensional gaussian process modeling. arXiv preprint arXiv:1111.6233, 2011.
+
+Yarin Gal, Mark Van Der Wilk, and Carl Edward Rasmussen. Distributed variational inference in
+sparse gaussian process regression and latent variable models. In Advances in Neural Information
+Processing Systems, pages 3257–3265, 2014.
+
+Mehmet Gönen and Ethem Alpaydın. Multiple kernel learning algorithms. Journal of machine
+
+learning research, 12(Jul):2211–2268, 2011.
+
+Ian Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, Bing Xu, David Warde-Farley, Sherjil Ozair,
+Aaron Courville, and Yoshua Bengio. Generative adversarial nets. In Advances in neural informa-
+tion processing systems, pages 2672–2680, 2014.
+
+David A Harville. Matrix algebra from a statistician’s perspective, volume 1. Springer, 1997.
+
+Harold V Henderson and Shayle R Searle. On deriving the inverse of a sum of matrices. Siam Review,
+
+23(1):53–60, 1981.
+
+James Hensman, Nicolo Fusi, and Neil D Lawrence. Gaussian processes for big data. In Uncertainty
+
+in Artiﬁcial Intelligence, page 282. Citeseer, 2013.
+
+Matthew D Hoffman and Matthew J Johnson. Elbo surgery: yet another way to carve up the variational
+evidence lower bound. In Workshop in Advances in Approximate Bayesian Inference, NIPS, 2016.
+
+Xianxu Hou, Linlin Shen, Ke Sun, and Guoping Qiu. Deep feature consistent variational autoencoder.
+In Applications of Computer Vision (WACV), 2017 IEEE Winter Conference on, pages 1133–1141.
+IEEE, 2017.
+
+Zhuxi Jiang, Yin Zheng, Huachun Tan, Bangsheng Tang, and Hanning Zhou. Variational deep embed-
+ding: An unsupervised and generative approach to clustering. arXiv preprint arXiv:1611.05148,
+2016.
+
+Matthew Johnson, David K Duvenaud, Alex Wiltschko, Ryan P Adams, and Sandeep R Datta.
+Composing graphical models with neural networks for structured representations and fast inference.
+In Advances in neural information processing systems, pages 2946–2954, 2016.
+
+Diederik P Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint
+
+Diederik P Kingma and Max Welling. Auto-encoding variational bayes.
+
+arXiv preprint
+
+arXiv:1412.6980, 2014.
+
+arXiv:1312.6114, 2013.
+
+Diederik P Kingma, Shakir Mohamed, Danilo Jimenez Rezende, and Max Welling. Semi-supervised
+learning with deep generative models. In Advances in Neural Information Processing Systems,
+pages 3581–3589, 2014.
+
+Diederik P Kingma, Tim Salimans, Rafal Jozefowicz, Xi Chen, Ilya Sutskever, and Max Welling.
+Improved variational inference with inverse autoregressive ﬂow. In Advances in Neural Information
+Processing Systems, pages 4743–4751, 2016.
+
+10
+
+Tejas D Kulkarni, William F Whitney, Pushmeet Kohli, and Josh Tenenbaum. Deep convolutional
+inverse graphics network. In Advances in Neural Information Processing Systems, pages 2539–
+2547, 2015.
+
+Neil Lawrence. Probabilistic non-linear principal component analysis with gaussian process latent
+
+variable models. Journal of machine learning research, 6(Nov):1783–1816, 2005.
+
+Yann LeCun, Yoshua Bengio, et al. Convolutional networks for images, speech, and time series. The
+
+handbook of brain theory and neural networks, 3361(10):1995, 1995.
+
+John Lonsdale, Jeffrey Thomas, Mike Salvatore, Rebecca Phillips, Edmund Lo, Saboor Shad, Richard
+Hasz, Gary Walters, Fernando Garcia, Nancy Young, et al. The genotype-tissue expression (gtex)
+project. Nature genetics, 45(6):580, 2013.
+
+Lars Maaløe, Casper Kaae Sønderby, Søren Kaae Sønderby, and Ole Winther. Auxiliary deep
+
+generative models. arXiv preprint arXiv:1602.05473, 2016.
+
+Eric Nalisnick, Lars Hertel, and Padhraic Smyth. Approximate inference for deep latent gaussian
+
+mixtures. In NIPS Workshop on Bayesian Deep Learning, volume 2, 2016.
+
+Gaurav Pandey and Ambedkar Dukkipati. Variational methods for conditional multimodal deep
+learning. In Neural Networks (IJCNN), 2017 International Joint Conference on, pages 308–315.
+IEEE, 2017.
+
+Joaquin Quiñonero-Candela and Carl Edward Rasmussen. A unifying view of sparse approximate
+gaussian process regression. Journal of Machine Learning Research, 6(Dec):1939–1959, 2005.
+
+Barbara Rakitsch, Christoph Lippert, Karsten Borgwardt, and Oliver Stegle. It is all in the noise:
+Efﬁcient multi-task gaussian process inference with structured residuals. In Advances in neural
+information processing systems, pages 1466–1474, 2013.
+
+Rajesh Ranganath, Dustin Tran, and David Blei. Hierarchical variational models. In International
+
+Conference on Machine Learning, pages 324–333, 2016.
+
+Carl Edward Rasmussen. Gaussian processes in machine learning. In Advanced lectures on machine
+
+learning, pages 63–71. Springer, 2004.
+
+Danilo Jimenez Rezende and Shakir Mohamed. Variational inference with normalizing ﬂows. arXiv
+
+preprint arXiv:1505.05770, 2015.
+
+Danilo Jimenez Rezende, Shakir Mohamed, and Daan Wierstra. Stochastic backpropagation and
+
+approximate inference in deep generative models. arXiv preprint arXiv:1401.4082, 2014.
+
+Giulia Righi, Jessie J Peissig, and Michael J Tarr. Recognizing disguised faces. Visual Cognition, 20
+
+(2):143–169, 2012.
+
+Rui Shu, James Brofos, Frank Zhang, Hung Hai Bui, Mohammad Ghavamzadeh, and Mykel Kochen-
+derfer. Stochastic video prediction with conditional density estimation. In ECCV Workshop on
+Action and Anticipation for Visual Learning, volume 2, 2016.
+
+N Siddharth, Brooks Paige, Alban Desmaison, Van de Meent, Frank Wood, Noah D Goodman,
+Pushmeet Kohli, Philip HS Torr, et al. Inducing interpretable representations with variational
+autoencoders. arXiv preprint arXiv:1611.07492, 2016.
+
+N Siddharth, Brooks Paige, Jan-Willem Van de Meent, Alban Desmaison, Frank Wood, Noah D
+Goodman, Pushmeet Kohli, and Philip HS Torr. Learning disentangled representations with
+semi-supervised deep generative models. ArXiv e-prints (Jun 2017), 2017.
+
+Edward Snelson and Zoubin Ghahramani. Sparse gaussian processes using pseudo-inputs.
+
+In
+
+Advances in neural information processing systems, pages 1257–1264, 2006.
+
+Kihyuk Sohn, Honglak Lee, and Xinchen Yan. Learning structured output representation using deep
+conditional generative models. In Advances in Neural Information Processing Systems, pages
+3483–3491, 2015.
+
+11
+
+Oliver Stegle, Christoph Lippert, Joris M Mooij, Neil D Lawrence, and Karsten M Borgwardt.
+Efﬁcient inference in matrix-variate gaussian models with\iid observation noise. In Advances in
+neural information processing systems, pages 630–638, 2011.
+
+Masahiro Suzuki, Kotaro Nakayama, and Yutaka Matsuo. Joint multimodal learning with deep
+
+generative models. arXiv preprint arXiv:1611.01891, 2016.
+
+Michalis Titsias. Variational learning of inducing variables in sparse gaussian processes. In Artiﬁcial
+
+Intelligence and Statistics, pages 567–574, 2009.
+
+Jakub M Tomczak and Max Welling. Vae with a vampprior. arXiv preprint arXiv:1705.07120, 2017.
+
+Dustin Tran, Rajesh Ranganath, and David M Blei. The variational gaussian process. arXiv preprint
+
+arXiv:1511.06499, 2015.
+
+Ramakrishna Vedantam, Ian Fischer, Jonathan Huang, and Kevin Murphy. Generative models of
+
+visually grounded imagination. arXiv preprint arXiv:1705.10762, 2017.
+
+Weiran Wang, Xinchen Yan, Honglak Lee, and Karen Livescu. Deep variational canonical correlation
+
+analysis. arXiv preprint arXiv:1610.03454, 2016.
+
+Andrew Wilson and Ryan Adams. Gaussian process kernels for pattern discovery and extrapolation.
+
+In International Conference on Machine Learning, pages 1067–1075, 2013.
+
+Andrew Gordon Wilson, Zhiting Hu, Ruslan Salakhutdinov, and Eric P Xing. Deep kernel learning.
+
+In Artiﬁcial Intelligence and Statistics, pages 370–378, 2016.
+
+Mike Wu and Noah Goodman. Multimodal generative models for scalable weakly-supervised
+
+learning. arXiv preprint arXiv:1802.05335, 2018.
+
+12
+
+A Supplementary Information for Gaussian Process Prior Variational
+
+Autoencoders
+
+A.1 Supplementary Methods
+
+Derivation of the ELBO
+
+We assume the following posterior distribution on latent variables
+
+qψ(Z | Y ) =
+
+(cid:16)
+
+(cid:89)
+
+N
+
+n
+
+zn | µz
+
+ψ(yn), diag(σz 2
+
+ψ(yn))
+
+(cid:17)
+
+,
+
+(14)
+
+where ψ are variational parameters. The evidence lower bound (ELBO) can be derived as follows:
+
+logp(Y | X, W , φ, σ2
+
+y, θ) = log
+
+(cid:90) p(Y | z, φ, σ2
+
+y)p (Z | X, W , θ, α)
+qψ(Z | Y )
+
+qψ(Z | Y )dZ
+
+(cid:90)
+
+(cid:18) p(Y | z, φ, σ2
+
+≥
+
+log
+
+y)p (Z | X, W , θ, α)
+qψ(Z | Y )
+
+(cid:19)
+
+qψ(Z | Y )dZ
+
+= EZ∼qψ
+
+log N (yn | gφ(zn), σ2
+
+yIK ) + logp (Z | X, W , θ, α)
+
++(15)
+
+= EZ∼qψ
+
+log N (yn | gφ(zn), σ2
+
+yIK ) + logp (Z | X, W , θ, α)
+
++(16)
+
+(cid:90)
+
+−
+
+logqψ(Z | Y )qψ(Z | Y )dZ
+
++
+
+1
+2
+
+(cid:88)
+
+nl
+
+log(σz 2
+
+ψ(yn)l) + const
+
+(cid:35)
+
+(cid:35)
+
+Derivation of the loss function
+
+First, we approximate the expectation by sampling. Speciﬁcally, we sample a latent representation
+Zψ = (cid:2)zψ 1, . . . , zψ N
+zψ n = µz
+
+ψ(yn), (cid:15)n ∼ N (0, IL×L), n = 1, . . . , N,
+
+(cid:3) ∈ RN ×L from the posterior as:
+
+ψ(yn) + (cid:15)n (cid:12) σz
+
+(17)
+
+where we used the reparametrization trick to separate the noisy generation of samples from the model
+parameters. The resulting approximate ELBO is
+
+ELBO ≈
+
+log N (yn | gφ(zψ n), σ2
+
+yIK ) + logp (Zψ | X, W , θ, α) +
+
+log(σz 2
+
+ψ(yn)l) + const
+
+(cid:88)
+
+n
+
+1
+2
+
+(cid:88)
+
+nl
+
+Finally, as we optimize σ2
+y on a validation set (and not on the training set) in order to avoid overﬁtting,
+the maximization of the approximate ELBO on the training set is equivalent to minimizing the
+following cost:
+
+loss =
+
+(yi − gφ(ωψ n))2
+
+−
+
+1
+K
+
+(cid:88)
+
+i
+
+(cid:124)
+
+(cid:123)(cid:122)
+reconstruction term
+
+(cid:125)
+
+λ(σ2
+y)
+L
+
+
+
+logp (Zψ | X, W , θ, α)
+
+
+(cid:125)
+(cid:123)(cid:122)
+(cid:124)
+
+latent-space GP model
+
++
+
+(cid:88)
+
+nl
+
+1
+2
+(cid:124)
+
+log(σz 2
+
+ψ(yn)l)
+
+,
+
+(18)
+
+(cid:123)(cid:122)
+regularization
+
+where K is the number of pixels in the image and λ is a trade-off parameter balancing data recon-
+struction and latent space prior regularization.
+
+Selection of λ. We select the value of λ based on a standard VAE and use the same value for
+all compared models. Speciﬁcally, we optimize the VAE loss for different values of λ and select
+the value for which the VAE ELBO is maximal on a validation set. In order to compute the VAE
+
+
+
+
+
+
+
+
+
+(cid:125)
+
+(cid:34)
+
+(cid:88)
+
+n
+
+n
+
+(cid:34)
+
+(cid:88)
+
+
+
+13
+
+validation ELBO we need to estimate optimal value of σ2
+certain value of λ = ˆλ, the optimal value of σ2
+
+y can be estimated as
+
+y for every value of λ in the grid. Given a
+
+(val)
+
+σ2
+y
+
+=
+
+1
+N (val)
+
+N (val)
+(cid:88)
+
+(cid:16)
+
+n=1
+
+y(val)
+n − gφλ(zψˆλ
+
+(val)
+n
+
+(cid:17)2
+)
+
+,
+
+where N (val) is the number of samples in the validation set and (φˆλ, ψˆλ) are the values of the
+encoder/decoder parameters obtained for λ = ˆλ.
+
+Fast low-rank computations
+
+Parameter inference in Gaussian models scales cubically with the number of observations. To preform
+fast parameter inference in our Gaussian model, we use the fact that the total covariance is the sum of
+low-rank matrix and the identity matrix:
+
+(20)
+where V ∈ RN ×O and O (cid:28) N . Using the Woodbury identity Henderson and Searle (1981) and
+the determinant lemma Harville (1997), the linear system K−1M with M ∈ RN ×K and the log
+determinant of K can be computed as:
+
+K = V V T + αI
+
+K−1M =
+
+I −
+
+V (αI + V T V )−1V T M ,
+
+1
+α
+
+1
+α
+
+logdetK = N Llogdetα + logdet(I +
+
+1
+α
+
+V T V ),
+
+which have O(N O2 + O3 + ON K) and O(N O2 + O3) complexities, respectively.
+
+Implementation of low-memory stochastic backpropagation
+
+For a single latent dimension the GP prior introduces the following term in the ELBO:
+
+logp (zψ | X, W , θ, α) = −
+
+ψKθ(X, V )−1zψ −
+zT
+
+logdetKθ(X, V )
+
+(23)
+
+1
+2
+
+1
+2
+
+In the equation above, zψ functionally depends on the image space representations and thus a naive
+computation of full gradient descent would require loading the entire high-dimensional dataset in
+memory, which would be unfeasible form many high-dimensional image datasets. To overcome this
+limitation, we recast computations in a form where full-matrix operations only take place in the low
+dimensional space, while the dependency on the nested derivatives, which involve high memory loads,
+is linearized and mini-batch operations are therefore allowed. This can be achieved by considering
+a ﬁrst-order Taylor expansion of the GP prior term. Specﬁcally, using that Kθ = VθV T
+θ + αI,
+and collecting all parameters in ξ = {ψ, θ, α}, we can rewrite the the term in Eq. (23) in this
+functional form f (z(ξ), V (ξ), α(ξ)). The ﬁrst-order Taylor expansion of f (z(ξ), V (ξ), α(ξ))
+around (zξ0, Vξ0 , αξ0) is:
+
+f (z(ξ), V (ξ), α(ξ)) ≈ aT z(ξ) + tr (cid:0)BT V (ξ)(cid:1) + cα(ξ) + const.
+
+where
+
+a =
+
+B =
+
+c =
+
+(cid:18) ∂f
+∂z
+(cid:18) ∂f
+∂V
+(cid:18) ∂f
+∂α
+
+(cid:19)
+
+ξ0
+(cid:19)
+
+0
+
+(cid:19)
+
+ξ0
+
+= (cid:0)K−1z(cid:1)
+
+ξ0
+
+= (cid:0)−K−1zzT K −1V + K−1V (cid:1)
+
+=
+
+1
+2
+
+(cid:0)−zT K−1K−1z + tr(K−1)(cid:1)
+
+ξ0
+
+ξ0
+
+(19)
+
+(21)
+
+(22)
+
+(24)
+
+(25)
+
+(26)
+
+(27)
+
+Note that this approximation, applied at every step of gradient descent, locally preserves the gradients.
+Thus we can engineer the following low-memory four-step procedure for full gradient descent:
+
+• produce and store latent noise realizations ((cid:15)) used for the reparametrization trick;
+
+14
+
+• obtain latent variable representations z, combining the outputs of the encoder and the noise
+
+(cid:15). We employ mini-batch forward propagation for this step;
+
+• evaluate a, B and c across all samples. Note that this step has low-memory requirements as
+
+it only involes low-dimensional representations;
+
+• exploit the local Taylor expansion as a proxy for our optimization. As this function is linear
+in the data, we can accumulate its gradient in a mini-batch fashion, by passing mini-batches
+of (cid:15), Y , a and B;
+
+• update the parameters ξ using the full gradients as in standard gradient descent.
+
+Finally, we note that in our setting, the computation of a, B and c has linear complexity in the
+number of samples because of the low rank structure of K (see previous section).
+
+We here derive an approximate predictive posterior for GPPVAE. Speciﬁcally, given training images
+Y , object representations X and view representations V the predictive posterior for image y(cid:63)
+representing object x(cid:63) in view v(cid:63) is
+
+Out-of-sample predictions.
+
+p(y(cid:63) | x(cid:63), v(cid:63), Y , X, V ) =
+
+p(y(cid:63), Y | x(cid:63), v(cid:63), X, V )
+p(Y | X, V )
+1
+p(Y | X, V )
+
+(cid:90)
+
+(cid:90)
+
+1
+p(Y | X, V )
+
+p(y(cid:63) | z(cid:63))p(Y | Z) p(z(cid:63), Z | x(cid:63), v(cid:63), X, V )
+(cid:125)
+
+(cid:124)
+
+(cid:123)(cid:122)
+joint distribution
+
+dz(cid:63)dZ
+
+p(y(cid:63) | z(cid:63))p(Y | Z) p(z(cid:63) | x(cid:63), v(cid:63), Z, X, V )
+(cid:125)
+
+(cid:124)
+
+p(Z | X, V )
+(cid:125)
+(cid:123)(cid:122)
+(cid:124)
+GP prior on training
+
+dz(cid:63)dZ(30)
+
+p(y(cid:63) | z(cid:63)) p(z(cid:63) | x(cid:63), v(cid:63), Z, X, V )
+(cid:125)
+
+(cid:123)(cid:122)
+predictive posterior
+
+(cid:124)
+
+dz(cid:63)dZ
+
+(31)
+
+(cid:123)(cid:122)
+predictive posterior
+p(Y | Z)p(Z | X, V )
+p(Y | X, V )
+(cid:123)(cid:122)
+posterior on Z
+
+(cid:124)
+
+(cid:125)
+
+(28)
+
+(29)
+
+(32)
+
+p(y(cid:63) | z(cid:63)) p(z(cid:63) | x(cid:63), v(cid:63), Z, X, V )
+(cid:125)
+
+(cid:123)(cid:122)
+predictive posterior
+
+(cid:124)
+
+q(Z | Y )
+(cid:123)(cid:122)
+(cid:125)
+(cid:124)
+approx. post. on Z
+
+dz(cid:63)dZ
+
+=
+
+=
+
+=
+
+≈
+
+(cid:90)
+
+(cid:90)
+
+where we dropped the dependency from the model and the variational parameters to simplify the
+notation.
+
+A.1.1 Supplementary Figures
+
+15
+
+Figure 4: Neural network architecture used in the MNIST experiments. (a) Encoder architecture;
+(b) Decoder architecture. The same encoder/decoder architectures are used for both VAE and
+GPPVAE. For CVAE, we still use the same architecture but we provide view representations (rotation
+angles) as inputs to both the encoder and the decoder. For the encoder, we provide rotation angles to
+the ﬁrst layer (by adding additional channels to the input image) and again before the dense layer (by
+stacking them to the vector produced by the last convolution). Similarly, for the decoder, we provide
+rotation angles as inputs to the ﬁrst layer (by stacking them with the 16-dimensional latent variable)
+and again before the ﬁrst convolution layer (by adding them as additional channels to the 8x8x4 tensor
+fed to the ﬁrst convolution layer). For a fair comparison with GPPVAE, we account for periodicity in
+the view representation by providing both the angle sine and cosine, i.e. w = [sinφ, cosφ], where φ
+is the rotation angle.
+
+Figure 5: Neural network architecture used in the face dataset experiments.
+(a) Encoder
+architecture; (b) Decoder architecture. The same encoder/decoder architectures are used for both
+VAE and GPPVAE. For CVAE, we still use the same architecture but we provide view information
+as one hot encoding of the 9 different poses to both the encoder and the decoder networks. For the
+encoder, we provide view representations to the ﬁrst layer (by adding additional channels to the
+input image) and again before the dense layer (by stacking them to the vector produced by the last
+convolution). Similarly, for the decoder, we provide view representations as inputs to the ﬁrst layer
+(by stacking them with the 16-dimensional latent variable) and again before the ﬁrst convolution
+layer (by adding them as additional channels to the 8x8x4 tensor fed to the ﬁrst convolution layer).
+
+16
+
+Figure 6: Selection of the trade-off parameter between ﬁt-to-data and latent-space model. The
+trade-off parameter was selected as to maximize VAE ELBO. We here show the VAE validation lower
+bound as a function of the trade-off parameter for the MNIST (a) and the face dataset (b).
+
+Figure 7: For CVAE and LIVAE, we also considered the alternative strategy of selecting the value
+of the trade-off parameter λ that maximizes prediction performance on the validation set. We refer
+to these additional methods as CVAE-opt and LIVAE-opt. We here show the selection of λ for
+CVAE-opt (a) and LIVAE-opt (b) and their performance (c-d) for the experiments in MNIST.
+
+Figure 8: Analogous to Figure S4 but for the face data experiments.
+
+17
+
+Figure 9: Out-of-sample predictions obtained from GPPVAE-joint when considering the perceptual
+loss introduced in Hou et al. (2017).
+
+18
+
+8
+1
+0
+2
+ 
+v
+o
+N
+ 
+6
+2
+ 
+ 
+]
+
+G
+L
+.
+s
+c
+[
+ 
+ 
+2
+v
+8
+3
+7
+1
+1
+.
+0
+1
+8
+1
+:
+v
+i
+X
+r
+a
+
+Gaussian Process Prior Variational Autoencoders
+
+Francesco Paolo Casale†∗, Adrian V Dalca‡§, Luca Saglietti†¶,
+Jennifer Listgarten(cid:93), Nicolo Fusi†
+
+† Microsoft Research New England, Cambridge (MA), USA
+‡ Computer Science and Artiﬁcial Intelligence Lab, MIT, Cambridge (MA), USA
+§ Martinos Center for Biomedical Imaging, MGH, HMS, Boston (MA), USA;
+¶ Italian Institute for Genomic Medicine, Torino, Italy
+(cid:93) EECS Department, University of California, Berkeley (CA), USA.
+∗ frcasale@microsoft.com
+
+Abstract
+
+Variational autoencoders (VAE) are a powerful and widely-used class of models
+to learn complex data distributions in an unsupervised fashion. One important
+limitation of VAEs is the prior assumption that latent sample representations are in-
+dependent and identically distributed. However, for many important datasets, such
+as time-series of images, this assumption is too strong: accounting for covariances
+between samples, such as those in time, can yield to a more appropriate model
+speciﬁcation and improve performance in downstream tasks. In this work, we
+introduce a new model, the Gaussian Process (GP) Prior Variational Autoencoder
+(GPPVAE), to speciﬁcally address this issue. The GPPVAE aims to combine the
+power of VAEs with the ability to model correlations afforded by GP priors. To
+achieve efﬁcient inference in this new class of models, we leverage structure in
+the covariance matrix, and introduce a new stochastic backpropagation strategy
+that allows for computing stochastic gradients in a distributed and low-memory
+fashion. We show that our method outperforms conditional VAEs (CVAEs) and an
+adaptation of standard VAEs in two image data applications.
+
+1
+
+Introduction
+
+Dimensionality reduction is a fundamental approach to compression of complex, large-scale data
+sets, either for visualization or for pre-processing before application of supervised approaches.
+Historically, dimensionality reduction has been framed in one of two modeling camps: the simple and
+rich capacity language of neural networks; or the probabilistic formalism of generative models, which
+enables Bayesian capacity control and provides uncertainty over latent encodings. Recently, these
+two formulations have been combined through the Variational Autoencoder (VAE) (Kingma and
+Welling, 2013), wherein the expressiveness of neural networks was used to model both the mean and
+the variance of a simple likelihood. In these models, latent encodings are assumed to be identically
+and independently distributed (iid ) across both latent dimensions and samples. Despite this simple
+prior, the model lacks conjugacy, exact inference is intractable and variational inference is used. In
+fact, the main contribution of the Kingma et al. paper is to introduce an improved, general approach
+for variational inference (also developed in Rezende et al. (2014)).
+
+One important limitation of the VAE model is the prior assumption that latent representations of
+samples are iid , whereas in many important problems, accounting for sample structure is crucial
+for correct model speciﬁcation and consequently, for optimal results. For example, in autonomous
+driving, or medical imaging (Dalca et al., 2015; Lonsdale et al., 2013), high dimensional images are
+correlated in time—an iid prior for these would not be sensible because, a priori, two images that
+were taken closer in time should have more similar latent representations than images taken further
+apart. More generally, one can have multiple sequences of images from different cars, or medical
+
+32nd Conference on Neural Information Processing Systems (NIPS 2018), Montréal, Canada.
+
+image sequences from multiple patients. Therefore, the VAE prior should be able to capture multiple
+levels of correlations at once, including time, object identities, etc. A natural solution to this problem
+is to replace the VAE iid prior over the latent space with a Gaussian Process (GP) prior (Rasmussen,
+2004), which enables the speciﬁcation of sample correlations through a kernel function (Durrande
+et al., 2011; Gönen and Alpaydın, 2011; Wilson and Adams, 2013; Wilson et al., 2016; Rakitsch
+et al., 2013; Bonilla et al., 2007). GPs are often amenable to exact inference, and a large body of work
+in making computationally challenging GP-based models tractable can be leveraged (GPs naively
+scale cubically in the number of samples) (Gal et al., 2014; Bauer et al., 2016; Hensman et al., 2013;
+Csató and Opper, 2002; Quiñonero-Candela and Rasmussen, 2005; Titsias, 2009).
+
+In this work, we introduce the Gaussian Process Prior Variational Autoencoder (GPPVAE), an
+extension of the VAE latent variable model where correlation between samples is modeled through a
+GP prior on the latent encodings. The introduction of the GP prior, however, introduces two main
+computational challenges. First, naive computations with the GP prior have cubic complexity in
+the number of samples, which is impractical in most applications. To mitigate this problem one can
+leverage several tactics commonly used in the GP literature, including the use of pseudo-inputs (Csató
+and Opper, 2002; Gal et al., 2014; Hensman et al., 2013; Quiñonero-Candela and Rasmussen, 2005;
+Titsias, 2009), Kronecker-factorized covariances (Casale et al., 2017; Stegle et al., 2011; Rakitsch
+et al., 2013), and low rank structures (Casale et al., 2015; Lawrence, 2005). Speciﬁcally, in the
+instantiations of GPPVAE considered in this paper, we focus on low-rank factorizations of the
+covariance matrix. A second challenge is that the iid assumption which guarantees unbiasedness
+of mini-batch gradient estimates (used to train standard VAEs) no longer holds due to the GP
+prior. Thus mini-batch GD is no longer applicable. However, for the applications we are interested
+in, comprising sequences of large-scale images, it is critical from a practical standpoint to avoid
+processing all samples simultaneously; we require a procedure that is both low in memory use and
+yields fast inference. Thus, we propose a new scheme for gradient descent that enables Monte Carlo
+gradient estimates in a distributable and memory-efﬁcient fashion. This is achieved by exploiting
+the fact that sample correlations are only modeled in the latent (low-dimensional) space, whereas
+high-dimensional representations are independent when conditioning on the latent ones.
+
+In the next sections we (i) discuss our model in the context of related work, (ii) formally develop
+the model and the associated inference procedure, (iii) compare GPPVAE with alternative models in
+empirical settings, demonstrating the advantages of our approach.
+
+2 Related work
+
+Our method is related to several extensions of the standard VAE that aim at improving the latent
+representation by leveraging auxiliary data, such as time annotations, pose information or lighting.
+An ad hoc attempt to induce structure on the latent space by grouping samples with speciﬁc properties
+in mini-batches was introduced in Kulkarni et al. (2015). More principled approaches proposed
+a semi-supervised model using a continuous-discrete mixture model that concatenates the input
+with auxiliary information (Kingma et al., 2014). Similarly, the conditional VAE (Sohn et al., 2015)
+incorporates auxiliary information in both the encoder and the decoder, and has been used successfully
+for sample generation with speciﬁc categorical attributes. Building on this approach, several models
+use the auxiliary information in an unconditional way (Suzuki et al., 2016; Pandey and Dukkipati,
+2017; Vedantam et al., 2017; Wang et al., 2016; Wu and Goodman, 2018).
+
+A separate body of related work aims at designing a more ﬂexible variational posterior distributions,
+either by considering a dependence on auxiliary variables (Maaløe et al., 2016), by allowing structured
+encoder models (Siddharth et al., 2016), or by considering chains of invertible transformations that
+can produce arbitrarily complex posteriors (Kingma et al., 2016; Nalisnick et al., 2016; Rezende
+and Mohamed, 2015). In other work, a dependency between latent variables is induced by way of
+hierarchical structures at the level of the parameters of the variational family (Ranganath et al., 2016;
+Tran et al., 2015).
+
+The extensions of VAEs most related to GPPVAE are those that move away from the assumption of
+an iid Gaussian prior on the latent representations to consider richer prior distributions (Jiang et al.,
+2016; Shu et al., 2016; Tomczak and Welling, 2017). These build on the observation that overly-
+simple priors can induce excessive regularization, limiting the success of such models (Chen et al.,
+2016; Hoffman and Johnson, 2016; Siddharth et al., 2017). For example, Johnson et al. proposed
+
+2
+
+composing latent graphical models with deep observational likelihoods. Within their framework, more
+ﬂexible priors over latent encodings are designed based on conditional independence assumptions,
+and a conditional random ﬁeld variational family is used to enable efﬁcient inference by way of
+message-passing algorithms (Johnson et al., 2016).
+
+In contrast to existing methods, we propose to model the relationship between the latent space
+and the auxiliary information using a GP prior, leaving the encoder and decoder as in a standard
+VAE (independent of the auxiliary information). Importantly, the proposed approach allows for
+modeling arbitrarily complex sample structure in the data. In this work, we speciﬁcally focus on
+disentangling sample correlations induced by different aspects of the data. Additionally, GPPVAE en-
+ables estimation of latent auxiliary information when such information is unobserved by leveraging
+previous work (Lawrence, 2005). Finally, using the encoder and decoder networks together with the
+GP predictive posterior, our model provides a natural framework for out-of-sample predictions of
+high-dimensional data, for virtually any conﬁguration of the auxiliary data.
+
+3 Gaussian Process Prior Variational Autoencoder
+
+Assume we are given a set of samples (e. g., images), each coupled with different types of auxiliary
+data (e. g., time, lighting, pose, person identity). In this work, we focus on the case of two types of
+auxiliary data: object and view entities. Speciﬁcally, we consider datasets with images of objects
+in different views. For example, images of faces in different poses or images of hand-written digits
+at different rotation angles. In these problems, we know both which object (person or hand-written
+digit) is represented in each image in the dataset, and in which view (pose or rotation angle). Finally,
+each unique object and view is attached to a feature vector, which we refer to as an object feature
+vector and a view feature vector, respectively. In the face dataset example, object feature vectors
+might contain face features such as skin color or hair style, while view feature vectors may contain
+pose features such as polar and azimuthal angles with respect to a reference position. Importantly, as
+described and shown below, we can learn these feature vectors if not observed.
+
+3.1 Formal description of the model
+
+p=1 denote M -dimensional object feature vectors for the P objects; and let {wq}Q
+
+Let N denote the number of samples, P the number of unique objects and Q the number of
+unique views. Additionally, let {yn}N
+n=1 denote K-dimensional representation for N samples;
+let {xp}P
+q=1 denote
+R-dimensional view feature vectors for the Q views. Finally, let {zn}N
+n=1 denote the L-dimensional
+latent representations. We consider the following generative process for the observed samples (Fig
+1a):
+
+• the latent representation of object pn in view qn is generated from object feature vector xpn
+
+and view feature vector wqn as
+
+zn = f (xpn , wqn ) + ηn, where ηn ∼ N (0, αIL) ;
+
+• image yn is generated from its latent representation zn as
+
+yn = g(zn) + (cid:15)n, where (cid:15)n ∼ N (cid:0)0, σ2
+
+(cid:1) .
+
+yIK
+
+(1)
+
+(2)
+
+The function f : RM × RR → RL deﬁnes how sample latent representations can be obtained in
+terms of object and view feature vectors, while g : RL → RK maps latent representations to the
+high-dimensional sample space.
+
+We use a Gaussian process (GP) prior on f , which allows us to model sample covariances in the
+latent space as a function of object and view feature vectors. Herein, we use a convolutional neural
+network for g, which is a natural choice for image data (LeCun et al., 1995). The resulting marginal
+likelihood of the GPPVAE, is
+
+p(Y | X, W , φ, σ2
+
+y, θ, α) =
+
+p(Y | Z, φ, σ2
+
+y)p (Z | X, W , θ, α) dZ,
+
+(3)
+
+where Y = [y1, . . . , yN ]T ∈ RN ×K, Z = [z1, . . . , zN ]T ∈ RN ×L, W = [w1, . . . , wQ]T ∈
+RQ×R, X = [x1, . . . , xP ]T ∈ RP ×M . Additionally, φ denotes the parameters of g and θ the GP
+kernel parameters.
+
+(cid:90)
+
+3
+
+Figure 1: (a) Generative model underlying the proposed GPPVAE. (b) Pictorial representation of
+the inference procedure in GPPVAE. Each sample (here an image) is encoded in a low-dimensional
+space and then decoded to the original space. Covariances between samples are modeled through a
+GP prior on each column of the latent representation matrix Z.
+
+Gaussian Process Model. The GP prior deﬁnes the following multivariate normal distribution on
+latent representations:
+
+p (Z | X, W , θ, α) =
+
+N (cid:0)zl | 0, Kθ(X, W ) + αIN
+
+(cid:1) ,
+
+L
+(cid:89)
+
+l=1
+
+where zl denotes the l-th column of Z. In the setting considered in this paper, the covariance
+function Kθ is composed of a view kernel that models covariances between views, and an object
+kernel that models covariances between objects. Speciﬁcally, the covariance between sample n (with
+corresponding feature vectors xpn and wqn) and sample m (with corresponding feature vectors xpm
+and wqm) is given by the factorized form (Bonilla et al., 2007; Rakitsch et al., 2013):
+
+Kθ(X, W )nm = K(view)
+
+θ
+
+(wqn , wqm)K(object)
+
+θ
+
+(xpn , xpm ).
+
+Observed versus unobserved feature vectors Our model can be used when either one, or both of
+the view/sample feature vectors are unobserved. In this setting, we regard the unobserved features
+as latent variables and obtain a point estimate for them, similar to Gaussian process latent variable
+models (Lawrence, 2005). We have done so in our experiments.
+
+3.2
+
+Inference
+
+As with a standard VAE, we make use of variational inference for our model. Speciﬁcally, we
+consider the following variational distribution over the latent variables
+
+qψ(Z | Y ) =
+
+(cid:16)
+
+(cid:89)
+
+N
+
+n
+
+zn | µz
+
+ψ(yn), diag(σz 2
+
+ψ(yn))
+
+(cid:17)
+
+,
+
+which approximates the true posterior on Z. In Eq. (6), µz
+ψ are the hyperparameters of the
+variational distribution and are neural network functions of the observed data, while ψ denotes the
+weights of such neural networks. We obtain the following evidence lower bound (ELBO):
+
+ψ and σz
+
+logp(Y | X, W , φ, σ2
+
+y, θ) ≥ EZ∼qψ
+
+log N (yn | gφ(zn), σ2
+
+(cid:35)
+yIK) + logp (Z | X, W , θ, α)
+
++
+
++
+
+1
+2
+
+(cid:88)
+
+nl
+
+log(σz 2
+
+ψ(yn)l) + const.
+
+(7)
+
+(cid:34)
+
+(cid:88)
+
+n
+
+4
+
+(4)
+
+(5)
+
+(6)
+
+Stochastic backpropagation. We use stochastic backpropagation to maximize the ELBO (Kingma
+and Welling, 2013; Rezende et al., 2014). Speciﬁcally, we approximate the expectation by sampling
+from a reparameterized variational posterior over the latent representations, obtaining the following
+loss function:
+l (cid:0)φ, ψ, θ, α, σ2
+
+(cid:1) =
+
+y
+
+= N Klog σ2
+
+y +
+
+(cid:88)
+
+n
+
+(cid:124)
+
+(cid:13)yn − gφ(zψ n)(cid:13)
+(cid:13)
+2
+(cid:13)
+2σ2
+y
+(cid:123)(cid:122)
+reconstruction term
+
+(cid:125)
+
+− logp (Zψ | X, W , θ, α)
+(cid:123)(cid:122)
+(cid:125)
+latent-space GP term
+
+(cid:124)
+
++
+
+(cid:88)
+
+nl
+
+1
+2
+(cid:124)
+
+log(σz 2
+
+,
+ψ(yn)l)
+
+(8)
+
+(cid:123)(cid:122)
+regularization term
+
+(cid:125)
+
+which we optimize with respect to φ, ψ, θ, α, σ2
+RN ×L are sampled using the re-parameterization trick Kingma and Welling (2013),
+
+y. Latent representations Zψ = (cid:2)zψ 1, . . . , zψ N
+
+(cid:3) ∈
+
+zψ n = µz
+
+ψ(yn) + (cid:15)n (cid:12) σz
+
+ψ(yn), (cid:15)n ∼ N (0, IL×L), n = 1, . . . , N,
+
+(9)
+
+where (cid:12) denotes the Hadamard product. Full details on the derivation of the loss can be found in
+Supplementary Information.
+
+Efﬁcient GP computations. Naive computations in Gaussian processes scale cubically with the
+number of samples (Rasmussen, 2004). In this work, we achieve linear computations in the number
+of samples by assuming that the overall GP kernel is low-rank. In order to meet this assumption, we (i)
+exploit that in our setting the number of views, Q, is much lower than the number of samples, N , and
+(ii) impose a low-rank form for the object kernel (M (cid:28) N ). Brieﬂy, as a result of these assumptions,
+the total covariance is the sum of a low-rank matrix and the identity matrix K = V V T + αI,
+where V ∈ RN ×H and H (cid:28) N 1. For this covariance, computation of the inverse and the log
+determinant, which have cubic complexity for general covariances, can be recast to have complexity,
+O(N H 2 + H 3 + HN K) and O(N H 2 + H 3), respectively, using the Woodbury identity (Henderson
+and Searle, 1981) and the determinant lemma (Harville, 1997):
+
+1
+α
+
+1
+α
+
+K−1M =
+
+I −
+
+V (αI + V T V )−1V T M ,
+
+log |K| = N L log α + log
+
+I +
+
+V T V
+
+,
+
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+
+1
+α
+
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+
+(10)
+
+(11)
+
+where M ∈ RN ×K. Note a low-rank approximation of an arbitrary kernel can be obtained through
+the fully independent training conditional approximation (Snelson and Ghahramani, 2006), which
+makes the proposed inference scheme applicable in a general setting.
+
+Low-memory stochastic backpropagation. Owing to the coupling between samples from the
+GP prior, mini-batch gradient descent is no longer applicable. However, a naive implementation
+of full gradient descent is impractical as it requires loading the entire dataset into memory, which
+is infeasible with most image datasets. To overcome this limitation, we propose a new strategy
+to compute gradients on the whole dataset in a low-memory fashion. We do so by computing the
+ﬁrst-order Taylor series expansion of the GP term of the loss with respect to both the latent encodings
+and the prior parameters, at each step of gradient descent. In doing so, we are able to use the following
+procedure:
+
+1. Compute latent encodings from the high-dimensional data using the encoder. This step can
+be performed in data mini-batches, thereby imposing only low-memory requirements.
+2. Compute the coefﬁcients of the GP-term Taylor series expansion using the latent encodings.
+Although this step involves computations across all samples, these have low-memory
+requirements as they only involve the low-dimensional representations.
+
+3. Compute a proxy loss by replacing the GP term by its ﬁrst-order Taylor series expansion,
+which locally has the same gradient as the original loss. Since the Taylor series expansion
+is linear in the latent representations, gradients can be easily accumulated across data
+mini-batches, making this step also memory-efﬁcient.
+
+1 For example,
+
+if both the view and the object kernels are linear, we have V
+
+=
+
+[X:,1 (cid:12) W:,1, X:,1 (cid:12) W:,2, . . . , X:,M (cid:12) W:,Q] ∈ RN ×H .
+
+5
+
+4. Update the parameters using these accumulated gradients.
+
+Full details on this procedure are given in Supplementary Information.
+
+3.3 Predictive posterior
+
+We derive an approximate predictive posterior for GPPVAE that enables out-of-sample predictions
+of high-dimensional samples. Speciﬁcally, given training samples Y , object feature vectors X, and
+view feature vectors W , the predictive posterior for image representation y(cid:63) of object p(cid:63) in view q(cid:63)
+is given by
+
+p(y(cid:63) | x(cid:63), w(cid:63), Y , X, W ) ≈
+
+(cid:90)
+
+p(y(cid:63) | z(cid:63))
+(cid:124)
+(cid:125)
+(cid:123)(cid:122)
+decode GP prediction
+
+p(z(cid:63) | x(cid:63), w(cid:63), Z, X, W )
+(cid:125)
+(cid:123)(cid:122)
+(cid:124)
+latent-space GP predictive posterior
+
+q(Z | Y )
+(cid:125)
+(cid:123)(cid:122)
+(cid:124)
+encode training data
+
+dz(cid:63)dZ(12)
+
+where x(cid:63) and w(cid:63) are object and feature vectors of object p(cid:63) and view q(cid:63) respectively, and we dropped
+the dependency on parameters for notational compactness. The approximation in Eq. (12) is obtained
+by replacing the exact posterior on Z with the variational distribution q(Z | Y ) (see Supplementary
+Information for full details). From Eq. (12), the mean of the GPPVAE predictive posterior can be
+obtained by the following procedure: (i) encode training image data in the latent space through the
+encoder, (ii) predict latent representation z(cid:63) of image y(cid:63) using the GP predictive posterior, and (iii)
+decode latent representation z(cid:63) to the high-dimensional image space through the decoder.
+
+4 Experiments
+
+We focus on the task of making predictions of unseen images, given speciﬁed auxiliary information.
+Speciﬁcally, we want to predict the image representation of object p in view q when that object was
+never observed in that view, but assuming that object p was observed in at least one other view, and
+that view had been observed for at least one other object. For example, we may want to predict the
+pose of a person appearing in our training data set without having seen that person in that pose. To do
+so, we need to have observed that pose for other people. This prediction task gets at the heart of what
+we want our model to achieve, and therefore serves as a good evaluation metric.
+
+4.1 Methods considered
+
+In addition to the GPPVAE presented (GPPVAE-joint), we also considered a version with a simpler
+optimization scheme (GPPVAE-dis). We also considered two extensions of the VAE that can be used
+for the task at hand. Speciﬁcally, we considered:
+
+• GPPVAE with joint optimization (GPPVAE-joint), where autoencoder and GP parame-
+ters were optimized jointly. We found that convergence was improved by ﬁrst training the
+encoder and the decoder through standard VAE, then optimizing the GP parameters with
+ﬁxed encoder and decoder for 100 epochs, and ﬁnally, optimizing all parameters jointly. Out-
+of-sample predictions from GPPVAE-joint were obtained by using the predictive posterior
+in Eq. (12);
+
+• GPPVAE with disjoint optimization (GPPVAE-dis), where we ﬁrst learned the encoder
+and decoder parameters through standard VAE, and then optimized the GP parameters with
+ﬁxed encoder and decoder. Again, out-of-sample predictions were obtained by using the
+predictive posterior in Eq. (12);
+
+• Conditional VAE (CVAE) (Sohn et al., 2015), where view auxiliary information was
+provided as input to both the encoder and decoder networks (Figure S1, S2). After training,
+we considered the following procedure to generate an image of object p in view q. First,
+we computed latent representations of all the images of object p across all the views in the
+training data (in this setting, CVAE latent representations are supposedly independent from
+the view). Second, we averaged all the obtained latent representations to obtain a unique
+representation of object p. Finally, we fed the latent representation of object p together with
+out-of-sample view q to the CVAE decoder. As an alternative implementation, we also tried
+to consider the latent representation of a random image of object p instead of averaging, but
+the performance was worse–these results are not included;
+
+6
+
+• Linear Interpolation in VAE latent space (LIVAE), which uses linear interpolation be-
+tween observed views of an object in the latent space learned through standard VAE in
+order to predict unobserved views of the same object. Speciﬁcally, denoting z1 and z2
+as the latent representations of images of a given object in views r1 and r2, a prediction
+for the image of that same object in an intermediate view, r(cid:63), is obtained by ﬁrst linearly
+interpolating between z1 and z2, and then projecting the interpolated latent representation
+to the high-dimensional image space.
+
+Consistent with the L2 reconstruction error appearing in the loss off all the aforementioned VAEs
+(e. g., Eq. (18)), we considered pixel-wise mean squared error (MSE) as the evaluation metric. We
+used the same architecture for encoder and decoder neural networks in all methods compared (see
+Figure S1, S2 in Supplementary Information). The architecture and σ2
+y, were chosen to minimize
+the ELBO loss for the standard VAE on a validation set (Figure S3, Supplementary Information).
+For CVAE and LIVAE, we also considered the alternative strategy of selecting the value of σ2
+y that
+maximizes out-of-sample prediction performance on the validation set (the results for these two
+methods are in Figure S4 and S5). All models were trained using the Adam optimizer (Kingma and
+Ba, 2014) with standard parameters and a learning rate of 0.001. When optimizing GP parameters
+with ﬁxed encoder and decoder, we observed that higher learning rates led to faster convergence
+without any loss in performance, and thus we used a higher learning rate of 0.01 in this setting.
+
+4.2 Rotated MNIST
+
+Setup. We considered a variation of the MNIST dataset, consisting of rotated images of hand-
+written "3" digits with different rotation angles. In this setup, objects correspond to different draws of
+the digit "3" while views correspond to different rotation states. View features are observed scalars,
+corresponding to the attached rotation angles. Conversely, object feature vectors are unobserved and
+learned from data—no draw-speciﬁc features are available.
+
+Dataset generation. We generated a dataset from 400 handwritten versions of the digit three by
+rotating through Q = 16 evenly separated rotation angles in [0, 2π), for a total of N = 6, 400
+samples. We then kept 90% of the data for training and test, and the rest for validation. From the
+training and test sets, we then randomly removed 25% of the images to consider the scenario of
+incomplete data. Finally, the set that we used for out-of-sample predictions (test set) was created by
+removing one of the views (i. e., rotation angles) from the remaining images. This procedure resulted
+in 4, 050 training images spanning 15 rotation angles and 270 test images spanning one rotation
+angle.
+
+Autoencoder and GP model. We set the dimension of the latent space to L = 16. For encoder
+and decoder neural networks we considered the convolutional architecture in Figure S1. As view
+kernel, we considered a periodic squared exponential kernel taking rotation angles as inputs. As
+object kernel, we considered a linear kernel taking the object feature vectors as inputs. As object
+feature vectors are unobserved, we learned from data—their dimensionality was set to M = 8. The
+resulting composite kernel K, expresses the covariance between images n and m in terms of the
+corresponding rotations angles wqn and wqm and object feature vectors xpn and xpm as
+
+Kθ(X, w)nm = β exp
+
+−
+
+(13)
+
+(cid:18)
+
+2sin2|wqn − wqm |
+ν2
+
+(cid:124)
+
+(cid:123)(cid:122)
+rotation kernel
+
+(cid:19)
+
+(cid:125)
+
+· xT
+pn
+
+xpm
+(cid:124) (cid:123)(cid:122) (cid:125)
+digit draw kernel
+
+,
+
+where β ≥ 0 and ν ≥ 0 are kernel hyper-parameters learned during training of the model (Rasmussen,
+2004), and we set θ = {β, ν}.
+
+Results. GPPVAE-joint and GPPVAE-dis yielded lower MSE than CVAE and LIVAE in the
+interpolation task, with GPPVAE-joint performing signiﬁcantly better than GPPVAE-dis (0.0280 ±
+0.0008 for GPVAE-joint vs 0.0306 ± 0.0009 for GPPVAE-dis, p < 0.02, Fig. 2a,b). Importantly,
+GPPVAE-joint learns different variational parameters than a standard VAE (Fig. 2c,d), used also by
+GPPVAE-dis, consistent with the fact that GPPVAE-joint performs better by adapting the VAE latent
+space using guidance from the prior.
+
+7
+
+Figure 2: Results from experiments on rotated MNIST. (a) Mean squared error on test set. Error
+bars represent standard error of per-sample MSE. (b) Empirical density of estimated means of qψ,
+aggregated over all latent dimensions. (c) Empirical density of estimated log variances of qψ. (d)
+Out-of-sample predictions for ten random draws of digit "3" at the out-of-sample rotation state. (e, f)
+Object and view covariances learned through GPPVAE-joint.
+
+4.3 Face dataset
+
+Setup. As second application, we considered the Face-Place Database (3.0) (Righi et al., 2012),
+which contains images of people faces in different poses. In this setting, objects correspond to the
+person identities while views correspond to different poses. Both view and object feature vectors are
+unobserved and learned from data. The task is to predict images of people face in orientations that
+remained unobserved.
+
+Data. We considered 4,835 images from the Face-Place Database (3.0), which includes images
+of faces for 542 people shown across nine different poses (frontal and 90, 60, 45, 30 degrees left
+and right2). We randomly selected 80% of the data for training (n = 3, 868), 10% for validation
+(n = 484) and 10% for testing (n = 483). All images were rescaled to 128 × 128.
+
+Autoencoder and GP model. We set the dimension of the latent space to L = 256. For encoder
+and decoder neural networks we considered the convolutional architecture in Figure S2. We consider
+a full-rank covariance as a view covariance (only nine poses are present in the dataset) and a linear
+covariance for the object covariance (M = 64).
+
+Results. GPPVAE-jointand GPPVAE-disyielded lower MSE than CVAE and LIVAE (Fig. 2a,b).
+In contrast to the MNIST problem, the difference between GPPVAE-joint andGPPVAE-dis was not
+signiﬁcant (0.0281 ± 0.0008 for GPPVAE-joint vs 0.0298 ± 0.0008 for GPPVAE-dis). Importantly,
+GPPVAE-joint was able to dissect people (object) and pose (view) covariances by learning people
+and pose kernel jointly (Fig. 2a,b).
+
+5 Discussion
+
+We introduced GPPVAE, a generative model that incorporates a GP prior over the latent space.
+We also presented a low-memory and computationally efﬁcient inference strategy for this model,
+which makes the model applicable to large high-dimensional datasets. GPPVAE outperforms natural
+baselines (CVAE and linear interpolations in the VAE latent space) when predicting out-of-sample
+test images of objects in speciﬁed views (e. g., pose of a face, rotation of a digit). Possible future
+
+2 We could have used the pose angles as view feature scalar similar to the application in rotated MNIST, but
+purposely ignored these features to consider a more challenging setting were neither object and view features are
+observed.
+
+8
+
+Figure 3: Results from experiments on the face dataset. (a) Mean squared error on test set (b)
+Out-of-sample predictions of people faces in out-of-sample poses. (c, d) Object and view covariances
+learned through GPPVAE-joint.
+
+work includes augmenting the GPPVAE loss with a discriminator function, similar in spirit to a
+GAN (Goodfellow et al., 2014), or changing the loss to be perception-aware (Hou et al., 2017) (see
+results from preliminary experiments in Figure S6). Another extension is to consider approximations
+of the GP likelihood that fully factorize over data points (Hensman et al., 2013); this could further
+improve the scalability of our method.
+
+An implementation of GPPVAE is available at https://github.com/fpcasale/GPPVAE.
+
+Stimulus images courtesy of Michael J. Tarr, Center for the Neural Basis of Cognition and Department
+of Psychology, Carnegie Mellon University, http:// www.tarrlab.org. Funding provided by NSF award
+0339122.
+
+Code availability
+
+Acknowledgments
+
+References
+
+Matthias Bauer, Mark van der Wilk, and Carl Edward Rasmussen. Understanding probabilistic sparse
+gaussian process approximations. In Advances in neural information processing systems, pages
+1533–1541, 2016.
+
+Edwin V Bonilla, Felix V Agakov, and Christopher KI Williams. Kernel multi-task learning using
+
+task-speciﬁc features. In Artiﬁcial Intelligence and Statistics, pages 43–50, 2007.
+
+Francesco Paolo Casale, Barbara Rakitsch, Christoph Lippert, and Oliver Stegle. Efﬁcient set tests
+
+for the genetic analysis of correlated traits. Nature methods, 12(8):755, 2015.
+
+9
+
+Francesco Paolo Casale, Danilo Horta, Barbara Rakitsch, and Oliver Stegle. Joint genetic analysis
+using variant sets reveals polygenic gene-context interactions. PLoS genetics, 13(4):e1006693,
+2017.
+
+Xi Chen, Diederik P Kingma, Tim Salimans, Yan Duan, Prafulla Dhariwal, John Schulman, Ilya
+Sutskever, and Pieter Abbeel. Variational lossy autoencoder. arXiv preprint arXiv:1611.02731,
+2016.
+
+Lehel Csató and Manfred Opper. Sparse on-line gaussian processes. Neural computation, 14(3):
+
+641–668, 2002.
+
+Adrian V Dalca, Ramesh Sridharan, Mert R Sabuncu, and Polina Golland. Predictive modeling of
+anatomy with genetic and clinical data. In International Conference on Medical Image Computing
+and Computer-Assisted Intervention, pages 519–526. Springer, 2015.
+
+Nicolas Durrande, David Ginsbourger, Olivier Roustant, and Laurent Carraro. Additive covariance
+kernels for high-dimensional gaussian process modeling. arXiv preprint arXiv:1111.6233, 2011.
+
+Yarin Gal, Mark Van Der Wilk, and Carl Edward Rasmussen. Distributed variational inference in
+sparse gaussian process regression and latent variable models. In Advances in Neural Information
+Processing Systems, pages 3257–3265, 2014.
+
+Mehmet Gönen and Ethem Alpaydın. Multiple kernel learning algorithms. Journal of machine
+
+learning research, 12(Jul):2211–2268, 2011.
+
+Ian Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, Bing Xu, David Warde-Farley, Sherjil Ozair,
+Aaron Courville, and Yoshua Bengio. Generative adversarial nets. In Advances in neural informa-
+tion processing systems, pages 2672–2680, 2014.
+
+David A Harville. Matrix algebra from a statistician’s perspective, volume 1. Springer, 1997.
+
+Harold V Henderson and Shayle R Searle. On deriving the inverse of a sum of matrices. Siam Review,
+
+23(1):53–60, 1981.
+
+James Hensman, Nicolo Fusi, and Neil D Lawrence. Gaussian processes for big data. In Uncertainty
+
+in Artiﬁcial Intelligence, page 282. Citeseer, 2013.
+
+Matthew D Hoffman and Matthew J Johnson. Elbo surgery: yet another way to carve up the variational
+evidence lower bound. In Workshop in Advances in Approximate Bayesian Inference, NIPS, 2016.
+
+Xianxu Hou, Linlin Shen, Ke Sun, and Guoping Qiu. Deep feature consistent variational autoencoder.
+In Applications of Computer Vision (WACV), 2017 IEEE Winter Conference on, pages 1133–1141.
+IEEE, 2017.
+
+Zhuxi Jiang, Yin Zheng, Huachun Tan, Bangsheng Tang, and Hanning Zhou. Variational deep embed-
+ding: An unsupervised and generative approach to clustering. arXiv preprint arXiv:1611.05148,
+2016.
+
+Matthew Johnson, David K Duvenaud, Alex Wiltschko, Ryan P Adams, and Sandeep R Datta.
+Composing graphical models with neural networks for structured representations and fast inference.
+In Advances in neural information processing systems, pages 2946–2954, 2016.
+
+Diederik P Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint
+
+Diederik P Kingma and Max Welling. Auto-encoding variational bayes.
+
+arXiv preprint
+
+arXiv:1412.6980, 2014.
+
+arXiv:1312.6114, 2013.
+
+Diederik P Kingma, Shakir Mohamed, Danilo Jimenez Rezende, and Max Welling. Semi-supervised
+learning with deep generative models. In Advances in Neural Information Processing Systems,
+pages 3581–3589, 2014.
+
+Diederik P Kingma, Tim Salimans, Rafal Jozefowicz, Xi Chen, Ilya Sutskever, and Max Welling.
+Improved variational inference with inverse autoregressive ﬂow. In Advances in Neural Information
+Processing Systems, pages 4743–4751, 2016.
+
+10
+
+Tejas D Kulkarni, William F Whitney, Pushmeet Kohli, and Josh Tenenbaum. Deep convolutional
+inverse graphics network. In Advances in Neural Information Processing Systems, pages 2539–
+2547, 2015.
+
+Neil Lawrence. Probabilistic non-linear principal component analysis with gaussian process latent
+
+variable models. Journal of machine learning research, 6(Nov):1783–1816, 2005.
+
+Yann LeCun, Yoshua Bengio, et al. Convolutional networks for images, speech, and time series. The
+
+handbook of brain theory and neural networks, 3361(10):1995, 1995.
+
+John Lonsdale, Jeffrey Thomas, Mike Salvatore, Rebecca Phillips, Edmund Lo, Saboor Shad, Richard
+Hasz, Gary Walters, Fernando Garcia, Nancy Young, et al. The genotype-tissue expression (gtex)
+project. Nature genetics, 45(6):580, 2013.
+
+Lars Maaløe, Casper Kaae Sønderby, Søren Kaae Sønderby, and Ole Winther. Auxiliary deep
+
+generative models. arXiv preprint arXiv:1602.05473, 2016.
+
+Eric Nalisnick, Lars Hertel, and Padhraic Smyth. Approximate inference for deep latent gaussian
+
+mixtures. In NIPS Workshop on Bayesian Deep Learning, volume 2, 2016.
+
+Gaurav Pandey and Ambedkar Dukkipati. Variational methods for conditional multimodal deep
+learning. In Neural Networks (IJCNN), 2017 International Joint Conference on, pages 308–315.
+IEEE, 2017.
+
+Joaquin Quiñonero-Candela and Carl Edward Rasmussen. A unifying view of sparse approximate
+gaussian process regression. Journal of Machine Learning Research, 6(Dec):1939–1959, 2005.
+
+Barbara Rakitsch, Christoph Lippert, Karsten Borgwardt, and Oliver Stegle. It is all in the noise:
+Efﬁcient multi-task gaussian process inference with structured residuals. In Advances in neural
+information processing systems, pages 1466–1474, 2013.
+
+Rajesh Ranganath, Dustin Tran, and David Blei. Hierarchical variational models. In International
+
+Conference on Machine Learning, pages 324–333, 2016.
+
+Carl Edward Rasmussen. Gaussian processes in machine learning. In Advanced lectures on machine
+
+learning, pages 63–71. Springer, 2004.
+
+Danilo Jimenez Rezende and Shakir Mohamed. Variational inference with normalizing ﬂows. arXiv
+
+preprint arXiv:1505.05770, 2015.
+
+Danilo Jimenez Rezende, Shakir Mohamed, and Daan Wierstra. Stochastic backpropagation and
+
+approximate inference in deep generative models. arXiv preprint arXiv:1401.4082, 2014.
+
+Giulia Righi, Jessie J Peissig, and Michael J Tarr. Recognizing disguised faces. Visual Cognition, 20
+
+(2):143–169, 2012.
+
+Rui Shu, James Brofos, Frank Zhang, Hung Hai Bui, Mohammad Ghavamzadeh, and Mykel Kochen-
+derfer. Stochastic video prediction with conditional density estimation. In ECCV Workshop on
+Action and Anticipation for Visual Learning, volume 2, 2016.
+
+N Siddharth, Brooks Paige, Alban Desmaison, Van de Meent, Frank Wood, Noah D Goodman,
+Pushmeet Kohli, Philip HS Torr, et al. Inducing interpretable representations with variational
+autoencoders. arXiv preprint arXiv:1611.07492, 2016.
+
+N Siddharth, Brooks Paige, Jan-Willem Van de Meent, Alban Desmaison, Frank Wood, Noah D
+Goodman, Pushmeet Kohli, and Philip HS Torr. Learning disentangled representations with
+semi-supervised deep generative models. ArXiv e-prints (Jun 2017), 2017.
+
+Edward Snelson and Zoubin Ghahramani. Sparse gaussian processes using pseudo-inputs.
+
+In
+
+Advances in neural information processing systems, pages 1257–1264, 2006.
+
+Kihyuk Sohn, Honglak Lee, and Xinchen Yan. Learning structured output representation using deep
+conditional generative models. In Advances in Neural Information Processing Systems, pages
+3483–3491, 2015.
+
+11
+
+Oliver Stegle, Christoph Lippert, Joris M Mooij, Neil D Lawrence, and Karsten M Borgwardt.
+Efﬁcient inference in matrix-variate gaussian models with\iid observation noise. In Advances in
+neural information processing systems, pages 630–638, 2011.
+
+Masahiro Suzuki, Kotaro Nakayama, and Yutaka Matsuo. Joint multimodal learning with deep
+
+generative models. arXiv preprint arXiv:1611.01891, 2016.
+
+Michalis Titsias. Variational learning of inducing variables in sparse gaussian processes. In Artiﬁcial
+
+Intelligence and Statistics, pages 567–574, 2009.
+
+Jakub M Tomczak and Max Welling. Vae with a vampprior. arXiv preprint arXiv:1705.07120, 2017.
+
+Dustin Tran, Rajesh Ranganath, and David M Blei. The variational gaussian process. arXiv preprint
+
+arXiv:1511.06499, 2015.
+
+Ramakrishna Vedantam, Ian Fischer, Jonathan Huang, and Kevin Murphy. Generative models of
+
+visually grounded imagination. arXiv preprint arXiv:1705.10762, 2017.
+
+Weiran Wang, Xinchen Yan, Honglak Lee, and Karen Livescu. Deep variational canonical correlation
+
+analysis. arXiv preprint arXiv:1610.03454, 2016.
+
+Andrew Wilson and Ryan Adams. Gaussian process kernels for pattern discovery and extrapolation.
+
+In International Conference on Machine Learning, pages 1067–1075, 2013.
+
+Andrew Gordon Wilson, Zhiting Hu, Ruslan Salakhutdinov, and Eric P Xing. Deep kernel learning.
+
+In Artiﬁcial Intelligence and Statistics, pages 370–378, 2016.
+
+Mike Wu and Noah Goodman. Multimodal generative models for scalable weakly-supervised
+
+learning. arXiv preprint arXiv:1802.05335, 2018.
+
+12
+
+A Supplementary Information for Gaussian Process Prior Variational
+
+Autoencoders
+
+A.1 Supplementary Methods
+
+Derivation of the ELBO
+
+We assume the following posterior distribution on latent variables
+
+qψ(Z | Y ) =
+
+(cid:16)
+
+(cid:89)
+
+N
+
+n
+
+zn | µz
+
+ψ(yn), diag(σz 2
+
+ψ(yn))
+
+(cid:17)
+
+,
+
+(14)
+
+where ψ are variational parameters. The evidence lower bound (ELBO) can be derived as follows:
+
+logp(Y | X, W , φ, σ2
+
+y, θ) = log
+
+(cid:90) p(Y | z, φ, σ2
+
+y)p (Z | X, W , θ, α)
+qψ(Z | Y )
+
+qψ(Z | Y )dZ
+
+(cid:90)
+
+(cid:18) p(Y | z, φ, σ2
+
+≥
+
+log
+
+y)p (Z | X, W , θ, α)
+qψ(Z | Y )
+
+(cid:19)
+
+qψ(Z | Y )dZ
+
+= EZ∼qψ
+
+log N (yn | gφ(zn), σ2
+
+yIK ) + logp (Z | X, W , θ, α)
+
++(15)
+
+= EZ∼qψ
+
+log N (yn | gφ(zn), σ2
+
+yIK ) + logp (Z | X, W , θ, α)
+
++(16)
+
+(cid:90)
+
+−
+
+logqψ(Z | Y )qψ(Z | Y )dZ
+
++
+
+1
+2
+
+(cid:88)
+
+nl
+
+log(σz 2
+
+ψ(yn)l) + const
+
+(cid:35)
+
+(cid:35)
+
+Derivation of the loss function
+
+First, we approximate the expectation by sampling. Speciﬁcally, we sample a latent representation
+Zψ = (cid:2)zψ 1, . . . , zψ N
+zψ n = µz
+
+ψ(yn), (cid:15)n ∼ N (0, IL×L), n = 1, . . . , N,
+
+(cid:3) ∈ RN ×L from the posterior as:
+
+ψ(yn) + (cid:15)n (cid:12) σz
+
+(17)
+
+where we used the reparametrization trick to separate the noisy generation of samples from the model
+parameters. The resulting approximate ELBO is
+
+ELBO ≈
+
+log N (yn | gφ(zψ n), σ2
+
+yIK ) + logp (Zψ | X, W , θ, α) +
+
+log(σz 2
+
+ψ(yn)l) + const
+
+(cid:88)
+
+n
+
+1
+2
+
+(cid:88)
+
+nl
+
+Finally, as we optimize σ2
+y on a validation set (and not on the training set) in order to avoid overﬁtting,
+the maximization of the approximate ELBO on the training set is equivalent to minimizing the
+following cost:
+
+loss =
+
+(yi − gφ(ωψ n))2
+
+−
+
+1
+K
+
+(cid:88)
+
+i
+
+(cid:124)
+
+(cid:123)(cid:122)
+reconstruction term
+
+(cid:125)
+
+λ(σ2
+y)
+L
+
+
+
+logp (Zψ | X, W , θ, α)
+
+
+(cid:125)
+(cid:123)(cid:122)
+(cid:124)
+
+latent-space GP model
+
++
+
+(cid:88)
+
+nl
+
+1
+2
+(cid:124)
+
+log(σz 2
+
+ψ(yn)l)
+
+,
+
+(18)
+
+(cid:123)(cid:122)
+regularization
+
+where K is the number of pixels in the image and λ is a trade-off parameter balancing data recon-
+struction and latent space prior regularization.
+
+Selection of λ. We select the value of λ based on a standard VAE and use the same value for
+all compared models. Speciﬁcally, we optimize the VAE loss for different values of λ and select
+the value for which the VAE ELBO is maximal on a validation set. In order to compute the VAE
+
+
+
+
+
+
+
+
+
+(cid:125)
+
+(cid:34)
+
+(cid:88)
+
+n
+
+n
+
+(cid:34)
+
+(cid:88)
+
+
+
+13
+
+validation ELBO we need to estimate optimal value of σ2
+certain value of λ = ˆλ, the optimal value of σ2
+
+y can be estimated as
+
+y for every value of λ in the grid. Given a
+
+(val)
+
+σ2
+y
+
+=
+
+1
+N (val)
+
+N (val)
+(cid:88)
+
+(cid:16)
+
+n=1
+
+y(val)
+n − gφλ(zψˆλ
+
+(val)
+n
+
+(cid:17)2
+)
+
+,
+
+where N (val) is the number of samples in the validation set and (φˆλ, ψˆλ) are the values of the
+encoder/decoder parameters obtained for λ = ˆλ.
+
+Fast low-rank computations
+
+Parameter inference in Gaussian models scales cubically with the number of observations. To preform
+fast parameter inference in our Gaussian model, we use the fact that the total covariance is the sum of
+low-rank matrix and the identity matrix:
+
+(20)
+where V ∈ RN ×O and O (cid:28) N . Using the Woodbury identity Henderson and Searle (1981) and
+the determinant lemma Harville (1997), the linear system K−1M with M ∈ RN ×K and the log
+determinant of K can be computed as:
+
+K = V V T + αI
+
+K−1M =
+
+I −
+
+V (αI + V T V )−1V T M ,
+
+1
+α
+
+1
+α
+
+logdetK = N Llogdetα + logdet(I +
+
+1
+α
+
+V T V ),
+
+which have O(N O2 + O3 + ON K) and O(N O2 + O3) complexities, respectively.
+
+Implementation of low-memory stochastic backpropagation
+
+For a single latent dimension the GP prior introduces the following term in the ELBO:
+
+logp (zψ | X, W , θ, α) = −
+
+ψKθ(X, V )−1zψ −
+zT
+
+logdetKθ(X, V )
+
+(23)
+
+1
+2
+
+1
+2
+
+In the equation above, zψ functionally depends on the image space representations and thus a naive
+computation of full gradient descent would require loading the entire high-dimensional dataset in
+memory, which would be unfeasible form many high-dimensional image datasets. To overcome this
+limitation, we recast computations in a form where full-matrix operations only take place in the low
+dimensional space, while the dependency on the nested derivatives, which involve high memory loads,
+is linearized and mini-batch operations are therefore allowed. This can be achieved by considering
+a ﬁrst-order Taylor expansion of the GP prior term. Specﬁcally, using that Kθ = VθV T
+θ + αI,
+and collecting all parameters in ξ = {ψ, θ, α}, we can rewrite the the term in Eq. (23) in this
+functional form f (z(ξ), V (ξ), α(ξ)). The ﬁrst-order Taylor expansion of f (z(ξ), V (ξ), α(ξ))
+around (zξ0, Vξ0 , αξ0) is:
+
+f (z(ξ), V (ξ), α(ξ)) ≈ aT z(ξ) + tr (cid:0)BT V (ξ)(cid:1) + cα(ξ) + const.
+
+where
+
+a =
+
+B =
+
+c =
+
+(cid:18) ∂f
+∂z
+(cid:18) ∂f
+∂V
+(cid:18) ∂f
+∂α
+
+(cid:19)
+
+ξ0
+(cid:19)
+
+0
+
+(cid:19)
+
+ξ0
+
+= (cid:0)K−1z(cid:1)
+
+ξ0
+
+= (cid:0)−K−1zzT K −1V + K−1V (cid:1)
+
+=
+
+1
+2
+
+(cid:0)−zT K−1K−1z + tr(K−1)(cid:1)
+
+ξ0
+
+ξ0
+
+(19)
+
+(21)
+
+(22)
+
+(24)
+
+(25)
+
+(26)
+
+(27)
+
+Note that this approximation, applied at every step of gradient descent, locally preserves the gradients.
+Thus we can engineer the following low-memory four-step procedure for full gradient descent:
+
+• produce and store latent noise realizations ((cid:15)) used for the reparametrization trick;
+
+14
+
+• obtain latent variable representations z, combining the outputs of the encoder and the noise
+
+(cid:15). We employ mini-batch forward propagation for this step;
+
+• evaluate a, B and c across all samples. Note that this step has low-memory requirements as
+
+it only involes low-dimensional representations;
+
+• exploit the local Taylor expansion as a proxy for our optimization. As this function is linear
+in the data, we can accumulate its gradient in a mini-batch fashion, by passing mini-batches
+of (cid:15), Y , a and B;
+
+• update the parameters ξ using the full gradients as in standard gradient descent.
+
+Finally, we note that in our setting, the computation of a, B and c has linear complexity in the
+number of samples because of the low rank structure of K (see previous section).
+
+We here derive an approximate predictive posterior for GPPVAE. Speciﬁcally, given training images
+Y , object representations X and view representations V the predictive posterior for image y(cid:63)
+representing object x(cid:63) in view v(cid:63) is
+
+Out-of-sample predictions.
+
+p(y(cid:63) | x(cid:63), v(cid:63), Y , X, V ) =
+
+p(y(cid:63), Y | x(cid:63), v(cid:63), X, V )
+p(Y | X, V )
+1
+p(Y | X, V )
+
+(cid:90)
+
+(cid:90)
+
+1
+p(Y | X, V )
+
+p(y(cid:63) | z(cid:63))p(Y | Z) p(z(cid:63), Z | x(cid:63), v(cid:63), X, V )
+(cid:125)
+
+(cid:124)
+
+(cid:123)(cid:122)
+joint distribution
+
+dz(cid:63)dZ
+
+p(y(cid:63) | z(cid:63))p(Y | Z) p(z(cid:63) | x(cid:63), v(cid:63), Z, X, V )
+(cid:125)
+
+(cid:124)
+
+p(Z | X, V )
+(cid:125)
+(cid:123)(cid:122)
+(cid:124)
+GP prior on training
+
+dz(cid:63)dZ(30)
+
+p(y(cid:63) | z(cid:63)) p(z(cid:63) | x(cid:63), v(cid:63), Z, X, V )
+(cid:125)
+
+(cid:123)(cid:122)
+predictive posterior
+
+(cid:124)
+
+dz(cid:63)dZ
+
+(31)
+
+(cid:123)(cid:122)
+predictive posterior
+p(Y | Z)p(Z | X, V )
+p(Y | X, V )
+(cid:123)(cid:122)
+posterior on Z
+
+(cid:124)
+
+(cid:125)
+
+(28)
+
+(29)
+
+(32)
+
+p(y(cid:63) | z(cid:63)) p(z(cid:63) | x(cid:63), v(cid:63), Z, X, V )
+(cid:125)
+
+(cid:123)(cid:122)
+predictive posterior
+
+(cid:124)
+
+q(Z | Y )
+(cid:123)(cid:122)
+(cid:125)
+(cid:124)
+approx. post. on Z
+
+dz(cid:63)dZ
+
+=
+
+=
+
+=
+
+≈
+
+(cid:90)
+
+(cid:90)
+
+where we dropped the dependency from the model and the variational parameters to simplify the
+notation.
+
+A.1.1 Supplementary Figures
+
+15
+
+Figure 4: Neural network architecture used in the MNIST experiments. (a) Encoder architecture;
+(b) Decoder architecture. The same encoder/decoder architectures are used for both VAE and
+GPPVAE. For CVAE, we still use the same architecture but we provide view representations (rotation
+angles) as inputs to both the encoder and the decoder. For the encoder, we provide rotation angles to
+the ﬁrst layer (by adding additional channels to the input image) and again before the dense layer (by
+stacking them to the vector produced by the last convolution). Similarly, for the decoder, we provide
+rotation angles as inputs to the ﬁrst layer (by stacking them with the 16-dimensional latent variable)
+and again before the ﬁrst convolution layer (by adding them as additional channels to the 8x8x4 tensor
+fed to the ﬁrst convolution layer). For a fair comparison with GPPVAE, we account for periodicity in
+the view representation by providing both the angle sine and cosine, i.e. w = [sinφ, cosφ], where φ
+is the rotation angle.
+
+Figure 5: Neural network architecture used in the face dataset experiments.
+(a) Encoder
+architecture; (b) Decoder architecture. The same encoder/decoder architectures are used for both
+VAE and GPPVAE. For CVAE, we still use the same architecture but we provide view information
+as one hot encoding of the 9 different poses to both the encoder and the decoder networks. For the
+encoder, we provide view representations to the ﬁrst layer (by adding additional channels to the
+input image) and again before the dense layer (by stacking them to the vector produced by the last
+convolution). Similarly, for the decoder, we provide view representations as inputs to the ﬁrst layer
+(by stacking them with the 16-dimensional latent variable) and again before the ﬁrst convolution
+layer (by adding them as additional channels to the 8x8x4 tensor fed to the ﬁrst convolution layer).
+
+16
+
+Figure 6: Selection of the trade-off parameter between ﬁt-to-data and latent-space model. The
+trade-off parameter was selected as to maximize VAE ELBO. We here show the VAE validation lower
+bound as a function of the trade-off parameter for the MNIST (a) and the face dataset (b).
+
+Figure 7: For CVAE and LIVAE, we also considered the alternative strategy of selecting the value
+of the trade-off parameter λ that maximizes prediction performance on the validation set. We refer
+to these additional methods as CVAE-opt and LIVAE-opt. We here show the selection of λ for
+CVAE-opt (a) and LIVAE-opt (b) and their performance (c-d) for the experiments in MNIST.
+
+Figure 8: Analogous to Figure S4 but for the face data experiments.
+
+17
+
+Figure 9: Out-of-sample predictions obtained from GPPVAE-joint when considering the perceptual
+loss introduced in Hou et al. (2017).
+
+18
+

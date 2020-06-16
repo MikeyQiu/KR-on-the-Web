@@ -1,0 +1,2662 @@
+iCaRL: Incremental Classiﬁer and Representation Learning
+
+Sylvestre-Alvise Rebufﬁ
+University of Oxford/IST Austria
+
+Alexander Kolesnikov, Georg Sperl, Christoph H. Lampert
+IST Austria
+
+7
+1
+0
+2
+ 
+r
+p
+A
+ 
+4
+1
+ 
+ 
+]
+
+V
+C
+.
+s
+c
+[
+ 
+ 
+2
+v
+5
+2
+7
+7
+0
+.
+1
+1
+6
+1
+:
+v
+i
+X
+r
+a
+
+Abstract
+
+A major open problem on the road to artiﬁcial intelli-
+gence is the development of incrementally learning systems
+that learn about more and more concepts over time from
+a stream of data. In this work, we introduce a new train-
+ing strategy, iCaRL, that allows learning in such a class-
+incremental way: only the training data for a small number
+of classes has to be present at the same time and new classes
+can be added progressively.
+
+iCaRL learns strong classiﬁers and a data representa-
+tion simultaneously. This distinguishes it from earlier works
+that were fundamentally limited to ﬁxed data representa-
+tions and therefore incompatible with deep learning ar-
+chitectures. We show by experiments on CIFAR-100 and
+ImageNet ILSVRC 2012 data that iCaRL can learn many
+classes incrementally over a long period of time where other
+strategies quickly fail.
+
+1. Introduction
+
+Natural vision systems are inherently incremental: new
+visual information is continuously incorporated while ex-
+isting knowledge is preserved. For example, a child visiting
+the zoo will learn about many new animals without forget-
+ting the pet it has at home. In contrast, most artiﬁcial object
+recognition systems can only be trained in a batch setting,
+where all object classes are known in advance and they the
+training data of all classes can be accessed at the same time
+and in arbitrary order.
+
+As the ﬁeld of computer vision moves closer towards ar-
+tiﬁcial intelligence it becomes apparent that more ﬂexible
+strategies are required to handle the large-scale and dynamic
+properties of real-world object categorization situations. At
+the very least, a visual object classiﬁcation system should be
+able to incrementally learn about new classes, when train-
+ing data for them becomes available. We call this scenario
+class-incremental learning.
+
+Formally, we demand the following three properties of
+
+an algorithm to qualify as class-incremental:
+
+i) it should be trainable from a stream of data in which
+examples of different classes occur at different times,
+
+Figure 1: Class-incremental learning: an algorithm learns
+continuously from a sequential data stream in which new
+classes occur. At any time, the learner is able to perform
+multi-class classiﬁcation for all classes observed so far.
+
+ii) it should at any time provide a competitive multi-class
+
+classiﬁer for the classes observed so far,
+
+iii) its computational requirements and memory footprint
+should remain bounded, or at least grow very slowly,
+with respect to the number of classes seen so far.
+
+The ﬁrst
+two criteria express the essence of class-
+incremental learning. The third criterion prevents trivial al-
+gorithms, such as storing all training examples and retrain-
+ing an ordinary multi-class classiﬁer whenever new data be-
+comes available.
+
+Interestingly, despite the vast progress that image classi-
+ﬁcation has made over the last decades, there is not a sin-
+gle satisfactory class-incremental learning algorithm these
+days. Most existing multi-class techniques simply violate
+i) or ii) as they can only handle a ﬁxed number of classes
+and/or need all training data to be available at the same
+time. Naively, one could try to overcome this by training
+classiﬁers from class-incremental data streams, e.g. using
+stochastic gradient descent optimization. This, however,
+will cause the classiﬁcation accuracy to quickly deteriorate,
+an effect known in the literature as catastrophic forgetting
+or catastrophic interference [22]. The few existing tech-
+niques that do fulﬁll the above properties are principally
+limited to situations with a ﬁxed data representation. They
+cannot be extended to deep architectures that learn classi-
+ﬁers and feature representations at the same time and are
+
+1
+
+// image to be classiﬁed
+// class exemplar sets
+// feature map
+
+ϕ(p)
+
+// mean-of-exemplars
+
+Algorithm 1 iCaRL CLASSIFY
+
+input x
+require P = (P1, . . . , Pt)
+require ϕ : X → Rd
+for y = 1, . . . , t do
+(cid:88)
+
+µy ←
+
+1
+|Py|
+
+p∈Py
+
+end for
+y∗ ← argmin
+y=1,...,t
+
+output class label y∗
+
+(cid:107)ϕ(x) − µy(cid:107)
+
+// nearest prototype
+
+therefore not competitive anymore in terms of classiﬁcation
+accuracy. More related work is discussed in Section 3.
+
+In this work, we introduce iCaRL (incremental classiﬁer
+and representation learning), a practical strategy for simul-
+taneously learning classiﬁers and a feature representation in
+the class-incremental setting. Based on a careful analysis of
+the shortcomings of existing approaches, we introduce three
+main components that in combination allow iCaRL to fulﬁll
+all criteria put forth above. These three components are:
+• classiﬁcation by a nearest-mean-of-exemplars rule,
+
+• prioritized exemplar selection based on herding,
+
+• representation learning using knowledge distillation
+
+and prototype rehearsal.
+
+We explain the details of these steps in Section 2, and sub-
+sequently put them into the context of previous work in Sec-
+tion 3. In Section 4 we report on experiments on the CIFAR
+and ImageNet datasets that show that iCaRL is able to class-
+incrementally learn over a long periods of time, where other
+methods quickly fail. Finally, we conclude in Section 5 with
+a discussion of remaining limitations and future work.
+
+2. Method
+
+In this section we describe iCaRL’s main components
+and explain how their combination allows true class-
+incremental learning. Section 2.1 explains the underlying
+architecture and gives a high-level overview of the training
+and classiﬁcation steps. Sections 2.2 to 2.4 then provides
+the algorithmic details and explains the design choices.
+
+2.1. Class-Incremental Classiﬁer Learning
+
+iCaRL learns classiﬁers and a feature representation si-
+multaneously from on a data stream in class-incremental
+form, i.e. sample sets X 1, X 2, . . . , where all examples of
+a set X y = {xy
+
+} are of class y ∈ N.
+
+1, . . . , xy
+ny
+
+Algorithm 2 iCaRL INCREMENTALTRAIN
+input X s, . . . , X t
+input K
+require Θ
+require P = (P1, . . . , Ps−1)
+
+// training examples in per-class sets
+// memory size
+
+// current model parameters
+
+// current exemplar sets
+
+Θ ← UPDATEREPRESENTATION(X s, . . . , X t; P, Θ)
+m ← K/t
+for y = 1, . . . , s − 1 do
+
+// number of exemplars per class
+
+Py ← REDUCEEXEMPLARSET(Py, m)
+
+end for
+for y = s, . . . , t do
+
+end for
+P ← (P1, . . . , Pt)
+
+Py ← CONSTRUCTEXEMPLARSET(Xy, m, Θ)
+
+// new exemplar sets
+
+each observed class so far, and iCaRL ensures that the total
+number of exemplar images never exceeds a ﬁxed parame-
+ter K. Algorithm 1 describes the mean-of-exemplars clas-
+siﬁer that is used to classify images into the set of classes
+observed so far, see Section 2.2 for a detailed explanation.
+
+training,
+
+Training. For
+iCaRL processes batches of
+classes at a time using an incremental learning strategy. Ev-
+ery time data for new classes is available iCaRL calls an
+update routine (Algorithm 2, see Sections 2.3 and 2.4). The
+routine adjusts iCaRL’s internal knowledge (the network
+parameters and exemplars) based on the additional informa-
+tion available in the new observations (the current training
+data). This is also how iCaRL learns about the existence of
+new classes.
+
+Architecture. Under the hood, iCaRL makes use of a
+convolutional neural network (CNN) [19]1. We interpret the
+network as a trainable feature extractor, ϕ : X → Rd, fol-
+lowed by a single classiﬁcation layer with as many sigmoid
+output nodes as classes observed so far [3]. All feature vec-
+tors are L2-normalized, and the results of any operation on
+feature vectors, e.g. averages, are also re-normalized, which
+we do not write explicitly to avoid a cluttered notation.
+
+We denote the parameters of the network by Θ, split into
+a ﬁxed number of parameters for the feature extraction part
+and a variable number of weight vectors. We denote the lat-
+ter by w1, . . . , wt ∈ Rd, where here and in the following
+sections we use the convention that t denotes the number of
+classes that have been observed so far. The resulting net-
+
+Classiﬁcation. For classiﬁcation, iCaRL relies on sets,
+P1, . . . , Pt, of exemplar images that it selects dynamically
+out of the data stream. There is one such exemplar set for
+
+1In principle, the iCaRL strategy is largely architecture agnostic and
+could be use on top of other feature or metric learning strategies. Here, we
+discuss it only in the context of CNNs to avoid an overly general notation.
+
+2
+
+work outputs are, for any class y ∈ {1, . . . , t},
+
+gy(x) =
+
+1
+1 + exp(−ay(x))
+
+with ay(x) = w(cid:62)
+
+y ϕ(x). (1)
+
+Note that even though one can interpret these outputs as
+probabilities, iCaRL uses the network only for representa-
+tion learning, not for the actual classiﬁcation step.
+
+Algorithm 3 iCaRL UPDATEREPRESENTATION
+input X s, . . . , X t
+require P = (P1, . . . , Ps−1)
+require Θ
+
+// current model parameters
+
+// training images of classes s, . . . , t
+
+// exemplar sets
+
+// form combined training set:
+
+(cid:91)
+
+D ←
+
+y=s,...,t
+
+{(x, y) : x ∈ X y} ∪
+
+{(x, y) : x ∈ P y}
+
+(cid:91)
+
+y=1,...,s−1
+
+Resource usage. Due to its incremental nature, iCaRL
+does not need a priori information about which and how
+many classes will occur, and it can –in theory– run for an
+unlimited amount of time. At any time during its runtime
+its memory requirement will be the size of the feature ex-
+traction parameters, the storage of K exemplar images and
+as many weight vectors as classes that have been observed.
+This knowledge allows us to assign resources depending on
+If an upper bound on the num-
+the application scenario.
+ber of classes is known, one can simply pre-allocate space
+for as many weight vectors as required and use all remain-
+ing available memory to store exemplars. Without an up-
+per limit, one would actually grow the number of weight
+vectors over time, and decrease the size of the exemplar
+set accordingly. Clearly, at least one exemplar image and
+weight vector is required for each classes to be learned, so
+ultimately, only a ﬁnite number of classes can be learned,
+unless one allows for the possibility to add more resources
+over the runtime of the algorithm. Note that iCaRL can han-
+dle an increase of resources on-the-ﬂy without retraining: it
+will simply not discard any exemplars unless it is forced to
+do so by memory limitations.
+
+2.2. Nearest-Mean-of-Exemplars Classiﬁcation
+
+iCaRL uses a nearest-mean-of-exemplars classiﬁcation
+strategy. To predict a label, y∗, for a new image, x, it
+computes a prototype vector for each class observed so far,
+µ1, . . . , µt, where µy = 1
+ϕ(p) is the average
+|Py|
+feature vector of all exemplars for a class y. It also com-
+putes the feature vector of the image that should be classi-
+ﬁed and assigns the class label with most similar prototype:
+
+p∈Py
+
+(cid:80)
+
+y∗ = argmin
+y=1,...,t
+
+(cid:107)ϕ(x) − µy(cid:107).
+
+(2)
+
+Background. The nearest-mean-of-exemplars classiﬁca-
+tion rule overcomes two major problems of the incremen-
+tal learning setting, as can be seen by contrasting it against
+other possibilities for multi-class classiﬁcation.
+
+The usual classiﬁcation rule for a neural network would
+be y∗ = argmaxy=1,...,t gy(x), where gy(x) is the network
+output as deﬁned in (1) or alternatively with a softmax out-
+put layer. Because argmaxy gy(x) = argmaxy w(cid:62)
+y ϕ(x),
+the network’s prediction rule is equivalent to the use of a
+
+// store network outputs with pre-update parameters:
+for y = 1, . . . , s − 1 do
+
+qy
+i ← gy(xi)
+end for
+run network training (e.g. BackProp) with loss function
+
+for all (xi, ·) ∈ D
+
+(cid:96)(Θ) = −
+
+δy=yi log gy(xi)+ δy(cid:54)=yi log(1−gy(xi))
+
+i log gy(xi)+(1−qy
+qy
+
+(cid:105)
+i ) log(1−gy(xi))
+
+(cid:88)
+
+(cid:104) t
+(cid:88)
+
+(xi,yi)∈D
+
+y=s
+
++
+
+s−1
+(cid:88)
+
+y=1
+
+that consists of classiﬁcation and distillation terms.
+
+linear classiﬁer with non-linear feature map ϕ and weight
+vectors w1, . . . , wt.
+In the class-incremental setting, it is
+problematic that the weight vectors wy are decoupled from
+the feature extraction routine ϕ: whenever ϕ changes, all
+w1, . . . , wt must be updated as well. Otherwise, the net-
+work outputs will change uncontrollably, which is observ-
+In contrast, the nearest-
+able as catastrophic forgetting.
+mean-of-exemplars rule (2) does not have decoupled weight
+vectors. The class-prototypes automatically change when-
+ever the feature representation changes, making the classi-
+ﬁer robust against changes of the feature representation.
+
+The choice of the average vector as prototype is inspired
+by the nearest-class-mean classiﬁer [24] for incremental
+learning with a ﬁxed feature representation. In the class-
+incremental setting, we cannot make use of the true class
+mean, since all training data would have to be stored in or-
+der to recompute this quantity after a representation change.
+Instead, we use the average over a ﬂexible number of exem-
+plars that are chosen in a way to provide a good approxima-
+tion to the class mean.
+
+Note that, because we work with normalized feature vec-
+tors, Equation (2) can be written equivalently as y∗ =
+argmaxy µ(cid:62)
+y ϕ(x). Therefore, we can also interpret the
+classiﬁcation step as classiﬁcation with a weight vector, but
+one that is not decoupled from the data representation but
+changes consistently with it.
+
+2.3. Representation Learning
+
+Whenever iCaRL obtains data, X s, . . . , X t, for new
+classes, s, . . . , t, it updates its feature extraction routine
+
+3
+
+Algorithm 4 iCaRL CONSTRUCTEXEMPLARSET
+
+Algorithm 5 iCaRL REDUCEEXEMPLARSET
+
+input image set X = {x1, . . . , xn} of class y
+input m target number of exemplars
+require current feature function ϕ : X → Rd
+x∈X ϕ(x) // current class mean
+
+(cid:80)
+
+(cid:13)
+(cid:13)µ − 1
+(cid:13)
+
+k [ϕ(x) + (cid:80)k−1
+
+(cid:13)
+(cid:13)
+j=1 ϕ(pj)]
+(cid:13)
+
+µ ← 1
+n
+for k = 1, . . . , m do
+pk ← argmin
+
+x∈X
+
+end for
+P ← (p1, . . . , pm)
+output exemplar set P
+
+and the exemplar set. Algorithm 3 lists the steps for incre-
+mentally improving the feature representation. First, iCaRL
+constructs an augmented training set consisting of the cur-
+rently available training examples together with the stored
+exemplars. Next, the current network is evaluated for each
+example and the resulting network outputs for all previous
+classes are stored (not for the new classes, since the network
+has not been trained for these, yet). Finally, the network pa-
+rameters are updated by minimizing a loss function that for
+each new image encourages the network to output the cor-
+rect class indicator for new classes (classiﬁcation loss), and
+for old classes, to reproduce the scores stored in the previ-
+ous step (distillation loss).
+
+Background. The representation learning step resem-
+bles ordinary network ﬁnetuning: starting from previously
+learned network weights it minimizes a loss function over
+a training set. As a consequence, standard end-to-end
+learning methods can be used, such as backpropagation
+with mini-batches, but also recent improvements, such as
+dropout [39], adaptive stepsize selection [14] or batch nor-
+malization [13], as well as potential future improvements.
+
+There are two modiﬁcations to plain ﬁnetuning that aim
+at preventing or at least mitigating catastrophic forgetting.
+First, the training set is augmented.
+It consists not only
+of the new training examples but also of the stored exem-
+plars. By this it is ensured that at least some information
+about the data distribution of all previous classes enters the
+training process. Note that for this step it is important that
+the exemplars are stored as images, not in a feature repre-
+sentation that would become outdated over time. Second,
+the loss function is augmented as well. Besides the stan-
+dard classiﬁcation loss, which encourages improvements of
+the feature representation that allow classifying the newly
+observed classes well, it also contains the distillation loss,
+which ensures that the discriminative information learned
+previously is not lost during the new learning step.
+
+input m
+input P = (p1, . . . , p|P |)
+P ← (p1, . . . , pm)
+output exemplar set P
+
+// target number of exemplars
+
+// current exemplar set
+// i.e. keep only ﬁrst m
+
+2.4. Exemplar Management
+
+Whenever iCaRL encounters new classes it adjusts its
+exemplar set. All classes are treated equally in this, i.e.,
+when t classes have been observed so far and K is the to-
+tal number of exemplars that can be stored, iCaRL will use
+m = K/t exemplars (up to rounding) for each class. By
+this it is ensured that the available memory budget of K
+exemplars is always used to full extent, but never exceeded.
+Two routines are responsible for exemplar management:
+one to select exemplars for new classes and one to reduce
+the sizes of the exemplar sets of previous classes. Algo-
+rithm 4 describes the exemplar selection step. Exemplars
+p1, . . . , pm are selected and stored iteratively until the target
+number, m, is met. In each step of the iteration, one more
+example of the current training set is added to the exemplar
+set, namely the one that causes the average feature vector
+over all exemplars to best approximate the average feature
+vector over all training examples. Thus, the exemplar ”set”
+is really a prioritized list. The order of its elements mat-
+ters, with exemplars earlier in the list being more important.
+The procedure for removing exemplars is speciﬁed in Algo-
+rithm 5. It is particularly simple: to reduce the number of
+exemplars from any m(cid:48) to m, one discards the exemplars
+pm+1, . . . , pm(cid:48), keeping only the examples p1, . . . , pm.
+
+Background. The exemplar management routines are de-
+signed with two objectives in mind:
+the initial exemplar
+set should approximate the class mean vector well, and it
+should be possible to remove exemplars at any time during
+the algorithm’s runtime without violating this property.
+
+The latter property is challenging because the actual
+class mean vector is not available to the algorithm anymore
+when the removal procedure is called. Therefore, we adopt
+a data-independent removal strategy, removing elements in
+ﬁxed order starting at the end, and we make it the responsi-
+bility of the exemplar set construction routine to make sure
+that the desired approximation properties are fulﬁlled even
+after the removal procedure is called at later times. The pri-
+oritized construction is the logical consequence of this con-
+dition: it ensures that the average feature vector over any
+subset of exemplars, starting at the ﬁrst one, is a good ap-
+proximation of the mean vector. The same prioritized con-
+struction is used in herding [40] to create a representative set
+of samples from a distribution. There it was also shown that
+the iterative selection requires fewer samples to achieve a
+
+4
+
+high approximation quality than, e.g., random subsampling.
+In contrast, other potential methods for exemplar selection,
+such as [7, 26], were designed with other objectives and are
+not guaranteed to provide a good approximation quality for
+any number of prototypes.
+
+Overall, iCaRL’s steps for exemplar selection and reduc-
+tion ﬁt exactly to the incremental learning setting: the selec-
+tion step is required for each class only once, when it is ﬁrst
+observed and its training data is available. At later times,
+only the reduction step is called, which does not need ac-
+cess to any earlier training data.
+
+3. Related work
+
+iCaRL builds on the insights of multiple earlier attempts
+to address class-incremental learning. In this section, we
+describe the most important ones, structuring them on the
+one hand into learning techniques with ﬁxed data represen-
+tations and on the other hand into techniques that also learn
+the data representation, both from the classical connection-
+ists era as well as recent deep learning approaches.
+
+Learning with a ﬁxed data representation. When the
+data representation is ﬁxed, the main challenge for class-
+incremental learning is to design a classiﬁer architecture
+that can accommodate new classes at any time during the
+training process without requiring access to all training data
+seen so far. The simplest such process of this type could be
+a (k-)nearest neighbor classiﬁer, but that would require stor-
+ing all training data during the learning process and there-
+fore does not qualify as a class-incremental procedure by
+our deﬁnition.
+
+Mensink et al. [23] observed that the nearest class mean
+(NCM) classiﬁer has this property. NCM represents each
+class as a prototype vector that is the average feature vector
+of all examples observed for the class so far. This vector
+can be computed incrementally from a data stream, so there
+is no need to store all training examples. A new example is
+classiﬁed by assigning it the class label that has a prototype
+most similar to the example’s feature vector, with respect
+to a metric that can also be learned from data. Despite (or
+because of) its simplicity, NCM has been shown to work
+well and be more robust than standard parametric classiﬁers
+in an incremental learning setting [23, 24, 32].
+
+NCM’s main shortcoming is that it cannot easily be ex-
+tended to the situation in which a nonlinear data represen-
+tation should be learned together with the classiﬁers, as this
+prevents the class mean vectors from being computable in
+an incremental way. For iCaRL we adopt from NCM the
+idea of prototype-based classiﬁcation. However, the proto-
+types we use are not the average features vectors over all
+examples but only over a speciﬁcally chosen subset, which
+allows us to keep a small memory footprint and perform all
+necessary updates with constant computational effort.
+
+fulﬁll
+
+Alternative approaches
+
+the class-incremental
+learning criteria i)–iii), that we introduced in Section 1,
+only partially: Kuzborskij et al. [17] showed that a loss of
+accuracy can be avoided when adding new classes to an ex-
+isting linear multi-class classiﬁer, as long as the classiﬁers
+can be retrained from at least a small amount of data for all
+classes. Chen et al. [4, 5] and Divvala et al. [6] introduced
+systems that autonomously retrieve images from web re-
+sources and identiﬁes relations between them, but they does
+not incrementally learn object classiﬁers. Royer and Lam-
+pert [34] adapt classiﬁers to a time-varying data stream but
+their method cannot handle newly appearing classes, while
+Pentina et al. [29] show that learning multiple tasks sequen-
+tially can beneﬁcial, but for choosing the order the data for
+all tasks has to be available at the same time.
+
+Li and Wechsler [20], Scheirer et al. [38], as well as Ben-
+dale and Boult [2] aimed at the related but distinct prob-
+lem of Open Set Recognition in which test examples might
+come from other classes than the training examples seen so
+far. Polikar et al. [28, 30] introduced an ensemble based
+approach that can handle an increasing number of classes
+but needs training data for all classes to occur repeatedly.
+Zero-shot learning, as proposed by Lampert et al. [18], can
+classify examples of previously unseen classes, but it does
+not include a training step for those.
+
+Representation learning. The recent success of (deep)
+neural networks can in large parts be attributed to their abil-
+ity to learn not only classiﬁers but also suitable data rep-
+resentations [3, 21, 25, 37], at least in the standard batch
+setting. First attempts to learn data representations in an
+incremental fashion can already be found in the classic neu-
+ral network literature, e.g. [1, 8, 9, 33].
+In particular, in
+the late 1980s McCloskey et al. [22] described the problem
+of catastrophic forgetting, i.e. the phenomenon that train-
+ing a neural network with new data causes it to overwrite
+(and thereby forget) what it has learned on previous data.
+However, these classical works were mainly in the context
+of connectionist memory networks, not classiﬁers, and the
+networks used were small and shallow by today’s standards.
+Generally, the existing algorithms and architectural changes
+are unable to prevent catastrophic forgetting, see, for ex-
+ample, Moe-Helgesen et al.’s survey [27] for classical and
+Goodfellow et al.’s [10] for modern architectures, except in
+speciﬁc settings, such as Kirkpatrick et al.’s [15].
+
+A major achievement of the early connectionist works,
+however, is that they identiﬁed the two main strategies of
+how catastrophic forgetting can be addressed: 1) by freezing
+parts of the network weights while at the same time grow-
+ing the network in order to preserve the ability to learn, 2)
+by rehearsal, i.e. continuously stimulating the network not
+only with the most recent, but also with earlier data.
+
+Recent works on incremental learning of neural net-
+
+5
+
+works have mainly followed the freeze/grow strategy, which
+however requires allocating more and more resources to the
+network over time and therefore violates principle iii) of
+our deﬁnition of class-incremental learning. For example,
+Xiao et al. [41] learn a tree-structured model that grows in-
+crementally as more classes are observed. In the context of
+multi-task reinforcement learning, Rusu et al. [36] propose
+growing the networks by extending all layer horizontally.
+
+For iCaRL, we adopt the principle of rehearsal: to up-
+date the model parameters for learning a representation, we
+use not only the training data for the currently available
+classes, but also the exemplars from earlier classes, which
+are available anyway as they are required for the prototype-
+based classiﬁcation rule. Additionally, iCaRL also uses dis-
+tillation to prevent that information in the network deterio-
+rates too much over time. while Hinton et al. [12] originally
+proposed distillation to transfer information between differ-
+ent neural networks, in iCaRL, we use it within a single
+network between different time points. The same princi-
+ple was recently proposed by Li and Hoiem [21] under the
+name of Learning without Forgetting (LwF) to incremen-
+tally train a single network for learning multiple tasks, e.g.
+multiple object recognition datasets. The main difference to
+the class-incremental multi-class situation lies in the predic-
+tion step: a multi-class learner has to pick one classiﬁer that
+predicts correctly any of the observed classes. A multi-task
+(multi-dataset) leaner can make use of multiple classiﬁers,
+each being evaluated only on the data from its own dataset.
+
+4. Experiments
+
+In this section we propose a protocol for evaluating in-
+cremental learning methods and compare iCaRL’s classiﬁ-
+cation accuracy to that of alternative methods (Section 4.1).
+We also report on further experiments that shed light on
+iCaRL’s working mechanisms by isolating the effect of in-
+dividual components (Section 4.2).
+
+Benchmark protocol. So far, no agreed upon benchmark
+protocol for evaluation class-incremental learning methods
+exist. Therefore, we propose the following evaluation pro-
+cedure: for a given multi-class classiﬁcation dataset, the
+classes are arranged in a ﬁxed random order. Each method
+is then trained in a class-incremental way on the available
+training data. After each batch of classes, the resulting clas-
+siﬁer is evaluated on the test part data of the dataset, consid-
+ering only those classes that have already been trained. Note
+that, even though the test data is used more than once, no
+overﬁtting can occur, as the testing results are not revealed
+to the algorithms. The result of the evaluation are curves of
+the classiﬁcation accuracies after each batch of classes. If a
+single number is preferable, we report the average of these
+accuracies, called average incremental accuracy.
+
+For the task of image classiﬁcation we introduce two in-
+stantiations of the above protocol. 1) iCIFAR-100 bench-
+mark: we use the CIFAR-100 [16] data and train all 100
+classes in batches of 2, 5, 10, 20 or 50 classes at a time.
+The evaluation measure is the standard multi-class accu-
+racy on the test set. As the dataset is of manageable size,
+we run this benchmark ten times with different class or-
+ders and reports averages and standard deviations of the
+results. 2) iILSVRC benchmark: we use the ImageNet
+ILSVRC 2012 [35] dataset in two settings: using only a
+subset of 100 classes, which are trained in batches of 10
+(iILSVRC-small) or using all 1000 classes, processed in
+batches of 100 (iILSVRC-full). The evaluation measure is
+the top-5 accuracy on the val part of the dataset.
+
+iCaRL implementation. For iCIFAR-100 we rely on the
+theano package2 and train a 32-layers ResNet [11], allowing
+iCaRL to store up to K = 2000 exemplars. Each training
+step consists of 70 epochs. The learning rate starts at 2.0 and
+is divided by 5 after 49 and 63 epochs (7/10 and 9/10 of all
+epochs). For iILSVRC the maximal number of exemplars is
+K = 20000 and we use the tensorﬂow framework3 to train
+an 18-layers ResNet [11] for 60 epochs per class batch. The
+learning rate starts at 2.0 and is divided by 5 after 20, 30,
+40 and 50 epochs (1/3, 1/2, 2/3 and 5/6 of all epochs). For
+all methods we train the network using standard backprop-
+agation with minibatches of size 128 and a weight decay
+parameter of 0.00001. Note that the learning rates might
+appear large, but for our purpose they worked well, likely
+because we use binary cross-entropy in the network layer.
+Smaller rates might be required for a multi-class softmax
+layer. Our source code and further data are available at
+http://www.github.com/srebuffi/iCaRL.
+
+4.1. Results
+
+Our main set of experiments studies the classiﬁcation ac-
+curacy of different methods under class-incremental condi-
+tions. Besides iCaRL we implemented and tested three al-
+ternative class-incremental methods. Finetuning learns an
+ordinary multi-class network without taking any measures
+to prevent catastrophic forgetting. It can also be interpreted
+as learning a multi-class classiﬁer for new incoming classes
+by ﬁnetuning the previously learned multiclass classiﬁca-
+tion network. Fixed representation also learns a multi-class
+classiﬁcation network, but in a way that prevents catas-
+trophic forgetting. It freezes the feature representation after
+the ﬁrst batch of classes has been processed and the weights
+of the classiﬁcation layer after the corresponding classes
+have been processed. For subsequent batches of classes,
+only the weights vectors of new classes are trained. Finally,
+
+2http://deeplearning.net/software/theano/
+3https://www.tensorflow.org/
+
+6
+
+(a) Multi-class accuracy (averages and standard deviations over 10 repeats) on iCIFAR-100 with 2 (top left),
+or 50 (bottom right) classes per batch.
+
+5 (top middle), 10 (top right), 20 (bottom left)
+
+(b) Top-5 accuracy on iILSVRC-small (top) and iILSVRC-full (bottom).
+
+Figure 2: Experimental results of class-incremental training on iCIFAR-100 and iILSVRC: reported are multi-class accura-
+cies across all classes observed up to a certain time point. iCaRL clearly outperforms the other methods in this setting. Fixing
+the data representation after having trained on the ﬁrst batch (ﬁxed repr.) performs worse than distillation-based LwF.MC,
+except for iILSVRC-full. Finetuning the network without preventing catastrophic forgetting (ﬁnetuning) achieves the worst
+results. For comparison, the same network trained with all data available achieves 68.6% multi-class accuracy.
+
+we also compare to a network classiﬁer that attempts at pre-
+venting catastrophic forgetting by using the distillation loss
+during learning, like iCaRL does, but that does not use an
+exemplar set. For classiﬁcation, it uses the network output
+values themselves. This is essentially the Learning without
+Forgetting approach, but applied to multi-class classiﬁca-
+tion we, so denote it by LwF.MC. Figure 2 shows the re-
+sults. One can see that iCaRL clearly outperforms the other
+methods, and the more so the more incremental the setting
+
+is (i.e. the fewer classes can be processed at the same time).
+Among the other methods, distillation-based network train-
+ing (LwF.MC) is always second best, except for iILSVRC-
+full, where it is better to ﬁx the representation after the ﬁrst
+batch of 100 classes. Finetuning always achieves the worst
+results, conﬁrming that catastrophic forgetting is indeed a
+major problem for in class-incremental learning.
+
+Figure 3 provides further insight into the behavior of
+the different methods. Is shows the confusion matrices of
+
+7
+
+(a) iCaRL
+
+(b) LwF.MC
+
+(c) ﬁxed representation
+
+(d) ﬁnetuning
+
+Figure 3: Confusion matrices of different method on iCIFAR-100 (with entries transformed by log(1+x) for better visibility).
+iCaRL’s predictions are distributed close to uniformly over all classes, whereas LwF.MC tends to predict classes from recent
+batches more frequently. The classiﬁer with ﬁxed representation has a bias towards classes from the ﬁrst batch, while the
+network trained by ﬁnetuning predicts exclusively classes labels from the last batch.
+
+the 100-class classiﬁer on iCIFAR-100 after training us-
+ing batches of 10 classes at a time (larger versions can be
+found in the appendix). One can see very characteristic pat-
+terns: iCaRL’s confusion matrix looks homogeneous over
+all classes, both in terms of the diagonal entries (i.e. cor-
+rect predictions) as well as off-diagonal entries (i.e. mis-
+takes). This shows that iCaRL has no intrinsic bias towards
+
+or against classes that it encounters early or late during
+learning. In particular, it does not suffer from catastrophic
+forgetting.
+
+In contrast to this, the confusion matrices for the other
+classes show inhomogeneous patterns: distillation-based
+training (LwF.MC) has many more non-zero entries towards
+the right, i.e. for recently learned classes. Even more ex-
+
+8
+
+treme is the effect for ﬁnetuning, where all predicted class
+labels come from the last batch of classes that the network
+has been trained with. The ﬁnetuned network simply for-
+got that earlier classes even exist. The ﬁxed representation
+shows the opposite pattern: it prefers to output classes from
+the ﬁrst batch of classes it was trained on (which were used
+to obtained the data representation). Confusion matrices for
+iILSVRC show the same patterns, they can be found in the
+appendix.
+
+4.2. Differential Analysis
+
+To provide further insight
+
+into the working mecha-
+nism of iCaRL, we performed additional experiments on
+iCIFAR-100, in which we isolate individual aspects of the
+methods.
+
+First, we analyze why exactly iCaRL improves over
+plain ﬁnetuning-based training, from which it differs in
+three aspects: by the use of the mean-of-exemplars clas-
+siﬁcation rule, by the use of exemplars during the repre-
+sentation learning, and by the use of the distillation loss.
+the ﬁrst (hy-
+We therefore created three hybrid setups:
+brid1) learns a representation in the same way as iCaRL,
+but uses the network’s outputs directly for classiﬁcation, not
+the mean-of-exemplar classiﬁer. The second (hybrid2) uses
+the exemplars for classiﬁcation, but does not use the dis-
+tillation loss during training. The third (hybrid3) uses nei-
+ther the distillation loss nor exemplars for classiﬁcation, but
+it makes use of the exemplars during representation learn-
+ing. For comparison, we also include LwF.MC again, which
+uses distillation, but no exemplars at all.
+
+Table 1a summarizes the results as the average of the
+classiﬁcation accuracies over all steps of the incremental
+training. One can see that the hybrid setups mostly achieve
+results in between iCaRL and LwF.MC, showing that in-
+deed all of iCaRL’s new components contribute substan-
+tially to its good performance. In particular, the comparison
+of iCaRL with hybrid1 shows that the mean-of-exemplar
+classiﬁers is particularly advantageous for smaller batch
+sizes, i.e. when more updates of the representation are per-
+formed. Comparing iCaRL and hybrid2 one sees that for
+very small class batch sizes, distillation can even hurt clas-
+siﬁcation accuracy compared to just using prototypes. For
+larger batch sizes and fewer updates, the use of the distil-
+lation loss is clearly advantageous. Finally, comparing the
+result of hybrid3 with LwF.MC clearly shows the effective-
+ness of exemplars in preventing catastrophic forgetting.
+
+In a second set of experiments we study how much ac-
+curacy is lost by using the means-of-exemplars as classiﬁ-
+cation prototypes instead of the nearest-class-mean (NCM)
+rule. For the latter, we use the unmodiﬁed iCaRL to learn
+a representation, but we classify images with NCM, where
+the class-means are recomputed after each representation
+update using the current feature extractor. Note that this re-
+
+Figure 4: Average incremental accuracy on iCIFAR-100
+with 10 classes per batch for different memory budgets K.
+
+quires storing all training data, so it would not qualify as
+a class-incremental method. The results in Table 1b show
+only minor differences between iCaRL and NCM, conﬁrm-
+ing that iCaRL reliably identiﬁes representative exemplars.
+Figure 4 illustrates the effect of different memory bud-
+gets, comparing iCaRL with the hybrid1 classiﬁer of Ta-
+ble 1a and the NCM classiﬁer of Table 1b. Both use the
+same data representation as iCaRL but differ in their clas-
+siﬁcation rules. All method beneﬁt from a larger memory
+budget, showing that iCaRL’s representation learning step
+indeed beneﬁts from more prototypes. Given enough proto-
+types (here at least 1000), iCaRL’s mean-of-exemplars clas-
+siﬁer performs similarly to the NCM classiﬁer, while clas-
+sifying by the network outputs is not competitive.
+
+5. Conclusion
+
+We introduced iCaRL, a strategy for class-incremental
+learning that learns classiﬁers and a feature representation
+simultaneously. iCaRL’s three main components are: 1) a
+nearest-mean-of-exemplars classiﬁer that is robust against
+changes in the data representation while needing to store
+only a small number of exemplars per class, 2) a herding-
+based step for prioritized exemplar selection, and 3) a rep-
+resentation learning step that uses the exemplars in combi-
+nation with distillation to avoid catastrophic forgetting. Ex-
+periments on CIFAR-100 and ImageNet ILSVRC 2012 data
+show that iCaRL is able to learn incrementally over a long
+period of time where other methods fail quickly.
+
+The main reason for iCaRL’s strong classiﬁcation results
+are its use of exemplar images. While it is intuitive that be-
+ing able to rely on stored exemplars in addition to the net-
+work parameters could be beneﬁcial, we nevertheless ﬁnd
+it an important observation how pronounced this effect is
+in the class-incremental setting. We therefore hypothesize
+that also other architectures should be able to beneﬁt from
+using a combination of network parameters and exemplars,
+especially given the fact that many thousands of images can
+be stored (in compressed form) with memory requirements
+comparable to the sizes of current deep networks.
+
+Despite the promising results, class-incremental classi-
+
+9
+
+Table 1: Average multi-class accuracy on iCIFAR-100 for different modiﬁcations of iCaRL.
+
+(a) Switching off different components of iCaRL (hybrid1, hybrid2, hybrid3,
+see text for details) leads to results mostly inbetween iCaRL and LwF.MC,
+showing that all of iCaRL’s new components contribute to its performance.
+
+(b) Replacing iCaRL’s mean-of-exemplars by a nearest-class-mean clas-
+siﬁer (NCM) has only a small positive effect on the classiﬁcation accu-
+racy, showing that iCaRL’s strategy for selecting exemplars is effective.
+
+batch size
+2 classes
+5 classes
+10 classes
+20 classes
+50 classes
+
+iCaRL
+57.0
+61.2
+64.1
+67.2
+68.6
+
+hybrid1
+36.6
+50.9
+59.3
+65.6
+68.2
+
+hybrid2
+57.6
+57.9
+59.9
+63.2
+65.3
+
+hybrid3
+57.0
+56.7
+58.1
+60.5
+61.5
+
+LwF.MC
+11.7
+32.6
+44.4
+54.4
+64.5
+
+batch size
+2 classes
+5 classes
+10 classes
+20 classes
+50 classes
+
+iCaRL NCM
+59.3
+57.0
+62.1
+61.2
+64.5
+64.1
+67.5
+67.2
+68.7
+68.6
+
+In particular, iCaRL’s perfor-
+ﬁcation is far from solved.
+mance is still lower than what systems achieve when trained
+in a batch setting, i.e. with all training examples of all
+classes available at the same time. In future work we plan
+to analyze the reasons for this in more detail with the goal
+of closing the remaining performance gap. We also plan to
+study related scenarios in which the classiﬁer cannot store
+any of the training data in raw form, e.g. for privacy rea-
+sons. A possible direction for this would be to encode fea-
+ture characteristics of earlier tasks implicitly by a autoen-
+coder, as recently proposed by Rannen Triki et al. [31].
+
+Acknowledgments. This work was in parts funded by the
+European Research Council under the European Union’s
+Seventh Framework Programme (FP7/2007-2013)/ERC
+grant agreement no 308036: ”Life-long learning of visual
+scene understanding” (L3ViSU). The Tesla K40 cards used
+for this research were donated by the NVIDIA Corporation.
+
+References
+
+[1] B. Ans and S. Rousset. Avoiding catastrophic forgetting by
+coupling two reverberating neural networks. Comptes Ren-
+dus de l’Acad´emie des Sciences, 320(12), 1997. 5
+
+[2] A. Bendale and T. Boult. Towards open world recognition.
+In Conference on Computer Vision and Pattern Recognition
+(CVPR), 2015. 5
+
+[3] Y. Bengio, A. Courville, and P. Vincent. Representation
+IEEE Trans-
+learning: A review and new perspectives.
+actions on Pattern Analysis and Machine Intelligence (T-
+PAMI), 35(8), 2013. 2, 5
+
+[4] X. Chen, A. Shrivastava, and A. Gupta. NEIL: Extracting vi-
+sual knowledge from web data. In International Conference
+on Computer Vision (ICCV), 2013. 5
+
+[5] X. Chen, A. Shrivastava, and A. Gupta. Enriching visual
+knowledge bases via object discovery and segmentation. In
+Conference on Computer Vision and Pattern Recognition
+(CVPR), 2014. 5
+
+[6] S. K. Divvala, A. Farhadi, and C. Guestrin. Learning ev-
+erything about anything: Webly-supervised visual concept
+In Conference on Computer Vision and Pattern
+learning.
+Recognition (CVPR), 2014. 5
+
+[7] E. Elhamifar and R. Vidal. Sparse subspace clustering:
+IEEE Transactions
+Algorithm, theory, and applications.
+on Pattern Analysis and Machine Intelligence (T-PAMI),
+35(11):2765–2781, 2013. 5
+
+[8] R. M. French. Catastrophic interference in connectionist net-
+In Con-
+works: Can it be predicted, can it be prevented?
+ference on Neural Information Processing Systems (NIPS),
+1993. 5
+
+[9] R. M. French. Catastrophic forgetting in connectionist net-
+
+works. Trends in cognitive sciences, 3(4), 1999. 5
+
+[10] I. J. Goodfellow, M. Mirza, D. Xiao, A. Courville, and
+Y. Bengio. An empirical investigation of catastrophic for-
+In International
+geting in gradient-based neural networks.
+Conference on Learning Representations (ICLR), 2014. 5
+
+[11] K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learn-
+ing for image recognition. arXiv preprint arXiv:1512.03385,
+2015. 6
+
+[12] G. Hinton, O. Vinyals, and J. Dean. Distilling the knowledge
+in a neural network. In NIPS Workshop on Deep Learning,
+2014. 6
+
+[13] S. Ioffe and C. Szegedy. Batch normalization: Accelerating
+deep network training by reducing internal covariate shift.
+In International Conference on Machine Learing (ICML),
+2015. 4
+
+[14] D. P. Kingma and J. Ba. Adam: A method for stochastic
+optimization. In International Conference on Learning Rep-
+resentations (ICLR), 2015. 4
+
+[15] J. Kirkpatrick, R. Pascanu, N. Rabinowitz, J. Veness, G. Des-
+jardins, A. A. Rusu, K. Milan, J. Quan, T. Ramalho,
+A. Grabska-Barwinska, et al. Overcoming catastrophic for-
+getting in neural networks. Proceedings of the National
+Academy of Sciences (PNAS), 2017. 5
+
+[16] A. Krizhevsky. Learning multiple layers of features from
+tiny images. Technical report, University of Toronto, 2009.
+6
+
+[17] I. Kuzborskij, F. Orabona, and B. Caputo. From n to n + 1:
+Multiclass transfer incremental learning. In Conference on
+Computer Vision and Pattern Recognition (CVPR), 2013. 5
+
+[18] C. H. Lampert, H. Nickisch, and S. Harmeling. Attribute-
+based classiﬁcation for zero-shot visual object categoriza-
+tion. IEEE Transactions on Pattern Analysis and Machine
+Intelligence (T-PAMI), 2013. 5
+
+10
+
+ImageNet Large Scale Visual
+A. C. Berg, and L. Fei-Fei.
+Recognition Challenge. International Journal of Computer
+Vision (IJCV), 115(3), 2015. 6
+
+[36] A. A. Rusu, N. C. Rabinowitz, G. Desjardins, H. Soyer,
+J. Kirkpatrick, K. Kavukcuoglu, R. Pascanu, and R. Had-
+arXiv preprint
+sell.
+arXiv:1606.04671, 2016. 6
+
+Progressive neural networks.
+
+[37] S. Saxena and J. Verbeek. Convolutional neural fabrics.
+In Conference on Neural Information Processing Systems
+(NIPS), 2016. 5
+
+[38] W. J. Scheirer, A. Rocha, A. Sapkota, and T. E. Boult. To-
+wards open set recognition. IEEE Transactions on Pattern
+Analysis and Machine Intelligence (T-PAMI), 36, 2013. 5
+
+[39] N. Srivastava, G. E. Hinton, A. Krizhevsky, I. Sutskever, and
+R. Salakhutdinov. Dropout: a simple way to prevent neu-
+ral networks from overﬁtting. Journal of Machine Learning
+Research (JMLR), 15(1), 2014. 4
+
+[40] M. Welling. Herding dynamical weights to learn. In Inter-
+
+national Conference on Machine Learing (ICML), 2009. 4
+
+[41] T. Xiao, J. Zhang, K. Yang, Y. Peng, and Z. Zhang. Error-
+driven incremental learning in deep convolutional neural net-
+In International
+work for large-scale image classiﬁcation.
+Conference on Multimedia (ACM MM), 2014. 6
+
+[19] Y. LeCun, L. Bottou, Y. Bengio, and P. Haffner. Gradient-
+based learning applied to document recognition. Proceed-
+ings of the IEEE, 86(11), 1998. 2
+
+[20] F. Li and H. Wechsler. Open set face recognition using trans-
+IEEE Transactions on Pattern Analysis and Ma-
+
+duction.
+chine Intelligence (T-PAMI), 27(11), 2005. 5
+[21] Z. Li and D. Hoiem. Learning without forgetting.
+
+In Eu-
+ropean Conference on Computer Vision (ECCV), 2016. 5,
+6
+
+[22] M. McCloskey and N. J. Cohen. Catastrophic interference
+in connectionist networks: The sequential learning problem.
+Psychology of learning and motivation, 24:109–165, 1989.
+1, 5
+
+[23] T. Mensink, J. Verbeek, F. Perronnin, and G. Csurka. Metric
+learning for large scale image classiﬁcation: Generalizing to
+new classes at near-zero cost. In European Conference on
+Computer Vision (ECCV), 2012. 5
+
+[24] T. Mensink, J. Verbeek, F. Perronnin, and G. Csurka.
+Distance-based image classiﬁcation: Generalizing to new
+IEEE Transactions on Pattern
+classes at near-zero cost.
+Analysis and Machine Intelligence (T-PAMI), 35(11), 2013.
+3, 5
+
+[25] I. Misra, A. Shrivastava, A. Gupta, and M. Hebert. Cross-
+In Conference on
+stitch networks for multi-task learning.
+Computer Vision and Pattern Recognition (CVPR), 2016. 5
+[26] I. Misra, A. Shrivastava, and M. Hebert. Data-driven exem-
+plar model selection. In Winter Conference on Applications
+of Computer Vision (WACV), pages 339–346, 2014. 5
+[27] O.-M. Moe-Helgesen and H. Stranden. Catastophic forget-
+ting in neural networks. Technical report, Norwegian Uni-
+versity of Science and Technology (NTNU), 2005. 5
+[28] M. D. Muhlbaier, A. Topalis, and R. Polikar. Learn++.NC:
+Combining ensemble of classiﬁers with dynamically
+weighted consult-and-vote for efﬁcient incremental learning
+of new classes. IEEE Transactions on Neural Networks (T-
+NN), 20(1), 2009. 5
+
+[29] A. Pentina, V. Sharmanska, and C. H. Lampert. Curriculum
+learning of multiple tasks. In Conference on Computer Vi-
+sion and Pattern Recognition (CVPR), 2015. 5
+
+[30] R. Polikar, L. Upda, S. S. Upda, and V. Honavar. Learn++:
+an incremental learning algorithm for supervised neural net-
+works. IEEE Transactions on Systems, Man, and Cybernet-
+ics, Part C, 31(4), 2001. 5
+
+[31] A. Rannen Triki, R. Aljundi, M. B. Blaschko, and T. Tuyte-
+arXiv preprint
+
+laars. Encoder based lifelong learning.
+arXiv:1704.01920, 2017. 10
+
+[32] M. Ristin, M. Guillaumin, J. Gall, and L. Van Gool. Incre-
+mental learning of NCM forests for large-scale image clas-
+In Conference on Computer Vision and Pattern
+siﬁcation.
+Recognition (CVPR), 2014. 5
+
+[33] A. V. Robins. Catastrophic forgetting, rehearsal and pseu-
+dorehearsal. Connection Science, 7(2):123–146, 1995. 5
+[34] A. Royer and C. H. Lampert. Classiﬁer adaptation at pre-
+diction time. In Conference on Computer Vision and Pattern
+Recognition (CVPR), 2015. 5
+
+[35] O. Russakovsky, J. Deng, H. Su, J. Krause, S. Satheesh,
+S. Ma, Z. Huang, A. Karpathy, A. Khosla, M. Bernstein,
+
+11
+
+Figure 5: Confusion matrix for iCaRL on iILSVRC-large (1000 classes in batches of 100)
+
+12
+
+Figure 6: Confusion matrix for LwF.MC on iILSVRC-large (1000 classes in batches of 100)
+
+13
+
+Figure 7: Confusion matrix for ﬁxed representation on iILSVRC-large (1000 classes in batches of 100)
+
+14
+
+Figure 8: Confusion matrix for ﬁnetuning on iILSVRC-large (1000 classes in batches of 100)
+
+15
+
+iCaRL: Incremental Classiﬁer and Representation Learning
+
+Sylvestre-Alvise Rebufﬁ
+University of Oxford/IST Austria
+
+Alexander Kolesnikov, Georg Sperl, Christoph H. Lampert
+IST Austria
+
+7
+1
+0
+2
+ 
+r
+p
+A
+ 
+4
+1
+ 
+ 
+]
+
+V
+C
+.
+s
+c
+[
+ 
+ 
+2
+v
+5
+2
+7
+7
+0
+.
+1
+1
+6
+1
+:
+v
+i
+X
+r
+a
+
+Abstract
+
+A major open problem on the road to artiﬁcial intelli-
+gence is the development of incrementally learning systems
+that learn about more and more concepts over time from
+a stream of data. In this work, we introduce a new train-
+ing strategy, iCaRL, that allows learning in such a class-
+incremental way: only the training data for a small number
+of classes has to be present at the same time and new classes
+can be added progressively.
+
+iCaRL learns strong classiﬁers and a data representa-
+tion simultaneously. This distinguishes it from earlier works
+that were fundamentally limited to ﬁxed data representa-
+tions and therefore incompatible with deep learning ar-
+chitectures. We show by experiments on CIFAR-100 and
+ImageNet ILSVRC 2012 data that iCaRL can learn many
+classes incrementally over a long period of time where other
+strategies quickly fail.
+
+1. Introduction
+
+Natural vision systems are inherently incremental: new
+visual information is continuously incorporated while ex-
+isting knowledge is preserved. For example, a child visiting
+the zoo will learn about many new animals without forget-
+ting the pet it has at home. In contrast, most artiﬁcial object
+recognition systems can only be trained in a batch setting,
+where all object classes are known in advance and they the
+training data of all classes can be accessed at the same time
+and in arbitrary order.
+
+As the ﬁeld of computer vision moves closer towards ar-
+tiﬁcial intelligence it becomes apparent that more ﬂexible
+strategies are required to handle the large-scale and dynamic
+properties of real-world object categorization situations. At
+the very least, a visual object classiﬁcation system should be
+able to incrementally learn about new classes, when train-
+ing data for them becomes available. We call this scenario
+class-incremental learning.
+
+Formally, we demand the following three properties of
+
+an algorithm to qualify as class-incremental:
+
+i) it should be trainable from a stream of data in which
+examples of different classes occur at different times,
+
+Figure 1: Class-incremental learning: an algorithm learns
+continuously from a sequential data stream in which new
+classes occur. At any time, the learner is able to perform
+multi-class classiﬁcation for all classes observed so far.
+
+ii) it should at any time provide a competitive multi-class
+
+classiﬁer for the classes observed so far,
+
+iii) its computational requirements and memory footprint
+should remain bounded, or at least grow very slowly,
+with respect to the number of classes seen so far.
+
+The ﬁrst
+two criteria express the essence of class-
+incremental learning. The third criterion prevents trivial al-
+gorithms, such as storing all training examples and retrain-
+ing an ordinary multi-class classiﬁer whenever new data be-
+comes available.
+
+Interestingly, despite the vast progress that image classi-
+ﬁcation has made over the last decades, there is not a sin-
+gle satisfactory class-incremental learning algorithm these
+days. Most existing multi-class techniques simply violate
+i) or ii) as they can only handle a ﬁxed number of classes
+and/or need all training data to be available at the same
+time. Naively, one could try to overcome this by training
+classiﬁers from class-incremental data streams, e.g. using
+stochastic gradient descent optimization. This, however,
+will cause the classiﬁcation accuracy to quickly deteriorate,
+an effect known in the literature as catastrophic forgetting
+or catastrophic interference [22]. The few existing tech-
+niques that do fulﬁll the above properties are principally
+limited to situations with a ﬁxed data representation. They
+cannot be extended to deep architectures that learn classi-
+ﬁers and feature representations at the same time and are
+
+1
+
+// image to be classiﬁed
+// class exemplar sets
+// feature map
+
+ϕ(p)
+
+// mean-of-exemplars
+
+Algorithm 1 iCaRL CLASSIFY
+
+input x
+require P = (P1, . . . , Pt)
+require ϕ : X → Rd
+for y = 1, . . . , t do
+(cid:88)
+
+µy ←
+
+1
+|Py|
+
+p∈Py
+
+end for
+y∗ ← argmin
+y=1,...,t
+
+output class label y∗
+
+(cid:107)ϕ(x) − µy(cid:107)
+
+// nearest prototype
+
+therefore not competitive anymore in terms of classiﬁcation
+accuracy. More related work is discussed in Section 3.
+
+In this work, we introduce iCaRL (incremental classiﬁer
+and representation learning), a practical strategy for simul-
+taneously learning classiﬁers and a feature representation in
+the class-incremental setting. Based on a careful analysis of
+the shortcomings of existing approaches, we introduce three
+main components that in combination allow iCaRL to fulﬁll
+all criteria put forth above. These three components are:
+• classiﬁcation by a nearest-mean-of-exemplars rule,
+
+• prioritized exemplar selection based on herding,
+
+• representation learning using knowledge distillation
+
+and prototype rehearsal.
+
+We explain the details of these steps in Section 2, and sub-
+sequently put them into the context of previous work in Sec-
+tion 3. In Section 4 we report on experiments on the CIFAR
+and ImageNet datasets that show that iCaRL is able to class-
+incrementally learn over a long periods of time, where other
+methods quickly fail. Finally, we conclude in Section 5 with
+a discussion of remaining limitations and future work.
+
+2. Method
+
+In this section we describe iCaRL’s main components
+and explain how their combination allows true class-
+incremental learning. Section 2.1 explains the underlying
+architecture and gives a high-level overview of the training
+and classiﬁcation steps. Sections 2.2 to 2.4 then provides
+the algorithmic details and explains the design choices.
+
+2.1. Class-Incremental Classiﬁer Learning
+
+iCaRL learns classiﬁers and a feature representation si-
+multaneously from on a data stream in class-incremental
+form, i.e. sample sets X 1, X 2, . . . , where all examples of
+a set X y = {xy
+
+} are of class y ∈ N.
+
+1, . . . , xy
+ny
+
+Algorithm 2 iCaRL INCREMENTALTRAIN
+input X s, . . . , X t
+input K
+require Θ
+require P = (P1, . . . , Ps−1)
+
+// training examples in per-class sets
+// memory size
+
+// current model parameters
+
+// current exemplar sets
+
+Θ ← UPDATEREPRESENTATION(X s, . . . , X t; P, Θ)
+m ← K/t
+for y = 1, . . . , s − 1 do
+
+// number of exemplars per class
+
+Py ← REDUCEEXEMPLARSET(Py, m)
+
+end for
+for y = s, . . . , t do
+
+end for
+P ← (P1, . . . , Pt)
+
+Py ← CONSTRUCTEXEMPLARSET(Xy, m, Θ)
+
+// new exemplar sets
+
+each observed class so far, and iCaRL ensures that the total
+number of exemplar images never exceeds a ﬁxed parame-
+ter K. Algorithm 1 describes the mean-of-exemplars clas-
+siﬁer that is used to classify images into the set of classes
+observed so far, see Section 2.2 for a detailed explanation.
+
+training,
+
+Training. For
+iCaRL processes batches of
+classes at a time using an incremental learning strategy. Ev-
+ery time data for new classes is available iCaRL calls an
+update routine (Algorithm 2, see Sections 2.3 and 2.4). The
+routine adjusts iCaRL’s internal knowledge (the network
+parameters and exemplars) based on the additional informa-
+tion available in the new observations (the current training
+data). This is also how iCaRL learns about the existence of
+new classes.
+
+Architecture. Under the hood, iCaRL makes use of a
+convolutional neural network (CNN) [19]1. We interpret the
+network as a trainable feature extractor, ϕ : X → Rd, fol-
+lowed by a single classiﬁcation layer with as many sigmoid
+output nodes as classes observed so far [3]. All feature vec-
+tors are L2-normalized, and the results of any operation on
+feature vectors, e.g. averages, are also re-normalized, which
+we do not write explicitly to avoid a cluttered notation.
+
+We denote the parameters of the network by Θ, split into
+a ﬁxed number of parameters for the feature extraction part
+and a variable number of weight vectors. We denote the lat-
+ter by w1, . . . , wt ∈ Rd, where here and in the following
+sections we use the convention that t denotes the number of
+classes that have been observed so far. The resulting net-
+
+Classiﬁcation. For classiﬁcation, iCaRL relies on sets,
+P1, . . . , Pt, of exemplar images that it selects dynamically
+out of the data stream. There is one such exemplar set for
+
+1In principle, the iCaRL strategy is largely architecture agnostic and
+could be use on top of other feature or metric learning strategies. Here, we
+discuss it only in the context of CNNs to avoid an overly general notation.
+
+2
+
+work outputs are, for any class y ∈ {1, . . . , t},
+
+gy(x) =
+
+1
+1 + exp(−ay(x))
+
+with ay(x) = w(cid:62)
+
+y ϕ(x). (1)
+
+Note that even though one can interpret these outputs as
+probabilities, iCaRL uses the network only for representa-
+tion learning, not for the actual classiﬁcation step.
+
+Algorithm 3 iCaRL UPDATEREPRESENTATION
+input X s, . . . , X t
+require P = (P1, . . . , Ps−1)
+require Θ
+
+// current model parameters
+
+// training images of classes s, . . . , t
+
+// exemplar sets
+
+// form combined training set:
+
+(cid:91)
+
+D ←
+
+y=s,...,t
+
+{(x, y) : x ∈ X y} ∪
+
+{(x, y) : x ∈ P y}
+
+(cid:91)
+
+y=1,...,s−1
+
+Resource usage. Due to its incremental nature, iCaRL
+does not need a priori information about which and how
+many classes will occur, and it can –in theory– run for an
+unlimited amount of time. At any time during its runtime
+its memory requirement will be the size of the feature ex-
+traction parameters, the storage of K exemplar images and
+as many weight vectors as classes that have been observed.
+This knowledge allows us to assign resources depending on
+If an upper bound on the num-
+the application scenario.
+ber of classes is known, one can simply pre-allocate space
+for as many weight vectors as required and use all remain-
+ing available memory to store exemplars. Without an up-
+per limit, one would actually grow the number of weight
+vectors over time, and decrease the size of the exemplar
+set accordingly. Clearly, at least one exemplar image and
+weight vector is required for each classes to be learned, so
+ultimately, only a ﬁnite number of classes can be learned,
+unless one allows for the possibility to add more resources
+over the runtime of the algorithm. Note that iCaRL can han-
+dle an increase of resources on-the-ﬂy without retraining: it
+will simply not discard any exemplars unless it is forced to
+do so by memory limitations.
+
+2.2. Nearest-Mean-of-Exemplars Classiﬁcation
+
+iCaRL uses a nearest-mean-of-exemplars classiﬁcation
+strategy. To predict a label, y∗, for a new image, x, it
+computes a prototype vector for each class observed so far,
+µ1, . . . , µt, where µy = 1
+ϕ(p) is the average
+|Py|
+feature vector of all exemplars for a class y. It also com-
+putes the feature vector of the image that should be classi-
+ﬁed and assigns the class label with most similar prototype:
+
+p∈Py
+
+(cid:80)
+
+y∗ = argmin
+y=1,...,t
+
+(cid:107)ϕ(x) − µy(cid:107).
+
+(2)
+
+Background. The nearest-mean-of-exemplars classiﬁca-
+tion rule overcomes two major problems of the incremen-
+tal learning setting, as can be seen by contrasting it against
+other possibilities for multi-class classiﬁcation.
+
+The usual classiﬁcation rule for a neural network would
+be y∗ = argmaxy=1,...,t gy(x), where gy(x) is the network
+output as deﬁned in (1) or alternatively with a softmax out-
+put layer. Because argmaxy gy(x) = argmaxy w(cid:62)
+y ϕ(x),
+the network’s prediction rule is equivalent to the use of a
+
+// store network outputs with pre-update parameters:
+for y = 1, . . . , s − 1 do
+
+qy
+i ← gy(xi)
+end for
+run network training (e.g. BackProp) with loss function
+
+for all (xi, ·) ∈ D
+
+(cid:96)(Θ) = −
+
+δy=yi log gy(xi)+ δy(cid:54)=yi log(1−gy(xi))
+
+i log gy(xi)+(1−qy
+qy
+
+(cid:105)
+i ) log(1−gy(xi))
+
+(cid:88)
+
+(cid:104) t
+(cid:88)
+
+(xi,yi)∈D
+
+y=s
+
++
+
+s−1
+(cid:88)
+
+y=1
+
+that consists of classiﬁcation and distillation terms.
+
+linear classiﬁer with non-linear feature map ϕ and weight
+vectors w1, . . . , wt.
+In the class-incremental setting, it is
+problematic that the weight vectors wy are decoupled from
+the feature extraction routine ϕ: whenever ϕ changes, all
+w1, . . . , wt must be updated as well. Otherwise, the net-
+work outputs will change uncontrollably, which is observ-
+In contrast, the nearest-
+able as catastrophic forgetting.
+mean-of-exemplars rule (2) does not have decoupled weight
+vectors. The class-prototypes automatically change when-
+ever the feature representation changes, making the classi-
+ﬁer robust against changes of the feature representation.
+
+The choice of the average vector as prototype is inspired
+by the nearest-class-mean classiﬁer [24] for incremental
+learning with a ﬁxed feature representation. In the class-
+incremental setting, we cannot make use of the true class
+mean, since all training data would have to be stored in or-
+der to recompute this quantity after a representation change.
+Instead, we use the average over a ﬂexible number of exem-
+plars that are chosen in a way to provide a good approxima-
+tion to the class mean.
+
+Note that, because we work with normalized feature vec-
+tors, Equation (2) can be written equivalently as y∗ =
+argmaxy µ(cid:62)
+y ϕ(x). Therefore, we can also interpret the
+classiﬁcation step as classiﬁcation with a weight vector, but
+one that is not decoupled from the data representation but
+changes consistently with it.
+
+2.3. Representation Learning
+
+Whenever iCaRL obtains data, X s, . . . , X t, for new
+classes, s, . . . , t, it updates its feature extraction routine
+
+3
+
+Algorithm 4 iCaRL CONSTRUCTEXEMPLARSET
+
+Algorithm 5 iCaRL REDUCEEXEMPLARSET
+
+input image set X = {x1, . . . , xn} of class y
+input m target number of exemplars
+require current feature function ϕ : X → Rd
+x∈X ϕ(x) // current class mean
+
+(cid:80)
+
+(cid:13)
+(cid:13)µ − 1
+(cid:13)
+
+k [ϕ(x) + (cid:80)k−1
+
+(cid:13)
+(cid:13)
+j=1 ϕ(pj)]
+(cid:13)
+
+µ ← 1
+n
+for k = 1, . . . , m do
+pk ← argmin
+
+x∈X
+
+end for
+P ← (p1, . . . , pm)
+output exemplar set P
+
+and the exemplar set. Algorithm 3 lists the steps for incre-
+mentally improving the feature representation. First, iCaRL
+constructs an augmented training set consisting of the cur-
+rently available training examples together with the stored
+exemplars. Next, the current network is evaluated for each
+example and the resulting network outputs for all previous
+classes are stored (not for the new classes, since the network
+has not been trained for these, yet). Finally, the network pa-
+rameters are updated by minimizing a loss function that for
+each new image encourages the network to output the cor-
+rect class indicator for new classes (classiﬁcation loss), and
+for old classes, to reproduce the scores stored in the previ-
+ous step (distillation loss).
+
+Background. The representation learning step resem-
+bles ordinary network ﬁnetuning: starting from previously
+learned network weights it minimizes a loss function over
+a training set. As a consequence, standard end-to-end
+learning methods can be used, such as backpropagation
+with mini-batches, but also recent improvements, such as
+dropout [39], adaptive stepsize selection [14] or batch nor-
+malization [13], as well as potential future improvements.
+
+There are two modiﬁcations to plain ﬁnetuning that aim
+at preventing or at least mitigating catastrophic forgetting.
+First, the training set is augmented.
+It consists not only
+of the new training examples but also of the stored exem-
+plars. By this it is ensured that at least some information
+about the data distribution of all previous classes enters the
+training process. Note that for this step it is important that
+the exemplars are stored as images, not in a feature repre-
+sentation that would become outdated over time. Second,
+the loss function is augmented as well. Besides the stan-
+dard classiﬁcation loss, which encourages improvements of
+the feature representation that allow classifying the newly
+observed classes well, it also contains the distillation loss,
+which ensures that the discriminative information learned
+previously is not lost during the new learning step.
+
+input m
+input P = (p1, . . . , p|P |)
+P ← (p1, . . . , pm)
+output exemplar set P
+
+// target number of exemplars
+
+// current exemplar set
+// i.e. keep only ﬁrst m
+
+2.4. Exemplar Management
+
+Whenever iCaRL encounters new classes it adjusts its
+exemplar set. All classes are treated equally in this, i.e.,
+when t classes have been observed so far and K is the to-
+tal number of exemplars that can be stored, iCaRL will use
+m = K/t exemplars (up to rounding) for each class. By
+this it is ensured that the available memory budget of K
+exemplars is always used to full extent, but never exceeded.
+Two routines are responsible for exemplar management:
+one to select exemplars for new classes and one to reduce
+the sizes of the exemplar sets of previous classes. Algo-
+rithm 4 describes the exemplar selection step. Exemplars
+p1, . . . , pm are selected and stored iteratively until the target
+number, m, is met. In each step of the iteration, one more
+example of the current training set is added to the exemplar
+set, namely the one that causes the average feature vector
+over all exemplars to best approximate the average feature
+vector over all training examples. Thus, the exemplar ”set”
+is really a prioritized list. The order of its elements mat-
+ters, with exemplars earlier in the list being more important.
+The procedure for removing exemplars is speciﬁed in Algo-
+rithm 5. It is particularly simple: to reduce the number of
+exemplars from any m(cid:48) to m, one discards the exemplars
+pm+1, . . . , pm(cid:48), keeping only the examples p1, . . . , pm.
+
+Background. The exemplar management routines are de-
+signed with two objectives in mind:
+the initial exemplar
+set should approximate the class mean vector well, and it
+should be possible to remove exemplars at any time during
+the algorithm’s runtime without violating this property.
+
+The latter property is challenging because the actual
+class mean vector is not available to the algorithm anymore
+when the removal procedure is called. Therefore, we adopt
+a data-independent removal strategy, removing elements in
+ﬁxed order starting at the end, and we make it the responsi-
+bility of the exemplar set construction routine to make sure
+that the desired approximation properties are fulﬁlled even
+after the removal procedure is called at later times. The pri-
+oritized construction is the logical consequence of this con-
+dition: it ensures that the average feature vector over any
+subset of exemplars, starting at the ﬁrst one, is a good ap-
+proximation of the mean vector. The same prioritized con-
+struction is used in herding [40] to create a representative set
+of samples from a distribution. There it was also shown that
+the iterative selection requires fewer samples to achieve a
+
+4
+
+high approximation quality than, e.g., random subsampling.
+In contrast, other potential methods for exemplar selection,
+such as [7, 26], were designed with other objectives and are
+not guaranteed to provide a good approximation quality for
+any number of prototypes.
+
+Overall, iCaRL’s steps for exemplar selection and reduc-
+tion ﬁt exactly to the incremental learning setting: the selec-
+tion step is required for each class only once, when it is ﬁrst
+observed and its training data is available. At later times,
+only the reduction step is called, which does not need ac-
+cess to any earlier training data.
+
+3. Related work
+
+iCaRL builds on the insights of multiple earlier attempts
+to address class-incremental learning. In this section, we
+describe the most important ones, structuring them on the
+one hand into learning techniques with ﬁxed data represen-
+tations and on the other hand into techniques that also learn
+the data representation, both from the classical connection-
+ists era as well as recent deep learning approaches.
+
+Learning with a ﬁxed data representation. When the
+data representation is ﬁxed, the main challenge for class-
+incremental learning is to design a classiﬁer architecture
+that can accommodate new classes at any time during the
+training process without requiring access to all training data
+seen so far. The simplest such process of this type could be
+a (k-)nearest neighbor classiﬁer, but that would require stor-
+ing all training data during the learning process and there-
+fore does not qualify as a class-incremental procedure by
+our deﬁnition.
+
+Mensink et al. [23] observed that the nearest class mean
+(NCM) classiﬁer has this property. NCM represents each
+class as a prototype vector that is the average feature vector
+of all examples observed for the class so far. This vector
+can be computed incrementally from a data stream, so there
+is no need to store all training examples. A new example is
+classiﬁed by assigning it the class label that has a prototype
+most similar to the example’s feature vector, with respect
+to a metric that can also be learned from data. Despite (or
+because of) its simplicity, NCM has been shown to work
+well and be more robust than standard parametric classiﬁers
+in an incremental learning setting [23, 24, 32].
+
+NCM’s main shortcoming is that it cannot easily be ex-
+tended to the situation in which a nonlinear data represen-
+tation should be learned together with the classiﬁers, as this
+prevents the class mean vectors from being computable in
+an incremental way. For iCaRL we adopt from NCM the
+idea of prototype-based classiﬁcation. However, the proto-
+types we use are not the average features vectors over all
+examples but only over a speciﬁcally chosen subset, which
+allows us to keep a small memory footprint and perform all
+necessary updates with constant computational effort.
+
+fulﬁll
+
+Alternative approaches
+
+the class-incremental
+learning criteria i)–iii), that we introduced in Section 1,
+only partially: Kuzborskij et al. [17] showed that a loss of
+accuracy can be avoided when adding new classes to an ex-
+isting linear multi-class classiﬁer, as long as the classiﬁers
+can be retrained from at least a small amount of data for all
+classes. Chen et al. [4, 5] and Divvala et al. [6] introduced
+systems that autonomously retrieve images from web re-
+sources and identiﬁes relations between them, but they does
+not incrementally learn object classiﬁers. Royer and Lam-
+pert [34] adapt classiﬁers to a time-varying data stream but
+their method cannot handle newly appearing classes, while
+Pentina et al. [29] show that learning multiple tasks sequen-
+tially can beneﬁcial, but for choosing the order the data for
+all tasks has to be available at the same time.
+
+Li and Wechsler [20], Scheirer et al. [38], as well as Ben-
+dale and Boult [2] aimed at the related but distinct prob-
+lem of Open Set Recognition in which test examples might
+come from other classes than the training examples seen so
+far. Polikar et al. [28, 30] introduced an ensemble based
+approach that can handle an increasing number of classes
+but needs training data for all classes to occur repeatedly.
+Zero-shot learning, as proposed by Lampert et al. [18], can
+classify examples of previously unseen classes, but it does
+not include a training step for those.
+
+Representation learning. The recent success of (deep)
+neural networks can in large parts be attributed to their abil-
+ity to learn not only classiﬁers but also suitable data rep-
+resentations [3, 21, 25, 37], at least in the standard batch
+setting. First attempts to learn data representations in an
+incremental fashion can already be found in the classic neu-
+ral network literature, e.g. [1, 8, 9, 33].
+In particular, in
+the late 1980s McCloskey et al. [22] described the problem
+of catastrophic forgetting, i.e. the phenomenon that train-
+ing a neural network with new data causes it to overwrite
+(and thereby forget) what it has learned on previous data.
+However, these classical works were mainly in the context
+of connectionist memory networks, not classiﬁers, and the
+networks used were small and shallow by today’s standards.
+Generally, the existing algorithms and architectural changes
+are unable to prevent catastrophic forgetting, see, for ex-
+ample, Moe-Helgesen et al.’s survey [27] for classical and
+Goodfellow et al.’s [10] for modern architectures, except in
+speciﬁc settings, such as Kirkpatrick et al.’s [15].
+
+A major achievement of the early connectionist works,
+however, is that they identiﬁed the two main strategies of
+how catastrophic forgetting can be addressed: 1) by freezing
+parts of the network weights while at the same time grow-
+ing the network in order to preserve the ability to learn, 2)
+by rehearsal, i.e. continuously stimulating the network not
+only with the most recent, but also with earlier data.
+
+Recent works on incremental learning of neural net-
+
+5
+
+works have mainly followed the freeze/grow strategy, which
+however requires allocating more and more resources to the
+network over time and therefore violates principle iii) of
+our deﬁnition of class-incremental learning. For example,
+Xiao et al. [41] learn a tree-structured model that grows in-
+crementally as more classes are observed. In the context of
+multi-task reinforcement learning, Rusu et al. [36] propose
+growing the networks by extending all layer horizontally.
+
+For iCaRL, we adopt the principle of rehearsal: to up-
+date the model parameters for learning a representation, we
+use not only the training data for the currently available
+classes, but also the exemplars from earlier classes, which
+are available anyway as they are required for the prototype-
+based classiﬁcation rule. Additionally, iCaRL also uses dis-
+tillation to prevent that information in the network deterio-
+rates too much over time. while Hinton et al. [12] originally
+proposed distillation to transfer information between differ-
+ent neural networks, in iCaRL, we use it within a single
+network between different time points. The same princi-
+ple was recently proposed by Li and Hoiem [21] under the
+name of Learning without Forgetting (LwF) to incremen-
+tally train a single network for learning multiple tasks, e.g.
+multiple object recognition datasets. The main difference to
+the class-incremental multi-class situation lies in the predic-
+tion step: a multi-class learner has to pick one classiﬁer that
+predicts correctly any of the observed classes. A multi-task
+(multi-dataset) leaner can make use of multiple classiﬁers,
+each being evaluated only on the data from its own dataset.
+
+4. Experiments
+
+In this section we propose a protocol for evaluating in-
+cremental learning methods and compare iCaRL’s classiﬁ-
+cation accuracy to that of alternative methods (Section 4.1).
+We also report on further experiments that shed light on
+iCaRL’s working mechanisms by isolating the effect of in-
+dividual components (Section 4.2).
+
+Benchmark protocol. So far, no agreed upon benchmark
+protocol for evaluation class-incremental learning methods
+exist. Therefore, we propose the following evaluation pro-
+cedure: for a given multi-class classiﬁcation dataset, the
+classes are arranged in a ﬁxed random order. Each method
+is then trained in a class-incremental way on the available
+training data. After each batch of classes, the resulting clas-
+siﬁer is evaluated on the test part data of the dataset, consid-
+ering only those classes that have already been trained. Note
+that, even though the test data is used more than once, no
+overﬁtting can occur, as the testing results are not revealed
+to the algorithms. The result of the evaluation are curves of
+the classiﬁcation accuracies after each batch of classes. If a
+single number is preferable, we report the average of these
+accuracies, called average incremental accuracy.
+
+For the task of image classiﬁcation we introduce two in-
+stantiations of the above protocol. 1) iCIFAR-100 bench-
+mark: we use the CIFAR-100 [16] data and train all 100
+classes in batches of 2, 5, 10, 20 or 50 classes at a time.
+The evaluation measure is the standard multi-class accu-
+racy on the test set. As the dataset is of manageable size,
+we run this benchmark ten times with different class or-
+ders and reports averages and standard deviations of the
+results. 2) iILSVRC benchmark: we use the ImageNet
+ILSVRC 2012 [35] dataset in two settings: using only a
+subset of 100 classes, which are trained in batches of 10
+(iILSVRC-small) or using all 1000 classes, processed in
+batches of 100 (iILSVRC-full). The evaluation measure is
+the top-5 accuracy on the val part of the dataset.
+
+iCaRL implementation. For iCIFAR-100 we rely on the
+theano package2 and train a 32-layers ResNet [11], allowing
+iCaRL to store up to K = 2000 exemplars. Each training
+step consists of 70 epochs. The learning rate starts at 2.0 and
+is divided by 5 after 49 and 63 epochs (7/10 and 9/10 of all
+epochs). For iILSVRC the maximal number of exemplars is
+K = 20000 and we use the tensorﬂow framework3 to train
+an 18-layers ResNet [11] for 60 epochs per class batch. The
+learning rate starts at 2.0 and is divided by 5 after 20, 30,
+40 and 50 epochs (1/3, 1/2, 2/3 and 5/6 of all epochs). For
+all methods we train the network using standard backprop-
+agation with minibatches of size 128 and a weight decay
+parameter of 0.00001. Note that the learning rates might
+appear large, but for our purpose they worked well, likely
+because we use binary cross-entropy in the network layer.
+Smaller rates might be required for a multi-class softmax
+layer. Our source code and further data are available at
+http://www.github.com/srebuffi/iCaRL.
+
+4.1. Results
+
+Our main set of experiments studies the classiﬁcation ac-
+curacy of different methods under class-incremental condi-
+tions. Besides iCaRL we implemented and tested three al-
+ternative class-incremental methods. Finetuning learns an
+ordinary multi-class network without taking any measures
+to prevent catastrophic forgetting. It can also be interpreted
+as learning a multi-class classiﬁer for new incoming classes
+by ﬁnetuning the previously learned multiclass classiﬁca-
+tion network. Fixed representation also learns a multi-class
+classiﬁcation network, but in a way that prevents catas-
+trophic forgetting. It freezes the feature representation after
+the ﬁrst batch of classes has been processed and the weights
+of the classiﬁcation layer after the corresponding classes
+have been processed. For subsequent batches of classes,
+only the weights vectors of new classes are trained. Finally,
+
+2http://deeplearning.net/software/theano/
+3https://www.tensorflow.org/
+
+6
+
+(a) Multi-class accuracy (averages and standard deviations over 10 repeats) on iCIFAR-100 with 2 (top left),
+or 50 (bottom right) classes per batch.
+
+5 (top middle), 10 (top right), 20 (bottom left)
+
+(b) Top-5 accuracy on iILSVRC-small (top) and iILSVRC-full (bottom).
+
+Figure 2: Experimental results of class-incremental training on iCIFAR-100 and iILSVRC: reported are multi-class accura-
+cies across all classes observed up to a certain time point. iCaRL clearly outperforms the other methods in this setting. Fixing
+the data representation after having trained on the ﬁrst batch (ﬁxed repr.) performs worse than distillation-based LwF.MC,
+except for iILSVRC-full. Finetuning the network without preventing catastrophic forgetting (ﬁnetuning) achieves the worst
+results. For comparison, the same network trained with all data available achieves 68.6% multi-class accuracy.
+
+we also compare to a network classiﬁer that attempts at pre-
+venting catastrophic forgetting by using the distillation loss
+during learning, like iCaRL does, but that does not use an
+exemplar set. For classiﬁcation, it uses the network output
+values themselves. This is essentially the Learning without
+Forgetting approach, but applied to multi-class classiﬁca-
+tion we, so denote it by LwF.MC. Figure 2 shows the re-
+sults. One can see that iCaRL clearly outperforms the other
+methods, and the more so the more incremental the setting
+
+is (i.e. the fewer classes can be processed at the same time).
+Among the other methods, distillation-based network train-
+ing (LwF.MC) is always second best, except for iILSVRC-
+full, where it is better to ﬁx the representation after the ﬁrst
+batch of 100 classes. Finetuning always achieves the worst
+results, conﬁrming that catastrophic forgetting is indeed a
+major problem for in class-incremental learning.
+
+Figure 3 provides further insight into the behavior of
+the different methods. Is shows the confusion matrices of
+
+7
+
+(a) iCaRL
+
+(b) LwF.MC
+
+(c) ﬁxed representation
+
+(d) ﬁnetuning
+
+Figure 3: Confusion matrices of different method on iCIFAR-100 (with entries transformed by log(1+x) for better visibility).
+iCaRL’s predictions are distributed close to uniformly over all classes, whereas LwF.MC tends to predict classes from recent
+batches more frequently. The classiﬁer with ﬁxed representation has a bias towards classes from the ﬁrst batch, while the
+network trained by ﬁnetuning predicts exclusively classes labels from the last batch.
+
+the 100-class classiﬁer on iCIFAR-100 after training us-
+ing batches of 10 classes at a time (larger versions can be
+found in the appendix). One can see very characteristic pat-
+terns: iCaRL’s confusion matrix looks homogeneous over
+all classes, both in terms of the diagonal entries (i.e. cor-
+rect predictions) as well as off-diagonal entries (i.e. mis-
+takes). This shows that iCaRL has no intrinsic bias towards
+
+or against classes that it encounters early or late during
+learning. In particular, it does not suffer from catastrophic
+forgetting.
+
+In contrast to this, the confusion matrices for the other
+classes show inhomogeneous patterns: distillation-based
+training (LwF.MC) has many more non-zero entries towards
+the right, i.e. for recently learned classes. Even more ex-
+
+8
+
+treme is the effect for ﬁnetuning, where all predicted class
+labels come from the last batch of classes that the network
+has been trained with. The ﬁnetuned network simply for-
+got that earlier classes even exist. The ﬁxed representation
+shows the opposite pattern: it prefers to output classes from
+the ﬁrst batch of classes it was trained on (which were used
+to obtained the data representation). Confusion matrices for
+iILSVRC show the same patterns, they can be found in the
+appendix.
+
+4.2. Differential Analysis
+
+To provide further insight
+
+into the working mecha-
+nism of iCaRL, we performed additional experiments on
+iCIFAR-100, in which we isolate individual aspects of the
+methods.
+
+First, we analyze why exactly iCaRL improves over
+plain ﬁnetuning-based training, from which it differs in
+three aspects: by the use of the mean-of-exemplars clas-
+siﬁcation rule, by the use of exemplars during the repre-
+sentation learning, and by the use of the distillation loss.
+the ﬁrst (hy-
+We therefore created three hybrid setups:
+brid1) learns a representation in the same way as iCaRL,
+but uses the network’s outputs directly for classiﬁcation, not
+the mean-of-exemplar classiﬁer. The second (hybrid2) uses
+the exemplars for classiﬁcation, but does not use the dis-
+tillation loss during training. The third (hybrid3) uses nei-
+ther the distillation loss nor exemplars for classiﬁcation, but
+it makes use of the exemplars during representation learn-
+ing. For comparison, we also include LwF.MC again, which
+uses distillation, but no exemplars at all.
+
+Table 1a summarizes the results as the average of the
+classiﬁcation accuracies over all steps of the incremental
+training. One can see that the hybrid setups mostly achieve
+results in between iCaRL and LwF.MC, showing that in-
+deed all of iCaRL’s new components contribute substan-
+tially to its good performance. In particular, the comparison
+of iCaRL with hybrid1 shows that the mean-of-exemplar
+classiﬁers is particularly advantageous for smaller batch
+sizes, i.e. when more updates of the representation are per-
+formed. Comparing iCaRL and hybrid2 one sees that for
+very small class batch sizes, distillation can even hurt clas-
+siﬁcation accuracy compared to just using prototypes. For
+larger batch sizes and fewer updates, the use of the distil-
+lation loss is clearly advantageous. Finally, comparing the
+result of hybrid3 with LwF.MC clearly shows the effective-
+ness of exemplars in preventing catastrophic forgetting.
+
+In a second set of experiments we study how much ac-
+curacy is lost by using the means-of-exemplars as classiﬁ-
+cation prototypes instead of the nearest-class-mean (NCM)
+rule. For the latter, we use the unmodiﬁed iCaRL to learn
+a representation, but we classify images with NCM, where
+the class-means are recomputed after each representation
+update using the current feature extractor. Note that this re-
+
+Figure 4: Average incremental accuracy on iCIFAR-100
+with 10 classes per batch for different memory budgets K.
+
+quires storing all training data, so it would not qualify as
+a class-incremental method. The results in Table 1b show
+only minor differences between iCaRL and NCM, conﬁrm-
+ing that iCaRL reliably identiﬁes representative exemplars.
+Figure 4 illustrates the effect of different memory bud-
+gets, comparing iCaRL with the hybrid1 classiﬁer of Ta-
+ble 1a and the NCM classiﬁer of Table 1b. Both use the
+same data representation as iCaRL but differ in their clas-
+siﬁcation rules. All method beneﬁt from a larger memory
+budget, showing that iCaRL’s representation learning step
+indeed beneﬁts from more prototypes. Given enough proto-
+types (here at least 1000), iCaRL’s mean-of-exemplars clas-
+siﬁer performs similarly to the NCM classiﬁer, while clas-
+sifying by the network outputs is not competitive.
+
+5. Conclusion
+
+We introduced iCaRL, a strategy for class-incremental
+learning that learns classiﬁers and a feature representation
+simultaneously. iCaRL’s three main components are: 1) a
+nearest-mean-of-exemplars classiﬁer that is robust against
+changes in the data representation while needing to store
+only a small number of exemplars per class, 2) a herding-
+based step for prioritized exemplar selection, and 3) a rep-
+resentation learning step that uses the exemplars in combi-
+nation with distillation to avoid catastrophic forgetting. Ex-
+periments on CIFAR-100 and ImageNet ILSVRC 2012 data
+show that iCaRL is able to learn incrementally over a long
+period of time where other methods fail quickly.
+
+The main reason for iCaRL’s strong classiﬁcation results
+are its use of exemplar images. While it is intuitive that be-
+ing able to rely on stored exemplars in addition to the net-
+work parameters could be beneﬁcial, we nevertheless ﬁnd
+it an important observation how pronounced this effect is
+in the class-incremental setting. We therefore hypothesize
+that also other architectures should be able to beneﬁt from
+using a combination of network parameters and exemplars,
+especially given the fact that many thousands of images can
+be stored (in compressed form) with memory requirements
+comparable to the sizes of current deep networks.
+
+Despite the promising results, class-incremental classi-
+
+9
+
+Table 1: Average multi-class accuracy on iCIFAR-100 for different modiﬁcations of iCaRL.
+
+(a) Switching off different components of iCaRL (hybrid1, hybrid2, hybrid3,
+see text for details) leads to results mostly inbetween iCaRL and LwF.MC,
+showing that all of iCaRL’s new components contribute to its performance.
+
+(b) Replacing iCaRL’s mean-of-exemplars by a nearest-class-mean clas-
+siﬁer (NCM) has only a small positive effect on the classiﬁcation accu-
+racy, showing that iCaRL’s strategy for selecting exemplars is effective.
+
+batch size
+2 classes
+5 classes
+10 classes
+20 classes
+50 classes
+
+iCaRL
+57.0
+61.2
+64.1
+67.2
+68.6
+
+hybrid1
+36.6
+50.9
+59.3
+65.6
+68.2
+
+hybrid2
+57.6
+57.9
+59.9
+63.2
+65.3
+
+hybrid3
+57.0
+56.7
+58.1
+60.5
+61.5
+
+LwF.MC
+11.7
+32.6
+44.4
+54.4
+64.5
+
+batch size
+2 classes
+5 classes
+10 classes
+20 classes
+50 classes
+
+iCaRL NCM
+59.3
+57.0
+62.1
+61.2
+64.5
+64.1
+67.5
+67.2
+68.7
+68.6
+
+In particular, iCaRL’s perfor-
+ﬁcation is far from solved.
+mance is still lower than what systems achieve when trained
+in a batch setting, i.e. with all training examples of all
+classes available at the same time. In future work we plan
+to analyze the reasons for this in more detail with the goal
+of closing the remaining performance gap. We also plan to
+study related scenarios in which the classiﬁer cannot store
+any of the training data in raw form, e.g. for privacy rea-
+sons. A possible direction for this would be to encode fea-
+ture characteristics of earlier tasks implicitly by a autoen-
+coder, as recently proposed by Rannen Triki et al. [31].
+
+Acknowledgments. This work was in parts funded by the
+European Research Council under the European Union’s
+Seventh Framework Programme (FP7/2007-2013)/ERC
+grant agreement no 308036: ”Life-long learning of visual
+scene understanding” (L3ViSU). The Tesla K40 cards used
+for this research were donated by the NVIDIA Corporation.
+
+References
+
+[1] B. Ans and S. Rousset. Avoiding catastrophic forgetting by
+coupling two reverberating neural networks. Comptes Ren-
+dus de l’Acad´emie des Sciences, 320(12), 1997. 5
+
+[2] A. Bendale and T. Boult. Towards open world recognition.
+In Conference on Computer Vision and Pattern Recognition
+(CVPR), 2015. 5
+
+[3] Y. Bengio, A. Courville, and P. Vincent. Representation
+IEEE Trans-
+learning: A review and new perspectives.
+actions on Pattern Analysis and Machine Intelligence (T-
+PAMI), 35(8), 2013. 2, 5
+
+[4] X. Chen, A. Shrivastava, and A. Gupta. NEIL: Extracting vi-
+sual knowledge from web data. In International Conference
+on Computer Vision (ICCV), 2013. 5
+
+[5] X. Chen, A. Shrivastava, and A. Gupta. Enriching visual
+knowledge bases via object discovery and segmentation. In
+Conference on Computer Vision and Pattern Recognition
+(CVPR), 2014. 5
+
+[6] S. K. Divvala, A. Farhadi, and C. Guestrin. Learning ev-
+erything about anything: Webly-supervised visual concept
+In Conference on Computer Vision and Pattern
+learning.
+Recognition (CVPR), 2014. 5
+
+[7] E. Elhamifar and R. Vidal. Sparse subspace clustering:
+IEEE Transactions
+Algorithm, theory, and applications.
+on Pattern Analysis and Machine Intelligence (T-PAMI),
+35(11):2765–2781, 2013. 5
+
+[8] R. M. French. Catastrophic interference in connectionist net-
+In Con-
+works: Can it be predicted, can it be prevented?
+ference on Neural Information Processing Systems (NIPS),
+1993. 5
+
+[9] R. M. French. Catastrophic forgetting in connectionist net-
+
+works. Trends in cognitive sciences, 3(4), 1999. 5
+
+[10] I. J. Goodfellow, M. Mirza, D. Xiao, A. Courville, and
+Y. Bengio. An empirical investigation of catastrophic for-
+In International
+geting in gradient-based neural networks.
+Conference on Learning Representations (ICLR), 2014. 5
+
+[11] K. He, X. Zhang, S. Ren, and J. Sun. Deep residual learn-
+ing for image recognition. arXiv preprint arXiv:1512.03385,
+2015. 6
+
+[12] G. Hinton, O. Vinyals, and J. Dean. Distilling the knowledge
+in a neural network. In NIPS Workshop on Deep Learning,
+2014. 6
+
+[13] S. Ioffe and C. Szegedy. Batch normalization: Accelerating
+deep network training by reducing internal covariate shift.
+In International Conference on Machine Learing (ICML),
+2015. 4
+
+[14] D. P. Kingma and J. Ba. Adam: A method for stochastic
+optimization. In International Conference on Learning Rep-
+resentations (ICLR), 2015. 4
+
+[15] J. Kirkpatrick, R. Pascanu, N. Rabinowitz, J. Veness, G. Des-
+jardins, A. A. Rusu, K. Milan, J. Quan, T. Ramalho,
+A. Grabska-Barwinska, et al. Overcoming catastrophic for-
+getting in neural networks. Proceedings of the National
+Academy of Sciences (PNAS), 2017. 5
+
+[16] A. Krizhevsky. Learning multiple layers of features from
+tiny images. Technical report, University of Toronto, 2009.
+6
+
+[17] I. Kuzborskij, F. Orabona, and B. Caputo. From n to n + 1:
+Multiclass transfer incremental learning. In Conference on
+Computer Vision and Pattern Recognition (CVPR), 2013. 5
+
+[18] C. H. Lampert, H. Nickisch, and S. Harmeling. Attribute-
+based classiﬁcation for zero-shot visual object categoriza-
+tion. IEEE Transactions on Pattern Analysis and Machine
+Intelligence (T-PAMI), 2013. 5
+
+10
+
+ImageNet Large Scale Visual
+A. C. Berg, and L. Fei-Fei.
+Recognition Challenge. International Journal of Computer
+Vision (IJCV), 115(3), 2015. 6
+
+[36] A. A. Rusu, N. C. Rabinowitz, G. Desjardins, H. Soyer,
+J. Kirkpatrick, K. Kavukcuoglu, R. Pascanu, and R. Had-
+arXiv preprint
+sell.
+arXiv:1606.04671, 2016. 6
+
+Progressive neural networks.
+
+[37] S. Saxena and J. Verbeek. Convolutional neural fabrics.
+In Conference on Neural Information Processing Systems
+(NIPS), 2016. 5
+
+[38] W. J. Scheirer, A. Rocha, A. Sapkota, and T. E. Boult. To-
+wards open set recognition. IEEE Transactions on Pattern
+Analysis and Machine Intelligence (T-PAMI), 36, 2013. 5
+
+[39] N. Srivastava, G. E. Hinton, A. Krizhevsky, I. Sutskever, and
+R. Salakhutdinov. Dropout: a simple way to prevent neu-
+ral networks from overﬁtting. Journal of Machine Learning
+Research (JMLR), 15(1), 2014. 4
+
+[40] M. Welling. Herding dynamical weights to learn. In Inter-
+
+national Conference on Machine Learing (ICML), 2009. 4
+
+[41] T. Xiao, J. Zhang, K. Yang, Y. Peng, and Z. Zhang. Error-
+driven incremental learning in deep convolutional neural net-
+In International
+work for large-scale image classiﬁcation.
+Conference on Multimedia (ACM MM), 2014. 6
+
+[19] Y. LeCun, L. Bottou, Y. Bengio, and P. Haffner. Gradient-
+based learning applied to document recognition. Proceed-
+ings of the IEEE, 86(11), 1998. 2
+
+[20] F. Li and H. Wechsler. Open set face recognition using trans-
+IEEE Transactions on Pattern Analysis and Ma-
+
+duction.
+chine Intelligence (T-PAMI), 27(11), 2005. 5
+[21] Z. Li and D. Hoiem. Learning without forgetting.
+
+In Eu-
+ropean Conference on Computer Vision (ECCV), 2016. 5,
+6
+
+[22] M. McCloskey and N. J. Cohen. Catastrophic interference
+in connectionist networks: The sequential learning problem.
+Psychology of learning and motivation, 24:109–165, 1989.
+1, 5
+
+[23] T. Mensink, J. Verbeek, F. Perronnin, and G. Csurka. Metric
+learning for large scale image classiﬁcation: Generalizing to
+new classes at near-zero cost. In European Conference on
+Computer Vision (ECCV), 2012. 5
+
+[24] T. Mensink, J. Verbeek, F. Perronnin, and G. Csurka.
+Distance-based image classiﬁcation: Generalizing to new
+IEEE Transactions on Pattern
+classes at near-zero cost.
+Analysis and Machine Intelligence (T-PAMI), 35(11), 2013.
+3, 5
+
+[25] I. Misra, A. Shrivastava, A. Gupta, and M. Hebert. Cross-
+In Conference on
+stitch networks for multi-task learning.
+Computer Vision and Pattern Recognition (CVPR), 2016. 5
+[26] I. Misra, A. Shrivastava, and M. Hebert. Data-driven exem-
+plar model selection. In Winter Conference on Applications
+of Computer Vision (WACV), pages 339–346, 2014. 5
+[27] O.-M. Moe-Helgesen and H. Stranden. Catastophic forget-
+ting in neural networks. Technical report, Norwegian Uni-
+versity of Science and Technology (NTNU), 2005. 5
+[28] M. D. Muhlbaier, A. Topalis, and R. Polikar. Learn++.NC:
+Combining ensemble of classiﬁers with dynamically
+weighted consult-and-vote for efﬁcient incremental learning
+of new classes. IEEE Transactions on Neural Networks (T-
+NN), 20(1), 2009. 5
+
+[29] A. Pentina, V. Sharmanska, and C. H. Lampert. Curriculum
+learning of multiple tasks. In Conference on Computer Vi-
+sion and Pattern Recognition (CVPR), 2015. 5
+
+[30] R. Polikar, L. Upda, S. S. Upda, and V. Honavar. Learn++:
+an incremental learning algorithm for supervised neural net-
+works. IEEE Transactions on Systems, Man, and Cybernet-
+ics, Part C, 31(4), 2001. 5
+
+[31] A. Rannen Triki, R. Aljundi, M. B. Blaschko, and T. Tuyte-
+arXiv preprint
+
+laars. Encoder based lifelong learning.
+arXiv:1704.01920, 2017. 10
+
+[32] M. Ristin, M. Guillaumin, J. Gall, and L. Van Gool. Incre-
+mental learning of NCM forests for large-scale image clas-
+In Conference on Computer Vision and Pattern
+siﬁcation.
+Recognition (CVPR), 2014. 5
+
+[33] A. V. Robins. Catastrophic forgetting, rehearsal and pseu-
+dorehearsal. Connection Science, 7(2):123–146, 1995. 5
+[34] A. Royer and C. H. Lampert. Classiﬁer adaptation at pre-
+diction time. In Conference on Computer Vision and Pattern
+Recognition (CVPR), 2015. 5
+
+[35] O. Russakovsky, J. Deng, H. Su, J. Krause, S. Satheesh,
+S. Ma, Z. Huang, A. Karpathy, A. Khosla, M. Bernstein,
+
+11
+
+Figure 5: Confusion matrix for iCaRL on iILSVRC-large (1000 classes in batches of 100)
+
+12
+
+Figure 6: Confusion matrix for LwF.MC on iILSVRC-large (1000 classes in batches of 100)
+
+13
+
+Figure 7: Confusion matrix for ﬁxed representation on iILSVRC-large (1000 classes in batches of 100)
+
+14
+
+Figure 8: Confusion matrix for ﬁnetuning on iILSVRC-large (1000 classes in batches of 100)
+
+15
+
