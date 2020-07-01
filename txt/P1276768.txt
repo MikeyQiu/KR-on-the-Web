@@ -1578,3 +1578,1583 @@ the two strategies depends on the ratio of d and o.
 
 (Empirical Analysis) We validate our analytical cost
 
+Caffe con Troll: Shallow Ideas to Speed Up Deep Learning
+
+Stefan Hadjis†
+
+Firas Abuzaid† Ce Zhang†‡ Christopher Ré†
+
+†Stanford University
+‡University of Wisconsin-Madison
+{shadjis, fabuzaid, czhang, chrismre}@cs.stanford.edu
+
+5
+1
+0
+2
+ 
+y
+a
+M
+ 
+6
+2
+ 
+ 
+]
+
+G
+L
+.
+s
+c
+[
+ 
+ 
+2
+v
+3
+4
+3
+4
+0
+.
+4
+0
+5
+1
+:
+v
+i
+X
+r
+a
+
+ABSTRACT
+We present Caﬀe con Troll (CcT), a fully compatible end-
+to-end version of the popular framework Caﬀe with rebuilt
+internals. We built CcT to examine the performance char-
+acteristics of training and deploying general-purpose convo-
+lutional neural networks across diﬀerent hardware architec-
+tures. We ﬁnd that, by employing standard batching opti-
+mizations for CPU training, we achieve a 4.5× throughput
+improvement over Caﬀe on popular networks like CaﬀeNet.
+Moreover, with these improvements, the end-to-end train-
+ing time for CNNs is directly proportional to the FLOPS
+delivered by the CPU, which enables us to eﬃciently train
+hybrid CPU-GPU systems for CNNs.
+
+INTRODUCTION
+
+1.
+Deep Learning using convolution neural networks (CNNs) is
+a hot topic in machine learning research and is the basis for
+a staggering number of consumer-facing data-driven appli-
+cations, including those based on object recognition, voice
+recognition, and search [5,6,9,16]. Deep Learning is likely to
+be a major workload for future data analytics applications.
+Given the recent resurgence of CNNs, there have been few
+studies of CNNs from a data-systems perspective.
+
+Database systems have a role here, as eﬃciency in run-
+time and cost are chief concerns for owners of these systems.
+In contrast to many analytics that are memory-bound [15],
+CNN calculations are often compute-bound. Thus, proces-
+sor technology plays a key role in these systems. GPUs are
+a popular choice to support CNNs, as modern GPUs of-
+fer between 1.3 TFLOPS (NVIDIA GRID K520) and 4.29
+TFLOPS (NVIDIA K40). However, GPUs are connected to
+host memory by a slow PCI-e interconnect. On the other
+hand, Microsoft’s Project Adam argues that CPUs can de-
+liver more cost-eﬀective performance [4].1 This debate is
+only going to get more interesting: the next generation of
+GPUs promise high-speed interconnection with host mem-
+
+1
+
+http://www.wired.com/2014/07/microsoft-adam/
+
+Permission to make digital or hard copies of all or part of this work for
+personal or classroom use is granted without fee provided that copies are
+not made or distributed for proﬁt or commercial advantage and that copies
+bear this notice and the full citation on the ﬁrst page. To copy otherwise, to
+republish, to post on servers or to redistribute to lists, requires prior speciﬁc
+permission and/or a fee.
+Copyright 20XX ACM X-XXXXX-XX-X/XX/XX ...$15.00.
+
+ory,2 while Intel’s current Haswell CPU can achieve 1.3T
+FLOPS on a single chip. Moreover, SIMD parallelism has
+doubled in each of the last four Intel CPU generations and
+is likely to continue.3 For users who cannot control the foot-
+print of the data center, another issue is that Amazon’s EC2
+provides GPUs, but neither Azure nor Google Compute do.
+This motivates our study of CNN-based systems across dif-
+ferent architectures.
+
+To conduct our study, we forked Caﬀe, the most popular
+open-source CNN system, and rebuilt its internals to pro-
+duce a system we call Caﬀe con Troll (CcT) 4. CcT is a fully
+compatible end-to-end version of Caﬀe that matches Caﬀe’s
+output on each layer, which is the unit of computation. As
+reported in the literature and conﬁrmed by our experiments,
+the bottleneck layers are the so-called convolutional layers,
+which consume between 70-90% of execution time. Although
+we optimize all layers in CcT using essentially the same tech-
+niques, we focus on the tradeoﬀ space for the convolutional
+layer on CPUs and GPUs.
+
+The convolutional layer operates on batches of tensors.
+Currently, CcT studies one method of performing the con-
+volution called lowering, which remaps the high-dimensional
+input tensors into a series of standard matrix multiplica-
+tions. In turn, these matrix multiplications are executed us-
+ing a BLAS-compatible library, such as OpenBLAS or Intel’s
+MKL. Lowering is used in many state-of-the-art systems,
+including Caﬀe and CuDNN. Previous approaches picked a
+single lowering, but we ﬁnd that there are at least three dif-
+ferent ways to lay out (or block) the matrices in the lowering
+operation. Our study reveals that the optimal strategy de-
+pends on the ratio of input to output channels of the convo-
+lution, and that while this means that one lowering usually
+dominates the others, we oﬀer experimental evidence of this
+fact and propose a simple automatic optimizer to pick the
+best lowering in the tradeoﬀ space automatically. On popu-
+lar networks, we ﬁnd that the optimal lowering contributes
+around 20% of the execution time for a single layer, and 5%
+performance improvement for end-to-end execution.
+
+More signiﬁcantly, with some standard batching optimiza-
+tions that are not employed in other systems, our study
+reveals that CPU systems are much faster than is often re-
+ported in the literature. Using a simple batching strategy,
+
+2
+
+http://nvidianews.nvidia.com/news/nvidia-launches-world-s-
+first-high-speed-gpu-interconnect-helping-pave-the-way-to-
+exascale-computing
+3
+
+A linear increase in power and area are required for SIMD (compared
+to frequency scaling, which is cubic), and this trend may continue
+https://parasol.tamu.edu/lcpc2014/keynote-tian.pdf.
+4
+
+https://github.com/HazyResearch/CaffeConTroll
+
+2.1 Lowering-based Convolution
+
+As in Figure 1, there are three logical steps in the lowering
+process: (1) lowering, in which we transform 3D tensors D
+and K into 2D matrices ˆD and ˆK; (2) multiply, in which
+we multiply ˆD ˆK to get the the result ˆR; and (3) lifting, in
+which we transform ˆR in back to a tensor representation of
+R.
+
+Lowering Phase in which we construct the matrix ˆD and
+ˆK. A value of K and D may appear more than once
+in the lowered matrices.
+
+Multiply Phase in which we multiply ˆD and ˆK to create
+
+ˆR = ˆD ˆK.
+
+Lifting Phase in which we map ˆR back to R.
+
+Lowering Strategies
+Diﬀerent lowering strategies correspond to diﬀerent ways to
+group the sum in Equation 1. Let X ∈ R5×7. First, we
+use zero-based indexing and array slice notation to describe
+these operations, i.e., Y = X[0 : 5, 3 : 5] indicates that
+Y ∈ R5×2 is a submatrix of X such that Y [i, j] = X[i, 3 + j]
+for i = 0, . . . , 4 and j = 0, 1. We also use wildcards, i.e.,
+Y = X[:, 3 : 5] = X[0 : 5, 3 : 5] since the ﬁrst dimension
+of X is of size 5. We deﬁne Z = vec(Y ) for Z ∈ R10 to
+be Z5i+j = Yi,j. We explore three choices:
+lowering more
+expensive than lifting, lifting more expensive than lowering,
+or a balance.
+
+Type 1: Expensive Lowering. We create ˆD ∈ Rm2×k2d
+and ˆK ∈ Rk2d as follows for r, c ∈ 0, . . . , m − 1:
+
+ˆD[cm + r, :] = vec(D[r : r + k, c : c + k, :])
+
+ˆK = vec(K)
+
+We have ˆR = ˆD ˆK ∈ Rm2×1 matrix, which is trivial to re-
+shape to R. The lowering makes k2 copies of K and D, but
+after the matrix multiply requires only trivial lifting.
+
+Type 3: Expensive Lifting. We could trade lowering cost
+for lifting cost by simply starting with the sum over index i
+in Equation 1. That is, ˆD ∈ Rn2×d and ˆK ∈ Rd×k2
+
+.
+
+ˆD[cn + r, :] = vec(D[r, c, :])
+ˆK[:, ik + j] = vec(K[i, j, :])
+
+for r, c ∈ 0, . . . , n − 1 and i, j ∈ 0, . . . , k − 1. Let ˆR = ˆD ˆK ∈
+Rn2×k2
+
+then the lifting phase is:
+
+R[r, c] =
+
+ˆR[(c + j)n + r + i, ik + j]
+
+k−1
+(cid:88)
+
+k−1
+(cid:88)
+
+i=0
+
+j=0
+
+In Type 3, the matrix multiply is on a smaller matrix, the
+lifting takes time Θ(m2k2), which is more expensive than
+the Θ(m2) time for Expensive Lowering.
+
+Type 2: Balanced. Lowerings of type 1 and 3 represent two
+extremes of the spectrum, in which the k2 blowup is either
+in the lowering phase or the lifting phase. A natural middle
+point in this spectrum balances the expense on both lowering
+
+Figure 1: An illustration of the convolution oper-
+ation and the commutative diagram of calculating
+convolution operations with lowering-based method.
+
+we achieve a 4.5× end-to-end speed improvement over Caﬀe
+on popular networks like CaﬀeNet, and up to an order of
+magnitude speedup for convolutional layers. Moreover, the
+end-to-end time is proportional to the FLOPS delivered by
+the CPU.
+
+We build on this proportionality of the devices to create
+a hybrid CPU-GPU system. Typically, CNN systems are
+either GPU-based or CPU-based–but not both. And the
+debate has reached almost religious levels. Using CcT, we
+argue that one should use both CPUs and GPUs, simul-
+taneously. CcT is the ﬁrst hybrid system that uses both
+CPUs and GPUs on a single layer. We show that on the
+EC2 GPU instance, even with an underpowered, older 4-
+core CPU, we can achieve 20% higher throughput on a sin-
+gle convolutional layer. Thus these hybrid solutions may
+become more eﬀective than homogeneous systems and open
+new questions in provisioning such CNN systems. Finally,
+on the newly announced Amazon EC2 instance with 4 GPUs
+we also show end-to-end speedups for 1 GPU + CPU of
+> 15% and speedups of > 3× using 4 GPUs.
+
+2. CCT’S TRADEOFFS
+
+We ﬁrst describe the deﬁnition of a convolution operation
+and a technique called lowering, which is a popular way to
+implement the convolution operation. We describe three
+diﬀerent lowering techniques.
+
+A convolutional layer consumes a pair of order 3 tensors–
+the data D ∈ Rn×n×d and the kernel K ∈ Rk×k×d.
+In
+AlexNet [9], n ∈ [13, 227], k ∈ [3, 11], and d ∈ [3, 384], The
+output is a 2D matrix R ∈ Rm×m where m = n − k + 1 and
+each element Rr,c is deﬁned as:
+
+Rr,c =
+
+Dr+r(cid:48),c+c(cid:48),iKr(cid:48),c(cid:48),i
+
+(1)
+
+d
+(cid:88)
+
+k−1
+(cid:88)
+
+k−1
+(cid:88)
+
+i=1
+
+c(cid:48)=0
+
+r(cid:48)=0
+
+This is the standard image 2d-convolution with many kernels
+indexed by the third index of K. Like most other HPC
+kernels, a straightforward implementation of this operation
+is suboptimal. We transform the tensor problem into highly-
+optimized matrix multiplication kernels. The convolution
+layer takes as input a set of data tensors {Di} and {Kj},
+where we call b = |Di| the batch size and o = |Kj| the
+number of output channels. We consider how to batch this
+computation below.
+
+Figure 2: The impact of batch size and number of
+threads (8 physical cores in total) on the GEMM
+kernel.
+
+Figure 3: The impact of batching on the end-to-end
+execution time of CaﬀeNet, run with 256 images per
+mini-batch on an Amazon EC2 c4.4xlarge instance.
+
+and lifting, which we call balanced. Here ˆD ∈ Rn2×k+d and
+ˆK ∈ Rk+d×k.
+
+ˆD[cn + r, :] = vec(D[r, c : c + k, :])
+ˆK[:, i] = vec(K[i, :, :])
+
+Let ˆR = ˆD ˆK ∈ Rn2×k, then the lifting phase is:
+
+R[r, c] =
+
+ˆR[cn + r + j, j]
+
+k−1
+(cid:88)
+
+j=0
+
+Lowering and lifting take Θ(m2k) time and space which sits
+squarely between the other two approaches. As expected,
+the matrix multiplication is of an intermediate cost. We
+study the tradeoﬀs empirically in Appendix A.
+
+Fusion. Conceptually, it is straightforward to fuse all
+three steps to avoid the materialization cost of lowering; this
+requires rewriting BLAS kernels. We developed such a ker-
+nel for CcT, and our preliminary experiments indicate that
+it can improve performance by up to 60%. In this paper, we
+only report numbers without fusion, so we do not discuss
+this optimization further.
+
+2.2 Batching Analysis
+
+This section discusses how partitioning the batch into par-
+titions and processing these batch partitions in parallel leads
+to signiﬁcant speedups on the CPU. To accomplish this for
+convolution, the matrix we create in the lowering phase is b
+times larger than when images are processed one at a time.
+First we study the memory footprint and performance re-
+lated to how large a batch we execute in the CPU matrix
+multiplication (GEMM). Caﬀe uses a batch size of 1 for con-
+volutions. This means that for each image, lowering and
+GEMM are done sequentially. This has the smallest possi-
+ble memory footprint, as it only needs to maintain the low-
+ered matrix of a single Di in memory; on the other hand, a
+batch of size b takes b times more memory. As shown in Fig-
+ure 2(c), for convolutional layers on a CPU, the diﬀerence
+in memory footprint between b = 1 and b = 256 is directly
+proportional to b. For devices with limited memory, such as
+GPUs, one might favor b = 1 over large batch sizes.
+
+Computationally however, we ﬁnd that b = 1 suﬀers from
+lower hardware eﬃciency. Figure 2(a,b) shows the speedup
+w.r.t. number of cores for diﬀerent batch sizes. When the
+batch size is large (256) as shown in Figure 2(a), on a ma-
+chine with 8 physical cores, we observe almost linear speedup
+up to 4 cores. We then vary the batch size in Figure 2(b)
+and plot the speedup (using 8 physical cores). We see that
+the smaller the batch size, the lower the speedup. When the
+batch size is 1, using 8 cores actually causes a 4× slowdown
+
+compared to using 1 core. The underlying reason is that
+the lowered data matrix, ˆD, is ‘thinner’ when b = 1 than
+for higher batch sizes. Thinner matrices mean that possible
+partition sizes of the underlying algorithm are smaller, and
+the kernel is unable to optimize, for example the L2 and L3
+caches cannot be ﬁlled during blocking optimizations. As a
+result, b = 1 is more likely memory-bandwidth-bound than
+higher batch sizes. This phenomenon is likely to be more
+severe when the GEMM kernel is executed with multiple
+threads. Hence, we advocate the simple strategy to batch
+as much as possible (as device memory permits). Note that
+this could mean processing an entire batch (of size b) at once
+with n threads used in GEMM, or partitioning the batch
+into p partitions of size b/p with n/p threads used in each
+GEMM. These are equivalent as this is exactly how BLAS
+parallelizes GEMM: by partitioning partition columns of B
+in A × B and allocating 1 thread per partition.
+
+While such a batch partitioning strategy is equivalent in
+terms of GEMM, it is a coarse-grained way to perform low-
+ering in parallel, and similar batch partitioning can be em-
+ployed to parallelize all layers. Figure 3 shows the impact
+of batch partitioning on a full end-to-end CaﬀeNet on the
+EC2 c4.4xlarge instance with 16 physical cores. The batch
+size used is 256 images and the horizontal axis represents
+into how many parallel partitions CcT partitioned these 256
+images. ”None” indicates the default Caﬀe implementation,
+which for convolutions is that each image is processed seri-
+ally (one at a time) and for other layers as a full batch (256
+images). ”1” indicates that all 256 images were processed to-
+gether (for convolution layers, this means that lowering was
+performed on the entire batch of size 256 and then a single
+GEMM with 16 parallel threads was used to perform the
+entire convolution). For all other number of parallel parti-
+tions p, the 256 images were equally split into p partitions
+(for example if p = 2, two partitions of size 128). Layers
+were processed for each partition in parallel (one thread per
+partition), and then (so that for each data point shown all
+16 threads are used during convolution), the GEMM is per-
+formed in parallel on each partition with 16/p threads per
+GEMM. For example the point ”4” indicates 4 partitions of
+size 64, and during convolutions, lowering and GEMM (with
+4 threads) was done in parallel for each of the 4 partitions.
+
+2.3 Scheduling Analysis
+
+We currently only consider data parallelism within a layer
+(the model is shared). The key decision is what fraction of
+the input to send to each device. We use a simple heuristic:
+each device takes a fraction p of input in which p is the
+fraction of total FLOPS that this device contributes. So if
+a CPU has 1 TFLOPS and a GPU has 2 TFLOPS, we send
+
+Figure 4:
+End-to-end performance comparison
+across diﬀerent machines on CaﬀeNet. All numbers
+are normalized as the speedup over running Caﬀe’s
+GPU version on g2.2xlarge instance ($0.47/hour).
+
+1/3 of the input to the CPU. In Appendix B, we ﬁnd this
+simple heuristic is within 5% of the optimal performance.
+
+3. EXPERIMENTS
+
+We conduct an experimental evaluation of CcT.
+
+3.1 Experiment Setup
+
+To evaluate CcT, we compare it with Caﬀe, one of the
+most popular libraries for CNNs. We run both systems on
+the neural network architectures from CaﬀeNet (AlexNet),
+the default architecture for benchmarking. We compile both
+CcT and Caﬀe with GCC-4.8.2 and NVCC-6.5.12, and use
+OpenBLAS for CPU versions and the cuBLAS shipped with
+CUDA 6.5 for GPU versions.
+
+3.2 End-to-end Performance
+
+We run CcT and Caﬀe on ImageNet datasets with Caf-
+feNet on a diverse set of EC2 machines as illustrated in
+Figure 4. Both systems take as input the same network
+conﬁguration ﬁle that Caﬀe provides.5 Given the same ran-
+dom seed, CcT and Caﬀe generate the same output per layer
+(including the result of convolution, and the learned model)
+within a small tolerance. Thus, we concentrate on through-
+put. We run CcT and Caﬀe for 10 iterations and compare
+the output and model of each layer. We ﬁnd that both sys-
+tems produce the same output within 0.1% relative error.
+Thus, we focus our remaining experiments only on runtime
+performance.
+
+Performance. To compare the performance between CcT
+and Caﬀe, we run all systems on diﬀerent EC2 instances for
+10 iterations, take the average, and report the time that each
+system spends for one iteration (256 images).6
+
+We see from Figure 4(b) that on EC2’s CPU instance
+(c4.4xlarge), which has a single-socket Haswell CPU with 8
+physical cores, CcT outperforms Caﬀe by 4.5×. The speedup
+is mostly due to Caﬀe lowering single images at a time while
+CcT lowers with batching. Similar results were obtained
+on a two-socket CPU instance (c4.8xlarge). Both CcT and
+Caﬀe use only Lowering Type 1. We observed that Type 3
+becomes faster than Type 1 as the ratio #input/#output
+channels increases, but this is only true of conv5 and the
+diﬀerence is small (see Appendix A).
+
+Probably the most interesting comparison is CcT on a
+CPU instance to Caﬀe on a GPU instance. On the GPU
+
+5
+
+https://github.com/BVLC/caffe/tree/master/models/bvlc_
+
+reference_caffenet
+6All have a coeﬃcient of variation less than 5%.
+
+Figure 5: Speedup obtained in CcT with multiple
+GPUs.
+
+instance, we ﬁnd that Caﬀe is 1.86× faster than CcT run-
+ning on 8 CPU cores, and slightly slower than CcT running
+on 16 CPU cores. We ﬁnd that the GPU instance provides
+a peak ability of 1.3 TFLOPS, while the single-socket CPU
+instance provides 0.7 TFLOPS. The diﬀerence between the
+peak ﬂoating point operations corresponds to the perfor-
+mance diﬀerence between Caﬀe and CcT.
+
+Price Analysis. We compare the price of running Caﬀe on
+a GPU instance and CcT on a CPU instance (c4.4xlarge)
+for the same number of iterations. We see that running on
+a CPU instance is 2.6× more expensive than a GPU in-
+stance given the diﬀerence in performance and the fact that
+the GPU instance is slightly cheaper than a CPU instance.7
+However, this number is far smaller than one order of mag-
+nitude, which is typically associated to CPU-based Deep
+Learning. This suggests to us that, on other cloud services
+without GPU instances, e.g., Microsoft Azure and Google
+Compute, one can train a Deep Learning workload with a
+pure CPU version using CcT.
+
+3.3 CPU/GPU Hybrid and Multi-GPU
+
+We validate that using the CPUs on a GPU instance can
+accelerate purely CPU or GPU training. We ﬁrst focus on
+the speed of running the convolution operation. We imple-
+ment a GPU version of CcT and a hybrid version that, for
+each batch of images, runs a subset over GPU and others
+over CPU. We run both systems on the EC2 GPU instance,
+which has 4 Ivy Bridge CPU cores, and report the number in
+Figure 4(a). We run both system on the ﬁrst convolutional
+layer in CaﬀeNet, both with grouping 1 (depth=48) and 2
+(depth=96).
+
+We see that CcT (GPU) achieves the same speed as Caﬀe,
+and that running CcT with both CPU and GPU provides
+signiﬁcant beneﬁt–CcT (CPU+GPU) with 85% batch run on
+GPU and 15% batch run on CPU is 20% faster than Caﬀe.
+The small CPU batch proportion is because the CPU cores
+on the GPU instance g2.2xlarge only provide 4× fewer peak
+FLOPS than the standalone CPU instance (c4.4xlarge), due
+to fewer cores and an older available instruction set (in fact,
+this CPU is even slower than a 2014 MacBook Pro with 4
+Haswell cores). Therefore, we expect an even larger hybrid
+improvement on a GPU instance with a better CPU.
+
+Finally, Figure 5 presents end-to-end AlexNet execution
+time on the EC2 g2.8xlarge instance, for 1 GPU, 1 GPU
++ CPU, and 4 GPUs. For 1 GPU, Caﬀe and CcT have
+the same execution time per iteration. Adding the CPU
+gives > 15% speedup, although we expect this number to
+increase with further optimizations. 4 GPUs currently give
+
+7We observe similar results for the price of spot instances.
+
+and SIMPLEX program, the National Science Foundation
+(NSF) CAREER Award under No. IIS-1353606, the Oﬃce
+of Naval Research (ONR) under awards No. N000141210041
+and No. N000141310129, the National Institutes of Health
+Grant U54EB020405 awarded by the National Institute of
+Biomedical Imaging and Bioengineering (NIBIB) through
+funds provided by the trans-NIH Big Data to Knowledge
+(BD2K, http://www.bd2k.nih.gov) initiative, the Sloan Re-
+search Fellowship, the Moore Foundation, American Family
+Insurance, Google, and Toshiba. Any opinions, ﬁndings,
+and conclusions or recommendations expressed in this ma-
+terial are those of the authors and do not necessarily reﬂect
+the views of DARPA, AFRL, NSF, ONR, NIH, or the U.S.
+government.
+
+6. REFERENCES
+[1] J. Bergstra, O. Breuleux, F. Bastien, P. Lamblin, R. Pascanu,
+G. Desjardins, J. Turian, D. Warde-Farley, and Y. Bengio.
+Theano: a CPU and GPU math expression compiler. In SciPy,
+June 2010. Oral Presentation.
+
+[2] K. Chellapilla et al. High performance convolutional neural
+
+networks for document processing. ICFHR, 2006.
+
+[3] S. Chetlur, C. Woolley, P. Vandermersch, J. Cohen, J. Tran,
+
+B. Catanzaro, and E. Shelhamer. cuDNN: Eﬃcient Primitives
+for Deep Learning. ArXiv e-prints, 2014.
+
+[4] T. Chilimbi, Y. Suzue, J. Apacible, and K. Kalyanaraman.
+
+Project adam: Building an eﬃcient and scalable deep learning
+training system. In OSDI, 2014.
+
+[5] J. Dean et al. Large scale distributed deep networks. In NIPS,
+
+2012.
+
+[6] L. Deng and D. Yu. Deep learning: Methods and applications.
+
+Foundations and Trends in Signal Processing, 2014.
+
+[7] K. Goto and R. Van De Geijn. High-performance
+
+implementation of the level-3 blas. ACM Trans. Math. Softw.,
+2008.
+
+[8] Y. Jia, E. Shelhamer, J. Donahue, S. Karayev, J. Long,
+R. Girshick, S. Guadarrama, and T. Darrell. Caﬀe:
+Convolutional architecture for fast feature embedding. arXiv
+preprint arXiv:1408.5093, 2014.
+
+[9] A. Krizhevsky, I. Sutskever, and G. E. Hinton. ImageNet
+classiﬁcation with deep convolutional neural networks. In
+NIPS, 2012.
+
+[10] F. Niu, B. Recht, C. R´e, and S. J. Wright. Hogwild!: A
+
+lock-free approach to parallelizing stochastic gradient descent.
+In NIPS, pages 693–701, 2011.
+
+[11] C. Noel and S. Osindero. Dogwild!: Distributed Hogwild for
+
+CPU & GPU. In NIPS workshop on Distributed Machine
+Learning and Matrix Computations, 2014.
+
+[12] N. Vasilache, J. Johnson, M. Mathieu, S. Chintala, S. Piantino,
+and Y. LeCun. Fast Convolutional Nets With fbﬀt: A GPU
+Performance Evaluation. ArXiv e-prints, Dec. 2014.
+[13] W. Wang, G. Chen, T. Dinh, J. Gao, B. Ooi, and K. Tan.
+SINGA: A distributed system for deep learning. Technical
+report, NUS Tech Report, 2015.
+
+[14] R. C. Whaley and J. J. Dongarra. Automatically tuned linear
+
+algebra software. In SC, 1998.
+
+[15] C. Zhang and C. R´e. DimmWitted: A study of main-memory
+
+statistical analytics. PVLDB, 2014.
+
+[16] X. Zhang and Y. LeCun. Text Understanding from Scratch.
+
+ArXiv e-prints, 2015.
+
+a speedup > 3×, although this too should approach 4× once
+CcT supports model parallelism for fully-connected layers.
+
+4. RELATED WORK
+
+We brieﬂy describe previous studies which also focus on
+improving the eﬃciency of Deep Learning primitives. Al-
+though our contributions in this paper leverage decades of
+work in high-performance computing (speciﬁcally, the ad-
+vancements in optimizing matrix multiplications [7, 14]), we
+omit discussion of this due to space constraints.
+
+CNNs are computationally expensive, and optimizing CNN
+performance has become a well-studied problem in recent
+years. Popular libraries include Caﬀe [8], Theano [1], cuda-
+convnet2,8 and cuDNN [3]. To compute convolutions, many
+of these frameworks use lowering, an idea proposed by Chel-
+lapilla et al. [2] that takes advantage of highly-optimized
+BLAS libraries. Our work follows from this line of research,
+but we instead explore the tradeoﬀs between diﬀerent types
+of lowerings, which has not been previously studied. An-
+other approach for computing convolutions that has recently
+gained attention is to use the Fast Fourier Transform [12].
+This work has also demonstrated a set of interesting per-
+formance tradeoﬀs based on the size of the input, and we
+hope to incorporate these additional optimizations in future
+work.
+
+Automatic Optimization. A performance tradeoﬀ arises
+
+when computing convolutions across a series of inputs. For
+example, Chetlur et al. [3] demonstrate that the performance
+of the convolution operation is parameterized by 11 dimen-
+sions; thus, optimizing the computation further is a “diﬃcult
+task.” In this paper, we analyze this sophisticated tradeoﬀ
+space in more detail; we ﬁnd that a single ratio can be used
+to characterize all three lowering techniques. Recently, the
+Theano [1] library embraced the idea of building a so-called
+“meta-optimizer” in their Nov 2014 code release. This meta-
+optimizer would treat the various approaches to computing
+convolutions as black-box solvers, and would select the op-
+timal approach for a given input. This idea is similar to
+our notion of an automatic optimizer; however, our inten-
+tion is to understand the tradeoﬀ space within a particular
+strategy, rather than relying on existing approaches.
+
+Distributed Deep Learning. Distributed systems for
+Deep Learning is a popular topic including SINGA [13],
+Google’s DistBelief [5], and Microsoft’s Project Adam [4].
+These eﬀorts concentrate on two core challenges – schedul-
+ing across diﬀerent nodes, and distributing model parame-
+ters across diﬀerent nodes. A technique used in the above
+approaches is Hogwild! [10], which was designed for a sin-
+gle node and has since been extended to a distributed set-
+ting [11]. In the same spirit, our work focuses on improving
+CNN performance in the context of a single node. In future
+work, we also plan to study CNN training in the distributed
+setting, and we believe our eﬀorts for the single-node case
+may lead to performance gains in these distributed settings.
+
+5. ACKNOWLEDGEMENTS
+
+We gratefully acknowledge the support of the Defense Ad-
+vanced Research Projects Agency (DARPA) XDATA Pro-
+gram under No. FA8750-12-2-0335 and DEFT Program un-
+der No. FA8750-13-2-0039, DARPA’s MEMEX program
+8https://code.google.com/p/cuda-convnet2/
+
+Figure 9: The Impact of Task Ratio p between GPU
+and CPU to Speed Up.
+
+model. In Figure 8(a,b), we vary d and o respectively with all
+other dimensions ﬁxed. We see that each strategy performs
+diﬀerently as we vary d and o, and neither of them dominates
+the other. As one would expect, when the number of output
+channels (o) decreases, lowering type 3 outperforms lowering
+type 1 and vice versa. The diﬀerence in eﬃciency between
+the two approaches can be up to one order of magnitude.
+
+We ﬁnd that the relative performance of the diﬀerent low-
+ering strategies is determined by the ratio between the num-
+ber of input channels and the number of output channels.
+Figure 8(c) demonstrates the relative performance between
+lowering type 1 and lowering type 3 w.r.t.
+the ratio be-
+tween input channels and output channels while all other
+dimensions are ﬁxed. We see that when the ratio increases
+(more input channels), type 3 outperforms type 1, and vice
+versa. While this allows us to choose the strategy optimally,
+on most current CNNs this ratio is within a narrow band.
+Hence, the lowering does not have a major impact on our
+performance.
+
+B. CROSS-DEVICE SCHEDULING
+
+We validate that our simple heuristic yields near-optimal
+scheduling results by estimating p, the fraction of total FLOPS
+that each device contributes. We follow the experiment pro-
+tocol as in Section 3.3 but vary the ratio p as shown in Fig-
+ure 9. Here, p denotes the fraction of jobs that run on the
+GPU. We see from Figure 9 that when p is too large or too
+small, the speedup of cross-device scheduling is less than 1;
+in essence, the GPU ﬁnishes early. Empirically, the optimal
+p is achieved at 83%. We also label the estimated p using
+our simple heuristic with the theoretical peak TFLOPS that
+the device could deliver, and ﬁnd that it is within 5% of the
+optimal scheduling plan. We also tried to estimate the p
+using the empirical TFLOPS that each device gets, and ﬁnd
+the result is similar; the speedup is still within 5% of the
+optimal p.
+
+Figure 6: Cost model of lowering strategies.
+
+Figure 7: The size of each convolution layer in
+AlexNet.
+
+Figure 8: Empirical tradeoﬀs of diﬀerent lowering
+strategies.
+
+APPENDIX
+
+A. STUDY OF LOWERING TRADEOFF
+
+A.1 Empirical and Analytical Analysis
+
+We summarize the tradeoﬀ space analytically in Figure 6
+and empirically in Figures 8 and 2. For matrix multipli-
+cation, we report the cost of OpenBLAS that is cubic to
+the input dimension. For simplicity of notation, we focus
+on analyzing the case that n is large enough such that the
+diﬀerence between m = n − k + 1 and n are secondary.
+
+(Analytical Analysis) One key observation from Fig-
+ure 6 is that lowering type 1 (resp. type 3) has the largest
+(resp. smallest) input size of lowered data and the smallest
+(resp. largest) output size after matrix multiplication. Low-
+ering type 2 is in between. If we let m and n be constant,
+we can see that lowering type 1 involves a k2 blowup on the
+data of size O(d), the number of input channels, and low-
+ering type 2 involves a k2 blowup on the data of size O(o),
+the number of output channels. The relative performance of
+the two strategies depends on the ratio of d and o.
+
+(Empirical Analysis) We validate our analytical cost
+
+Caffe con Troll: Shallow Ideas to Speed Up Deep Learning
+
+Stefan Hadjis†
+
+Firas Abuzaid† Ce Zhang†‡ Christopher Ré†
+
+†Stanford University
+‡University of Wisconsin-Madison
+{shadjis, fabuzaid, czhang, chrismre}@cs.stanford.edu
+
+5
+1
+0
+2
+ 
+y
+a
+M
+ 
+6
+2
+ 
+ 
+]
+
+G
+L
+.
+s
+c
+[
+ 
+ 
+2
+v
+3
+4
+3
+4
+0
+.
+4
+0
+5
+1
+:
+v
+i
+X
+r
+a
+
+ABSTRACT
+We present Caﬀe con Troll (CcT), a fully compatible end-
+to-end version of the popular framework Caﬀe with rebuilt
+internals. We built CcT to examine the performance char-
+acteristics of training and deploying general-purpose convo-
+lutional neural networks across diﬀerent hardware architec-
+tures. We ﬁnd that, by employing standard batching opti-
+mizations for CPU training, we achieve a 4.5× throughput
+improvement over Caﬀe on popular networks like CaﬀeNet.
+Moreover, with these improvements, the end-to-end train-
+ing time for CNNs is directly proportional to the FLOPS
+delivered by the CPU, which enables us to eﬃciently train
+hybrid CPU-GPU systems for CNNs.
+
+INTRODUCTION
+
+1.
+Deep Learning using convolution neural networks (CNNs) is
+a hot topic in machine learning research and is the basis for
+a staggering number of consumer-facing data-driven appli-
+cations, including those based on object recognition, voice
+recognition, and search [5,6,9,16]. Deep Learning is likely to
+be a major workload for future data analytics applications.
+Given the recent resurgence of CNNs, there have been few
+studies of CNNs from a data-systems perspective.
+
+Database systems have a role here, as eﬃciency in run-
+time and cost are chief concerns for owners of these systems.
+In contrast to many analytics that are memory-bound [15],
+CNN calculations are often compute-bound. Thus, proces-
+sor technology plays a key role in these systems. GPUs are
+a popular choice to support CNNs, as modern GPUs of-
+fer between 1.3 TFLOPS (NVIDIA GRID K520) and 4.29
+TFLOPS (NVIDIA K40). However, GPUs are connected to
+host memory by a slow PCI-e interconnect. On the other
+hand, Microsoft’s Project Adam argues that CPUs can de-
+liver more cost-eﬀective performance [4].1 This debate is
+only going to get more interesting: the next generation of
+GPUs promise high-speed interconnection with host mem-
+
+1
+
+http://www.wired.com/2014/07/microsoft-adam/
+
+Permission to make digital or hard copies of all or part of this work for
+personal or classroom use is granted without fee provided that copies are
+not made or distributed for proﬁt or commercial advantage and that copies
+bear this notice and the full citation on the ﬁrst page. To copy otherwise, to
+republish, to post on servers or to redistribute to lists, requires prior speciﬁc
+permission and/or a fee.
+Copyright 20XX ACM X-XXXXX-XX-X/XX/XX ...$15.00.
+
+ory,2 while Intel’s current Haswell CPU can achieve 1.3T
+FLOPS on a single chip. Moreover, SIMD parallelism has
+doubled in each of the last four Intel CPU generations and
+is likely to continue.3 For users who cannot control the foot-
+print of the data center, another issue is that Amazon’s EC2
+provides GPUs, but neither Azure nor Google Compute do.
+This motivates our study of CNN-based systems across dif-
+ferent architectures.
+
+To conduct our study, we forked Caﬀe, the most popular
+open-source CNN system, and rebuilt its internals to pro-
+duce a system we call Caﬀe con Troll (CcT) 4. CcT is a fully
+compatible end-to-end version of Caﬀe that matches Caﬀe’s
+output on each layer, which is the unit of computation. As
+reported in the literature and conﬁrmed by our experiments,
+the bottleneck layers are the so-called convolutional layers,
+which consume between 70-90% of execution time. Although
+we optimize all layers in CcT using essentially the same tech-
+niques, we focus on the tradeoﬀ space for the convolutional
+layer on CPUs and GPUs.
+
+The convolutional layer operates on batches of tensors.
+Currently, CcT studies one method of performing the con-
+volution called lowering, which remaps the high-dimensional
+input tensors into a series of standard matrix multiplica-
+tions. In turn, these matrix multiplications are executed us-
+ing a BLAS-compatible library, such as OpenBLAS or Intel’s
+MKL. Lowering is used in many state-of-the-art systems,
+including Caﬀe and CuDNN. Previous approaches picked a
+single lowering, but we ﬁnd that there are at least three dif-
+ferent ways to lay out (or block) the matrices in the lowering
+operation. Our study reveals that the optimal strategy de-
+pends on the ratio of input to output channels of the convo-
+lution, and that while this means that one lowering usually
+dominates the others, we oﬀer experimental evidence of this
+fact and propose a simple automatic optimizer to pick the
+best lowering in the tradeoﬀ space automatically. On popu-
+lar networks, we ﬁnd that the optimal lowering contributes
+around 20% of the execution time for a single layer, and 5%
+performance improvement for end-to-end execution.
+
+More signiﬁcantly, with some standard batching optimiza-
+tions that are not employed in other systems, our study
+reveals that CPU systems are much faster than is often re-
+ported in the literature. Using a simple batching strategy,
+
+2
+
+http://nvidianews.nvidia.com/news/nvidia-launches-world-s-
+first-high-speed-gpu-interconnect-helping-pave-the-way-to-
+exascale-computing
+3
+
+A linear increase in power and area are required for SIMD (compared
+to frequency scaling, which is cubic), and this trend may continue
+https://parasol.tamu.edu/lcpc2014/keynote-tian.pdf.
+4
+
+https://github.com/HazyResearch/CaffeConTroll
+
+2.1 Lowering-based Convolution
+
+As in Figure 1, there are three logical steps in the lowering
+process: (1) lowering, in which we transform 3D tensors D
+and K into 2D matrices ˆD and ˆK; (2) multiply, in which
+we multiply ˆD ˆK to get the the result ˆR; and (3) lifting, in
+which we transform ˆR in back to a tensor representation of
+R.
+
+Lowering Phase in which we construct the matrix ˆD and
+ˆK. A value of K and D may appear more than once
+in the lowered matrices.
+
+Multiply Phase in which we multiply ˆD and ˆK to create
+
+ˆR = ˆD ˆK.
+
+Lifting Phase in which we map ˆR back to R.
+
+Lowering Strategies
+Diﬀerent lowering strategies correspond to diﬀerent ways to
+group the sum in Equation 1. Let X ∈ R5×7. First, we
+use zero-based indexing and array slice notation to describe
+these operations, i.e., Y = X[0 : 5, 3 : 5] indicates that
+Y ∈ R5×2 is a submatrix of X such that Y [i, j] = X[i, 3 + j]
+for i = 0, . . . , 4 and j = 0, 1. We also use wildcards, i.e.,
+Y = X[:, 3 : 5] = X[0 : 5, 3 : 5] since the ﬁrst dimension
+of X is of size 5. We deﬁne Z = vec(Y ) for Z ∈ R10 to
+be Z5i+j = Yi,j. We explore three choices:
+lowering more
+expensive than lifting, lifting more expensive than lowering,
+or a balance.
+
+Type 1: Expensive Lowering. We create ˆD ∈ Rm2×k2d
+and ˆK ∈ Rk2d as follows for r, c ∈ 0, . . . , m − 1:
+
+ˆD[cm + r, :] = vec(D[r : r + k, c : c + k, :])
+
+ˆK = vec(K)
+
+We have ˆR = ˆD ˆK ∈ Rm2×1 matrix, which is trivial to re-
+shape to R. The lowering makes k2 copies of K and D, but
+after the matrix multiply requires only trivial lifting.
+
+Type 3: Expensive Lifting. We could trade lowering cost
+for lifting cost by simply starting with the sum over index i
+in Equation 1. That is, ˆD ∈ Rn2×d and ˆK ∈ Rd×k2
+
+.
+
+ˆD[cn + r, :] = vec(D[r, c, :])
+ˆK[:, ik + j] = vec(K[i, j, :])
+
+for r, c ∈ 0, . . . , n − 1 and i, j ∈ 0, . . . , k − 1. Let ˆR = ˆD ˆK ∈
+Rn2×k2
+
+then the lifting phase is:
+
+R[r, c] =
+
+ˆR[(c + j)n + r + i, ik + j]
+
+k−1
+(cid:88)
+
+k−1
+(cid:88)
+
+i=0
+
+j=0
+
+In Type 3, the matrix multiply is on a smaller matrix, the
+lifting takes time Θ(m2k2), which is more expensive than
+the Θ(m2) time for Expensive Lowering.
+
+Type 2: Balanced. Lowerings of type 1 and 3 represent two
+extremes of the spectrum, in which the k2 blowup is either
+in the lowering phase or the lifting phase. A natural middle
+point in this spectrum balances the expense on both lowering
+
+Figure 1: An illustration of the convolution oper-
+ation and the commutative diagram of calculating
+convolution operations with lowering-based method.
+
+we achieve a 4.5× end-to-end speed improvement over Caﬀe
+on popular networks like CaﬀeNet, and up to an order of
+magnitude speedup for convolutional layers. Moreover, the
+end-to-end time is proportional to the FLOPS delivered by
+the CPU.
+
+We build on this proportionality of the devices to create
+a hybrid CPU-GPU system. Typically, CNN systems are
+either GPU-based or CPU-based–but not both. And the
+debate has reached almost religious levels. Using CcT, we
+argue that one should use both CPUs and GPUs, simul-
+taneously. CcT is the ﬁrst hybrid system that uses both
+CPUs and GPUs on a single layer. We show that on the
+EC2 GPU instance, even with an underpowered, older 4-
+core CPU, we can achieve 20% higher throughput on a sin-
+gle convolutional layer. Thus these hybrid solutions may
+become more eﬀective than homogeneous systems and open
+new questions in provisioning such CNN systems. Finally,
+on the newly announced Amazon EC2 instance with 4 GPUs
+we also show end-to-end speedups for 1 GPU + CPU of
+> 15% and speedups of > 3× using 4 GPUs.
+
+2. CCT’S TRADEOFFS
+
+We ﬁrst describe the deﬁnition of a convolution operation
+and a technique called lowering, which is a popular way to
+implement the convolution operation. We describe three
+diﬀerent lowering techniques.
+
+A convolutional layer consumes a pair of order 3 tensors–
+the data D ∈ Rn×n×d and the kernel K ∈ Rk×k×d.
+In
+AlexNet [9], n ∈ [13, 227], k ∈ [3, 11], and d ∈ [3, 384], The
+output is a 2D matrix R ∈ Rm×m where m = n − k + 1 and
+each element Rr,c is deﬁned as:
+
+Rr,c =
+
+Dr+r(cid:48),c+c(cid:48),iKr(cid:48),c(cid:48),i
+
+(1)
+
+d
+(cid:88)
+
+k−1
+(cid:88)
+
+k−1
+(cid:88)
+
+i=1
+
+c(cid:48)=0
+
+r(cid:48)=0
+
+This is the standard image 2d-convolution with many kernels
+indexed by the third index of K. Like most other HPC
+kernels, a straightforward implementation of this operation
+is suboptimal. We transform the tensor problem into highly-
+optimized matrix multiplication kernels. The convolution
+layer takes as input a set of data tensors {Di} and {Kj},
+where we call b = |Di| the batch size and o = |Kj| the
+number of output channels. We consider how to batch this
+computation below.
+
+Figure 2: The impact of batch size and number of
+threads (8 physical cores in total) on the GEMM
+kernel.
+
+Figure 3: The impact of batching on the end-to-end
+execution time of CaﬀeNet, run with 256 images per
+mini-batch on an Amazon EC2 c4.4xlarge instance.
+
+and lifting, which we call balanced. Here ˆD ∈ Rn2×k+d and
+ˆK ∈ Rk+d×k.
+
+ˆD[cn + r, :] = vec(D[r, c : c + k, :])
+ˆK[:, i] = vec(K[i, :, :])
+
+Let ˆR = ˆD ˆK ∈ Rn2×k, then the lifting phase is:
+
+R[r, c] =
+
+ˆR[cn + r + j, j]
+
+k−1
+(cid:88)
+
+j=0
+
+Lowering and lifting take Θ(m2k) time and space which sits
+squarely between the other two approaches. As expected,
+the matrix multiplication is of an intermediate cost. We
+study the tradeoﬀs empirically in Appendix A.
+
+Fusion. Conceptually, it is straightforward to fuse all
+three steps to avoid the materialization cost of lowering; this
+requires rewriting BLAS kernels. We developed such a ker-
+nel for CcT, and our preliminary experiments indicate that
+it can improve performance by up to 60%. In this paper, we
+only report numbers without fusion, so we do not discuss
+this optimization further.
+
+2.2 Batching Analysis
+
+This section discusses how partitioning the batch into par-
+titions and processing these batch partitions in parallel leads
+to signiﬁcant speedups on the CPU. To accomplish this for
+convolution, the matrix we create in the lowering phase is b
+times larger than when images are processed one at a time.
+First we study the memory footprint and performance re-
+lated to how large a batch we execute in the CPU matrix
+multiplication (GEMM). Caﬀe uses a batch size of 1 for con-
+volutions. This means that for each image, lowering and
+GEMM are done sequentially. This has the smallest possi-
+ble memory footprint, as it only needs to maintain the low-
+ered matrix of a single Di in memory; on the other hand, a
+batch of size b takes b times more memory. As shown in Fig-
+ure 2(c), for convolutional layers on a CPU, the diﬀerence
+in memory footprint between b = 1 and b = 256 is directly
+proportional to b. For devices with limited memory, such as
+GPUs, one might favor b = 1 over large batch sizes.
+
+Computationally however, we ﬁnd that b = 1 suﬀers from
+lower hardware eﬃciency. Figure 2(a,b) shows the speedup
+w.r.t. number of cores for diﬀerent batch sizes. When the
+batch size is large (256) as shown in Figure 2(a), on a ma-
+chine with 8 physical cores, we observe almost linear speedup
+up to 4 cores. We then vary the batch size in Figure 2(b)
+and plot the speedup (using 8 physical cores). We see that
+the smaller the batch size, the lower the speedup. When the
+batch size is 1, using 8 cores actually causes a 4× slowdown
+
+compared to using 1 core. The underlying reason is that
+the lowered data matrix, ˆD, is ‘thinner’ when b = 1 than
+for higher batch sizes. Thinner matrices mean that possible
+partition sizes of the underlying algorithm are smaller, and
+the kernel is unable to optimize, for example the L2 and L3
+caches cannot be ﬁlled during blocking optimizations. As a
+result, b = 1 is more likely memory-bandwidth-bound than
+higher batch sizes. This phenomenon is likely to be more
+severe when the GEMM kernel is executed with multiple
+threads. Hence, we advocate the simple strategy to batch
+as much as possible (as device memory permits). Note that
+this could mean processing an entire batch (of size b) at once
+with n threads used in GEMM, or partitioning the batch
+into p partitions of size b/p with n/p threads used in each
+GEMM. These are equivalent as this is exactly how BLAS
+parallelizes GEMM: by partitioning partition columns of B
+in A × B and allocating 1 thread per partition.
+
+While such a batch partitioning strategy is equivalent in
+terms of GEMM, it is a coarse-grained way to perform low-
+ering in parallel, and similar batch partitioning can be em-
+ployed to parallelize all layers. Figure 3 shows the impact
+of batch partitioning on a full end-to-end CaﬀeNet on the
+EC2 c4.4xlarge instance with 16 physical cores. The batch
+size used is 256 images and the horizontal axis represents
+into how many parallel partitions CcT partitioned these 256
+images. ”None” indicates the default Caﬀe implementation,
+which for convolutions is that each image is processed seri-
+ally (one at a time) and for other layers as a full batch (256
+images). ”1” indicates that all 256 images were processed to-
+gether (for convolution layers, this means that lowering was
+performed on the entire batch of size 256 and then a single
+GEMM with 16 parallel threads was used to perform the
+entire convolution). For all other number of parallel parti-
+tions p, the 256 images were equally split into p partitions
+(for example if p = 2, two partitions of size 128). Layers
+were processed for each partition in parallel (one thread per
+partition), and then (so that for each data point shown all
+16 threads are used during convolution), the GEMM is per-
+formed in parallel on each partition with 16/p threads per
+GEMM. For example the point ”4” indicates 4 partitions of
+size 64, and during convolutions, lowering and GEMM (with
+4 threads) was done in parallel for each of the 4 partitions.
+
+2.3 Scheduling Analysis
+
+We currently only consider data parallelism within a layer
+(the model is shared). The key decision is what fraction of
+the input to send to each device. We use a simple heuristic:
+each device takes a fraction p of input in which p is the
+fraction of total FLOPS that this device contributes. So if
+a CPU has 1 TFLOPS and a GPU has 2 TFLOPS, we send
+
+Figure 4:
+End-to-end performance comparison
+across diﬀerent machines on CaﬀeNet. All numbers
+are normalized as the speedup over running Caﬀe’s
+GPU version on g2.2xlarge instance ($0.47/hour).
+
+1/3 of the input to the CPU. In Appendix B, we ﬁnd this
+simple heuristic is within 5% of the optimal performance.
+
+3. EXPERIMENTS
+
+We conduct an experimental evaluation of CcT.
+
+3.1 Experiment Setup
+
+To evaluate CcT, we compare it with Caﬀe, one of the
+most popular libraries for CNNs. We run both systems on
+the neural network architectures from CaﬀeNet (AlexNet),
+the default architecture for benchmarking. We compile both
+CcT and Caﬀe with GCC-4.8.2 and NVCC-6.5.12, and use
+OpenBLAS for CPU versions and the cuBLAS shipped with
+CUDA 6.5 for GPU versions.
+
+3.2 End-to-end Performance
+
+We run CcT and Caﬀe on ImageNet datasets with Caf-
+feNet on a diverse set of EC2 machines as illustrated in
+Figure 4. Both systems take as input the same network
+conﬁguration ﬁle that Caﬀe provides.5 Given the same ran-
+dom seed, CcT and Caﬀe generate the same output per layer
+(including the result of convolution, and the learned model)
+within a small tolerance. Thus, we concentrate on through-
+put. We run CcT and Caﬀe for 10 iterations and compare
+the output and model of each layer. We ﬁnd that both sys-
+tems produce the same output within 0.1% relative error.
+Thus, we focus our remaining experiments only on runtime
+performance.
+
+Performance. To compare the performance between CcT
+and Caﬀe, we run all systems on diﬀerent EC2 instances for
+10 iterations, take the average, and report the time that each
+system spends for one iteration (256 images).6
+
+We see from Figure 4(b) that on EC2’s CPU instance
+(c4.4xlarge), which has a single-socket Haswell CPU with 8
+physical cores, CcT outperforms Caﬀe by 4.5×. The speedup
+is mostly due to Caﬀe lowering single images at a time while
+CcT lowers with batching. Similar results were obtained
+on a two-socket CPU instance (c4.8xlarge). Both CcT and
+Caﬀe use only Lowering Type 1. We observed that Type 3
+becomes faster than Type 1 as the ratio #input/#output
+channels increases, but this is only true of conv5 and the
+diﬀerence is small (see Appendix A).
+
+Probably the most interesting comparison is CcT on a
+CPU instance to Caﬀe on a GPU instance. On the GPU
+
+5
+
+https://github.com/BVLC/caffe/tree/master/models/bvlc_
+
+reference_caffenet
+6All have a coeﬃcient of variation less than 5%.
+
+Figure 5: Speedup obtained in CcT with multiple
+GPUs.
+
+instance, we ﬁnd that Caﬀe is 1.86× faster than CcT run-
+ning on 8 CPU cores, and slightly slower than CcT running
+on 16 CPU cores. We ﬁnd that the GPU instance provides
+a peak ability of 1.3 TFLOPS, while the single-socket CPU
+instance provides 0.7 TFLOPS. The diﬀerence between the
+peak ﬂoating point operations corresponds to the perfor-
+mance diﬀerence between Caﬀe and CcT.
+
+Price Analysis. We compare the price of running Caﬀe on
+a GPU instance and CcT on a CPU instance (c4.4xlarge)
+for the same number of iterations. We see that running on
+a CPU instance is 2.6× more expensive than a GPU in-
+stance given the diﬀerence in performance and the fact that
+the GPU instance is slightly cheaper than a CPU instance.7
+However, this number is far smaller than one order of mag-
+nitude, which is typically associated to CPU-based Deep
+Learning. This suggests to us that, on other cloud services
+without GPU instances, e.g., Microsoft Azure and Google
+Compute, one can train a Deep Learning workload with a
+pure CPU version using CcT.
+
+3.3 CPU/GPU Hybrid and Multi-GPU
+
+We validate that using the CPUs on a GPU instance can
+accelerate purely CPU or GPU training. We ﬁrst focus on
+the speed of running the convolution operation. We imple-
+ment a GPU version of CcT and a hybrid version that, for
+each batch of images, runs a subset over GPU and others
+over CPU. We run both systems on the EC2 GPU instance,
+which has 4 Ivy Bridge CPU cores, and report the number in
+Figure 4(a). We run both system on the ﬁrst convolutional
+layer in CaﬀeNet, both with grouping 1 (depth=48) and 2
+(depth=96).
+
+We see that CcT (GPU) achieves the same speed as Caﬀe,
+and that running CcT with both CPU and GPU provides
+signiﬁcant beneﬁt–CcT (CPU+GPU) with 85% batch run on
+GPU and 15% batch run on CPU is 20% faster than Caﬀe.
+The small CPU batch proportion is because the CPU cores
+on the GPU instance g2.2xlarge only provide 4× fewer peak
+FLOPS than the standalone CPU instance (c4.4xlarge), due
+to fewer cores and an older available instruction set (in fact,
+this CPU is even slower than a 2014 MacBook Pro with 4
+Haswell cores). Therefore, we expect an even larger hybrid
+improvement on a GPU instance with a better CPU.
+
+Finally, Figure 5 presents end-to-end AlexNet execution
+time on the EC2 g2.8xlarge instance, for 1 GPU, 1 GPU
++ CPU, and 4 GPUs. For 1 GPU, Caﬀe and CcT have
+the same execution time per iteration. Adding the CPU
+gives > 15% speedup, although we expect this number to
+increase with further optimizations. 4 GPUs currently give
+
+7We observe similar results for the price of spot instances.
+
+and SIMPLEX program, the National Science Foundation
+(NSF) CAREER Award under No. IIS-1353606, the Oﬃce
+of Naval Research (ONR) under awards No. N000141210041
+and No. N000141310129, the National Institutes of Health
+Grant U54EB020405 awarded by the National Institute of
+Biomedical Imaging and Bioengineering (NIBIB) through
+funds provided by the trans-NIH Big Data to Knowledge
+(BD2K, http://www.bd2k.nih.gov) initiative, the Sloan Re-
+search Fellowship, the Moore Foundation, American Family
+Insurance, Google, and Toshiba. Any opinions, ﬁndings,
+and conclusions or recommendations expressed in this ma-
+terial are those of the authors and do not necessarily reﬂect
+the views of DARPA, AFRL, NSF, ONR, NIH, or the U.S.
+government.
+
+6. REFERENCES
+[1] J. Bergstra, O. Breuleux, F. Bastien, P. Lamblin, R. Pascanu,
+G. Desjardins, J. Turian, D. Warde-Farley, and Y. Bengio.
+Theano: a CPU and GPU math expression compiler. In SciPy,
+June 2010. Oral Presentation.
+
+[2] K. Chellapilla et al. High performance convolutional neural
+
+networks for document processing. ICFHR, 2006.
+
+[3] S. Chetlur, C. Woolley, P. Vandermersch, J. Cohen, J. Tran,
+
+B. Catanzaro, and E. Shelhamer. cuDNN: Eﬃcient Primitives
+for Deep Learning. ArXiv e-prints, 2014.
+
+[4] T. Chilimbi, Y. Suzue, J. Apacible, and K. Kalyanaraman.
+
+Project adam: Building an eﬃcient and scalable deep learning
+training system. In OSDI, 2014.
+
+[5] J. Dean et al. Large scale distributed deep networks. In NIPS,
+
+2012.
+
+[6] L. Deng and D. Yu. Deep learning: Methods and applications.
+
+Foundations and Trends in Signal Processing, 2014.
+
+[7] K. Goto and R. Van De Geijn. High-performance
+
+implementation of the level-3 blas. ACM Trans. Math. Softw.,
+2008.
+
+[8] Y. Jia, E. Shelhamer, J. Donahue, S. Karayev, J. Long,
+R. Girshick, S. Guadarrama, and T. Darrell. Caﬀe:
+Convolutional architecture for fast feature embedding. arXiv
+preprint arXiv:1408.5093, 2014.
+
+[9] A. Krizhevsky, I. Sutskever, and G. E. Hinton. ImageNet
+classiﬁcation with deep convolutional neural networks. In
+NIPS, 2012.
+
+[10] F. Niu, B. Recht, C. R´e, and S. J. Wright. Hogwild!: A
+
+lock-free approach to parallelizing stochastic gradient descent.
+In NIPS, pages 693–701, 2011.
+
+[11] C. Noel and S. Osindero. Dogwild!: Distributed Hogwild for
+
+CPU & GPU. In NIPS workshop on Distributed Machine
+Learning and Matrix Computations, 2014.
+
+[12] N. Vasilache, J. Johnson, M. Mathieu, S. Chintala, S. Piantino,
+and Y. LeCun. Fast Convolutional Nets With fbﬀt: A GPU
+Performance Evaluation. ArXiv e-prints, Dec. 2014.
+[13] W. Wang, G. Chen, T. Dinh, J. Gao, B. Ooi, and K. Tan.
+SINGA: A distributed system for deep learning. Technical
+report, NUS Tech Report, 2015.
+
+[14] R. C. Whaley and J. J. Dongarra. Automatically tuned linear
+
+algebra software. In SC, 1998.
+
+[15] C. Zhang and C. R´e. DimmWitted: A study of main-memory
+
+statistical analytics. PVLDB, 2014.
+
+[16] X. Zhang and Y. LeCun. Text Understanding from Scratch.
+
+ArXiv e-prints, 2015.
+
+a speedup > 3×, although this too should approach 4× once
+CcT supports model parallelism for fully-connected layers.
+
+4. RELATED WORK
+
+We brieﬂy describe previous studies which also focus on
+improving the eﬃciency of Deep Learning primitives. Al-
+though our contributions in this paper leverage decades of
+work in high-performance computing (speciﬁcally, the ad-
+vancements in optimizing matrix multiplications [7, 14]), we
+omit discussion of this due to space constraints.
+
+CNNs are computationally expensive, and optimizing CNN
+performance has become a well-studied problem in recent
+years. Popular libraries include Caﬀe [8], Theano [1], cuda-
+convnet2,8 and cuDNN [3]. To compute convolutions, many
+of these frameworks use lowering, an idea proposed by Chel-
+lapilla et al. [2] that takes advantage of highly-optimized
+BLAS libraries. Our work follows from this line of research,
+but we instead explore the tradeoﬀs between diﬀerent types
+of lowerings, which has not been previously studied. An-
+other approach for computing convolutions that has recently
+gained attention is to use the Fast Fourier Transform [12].
+This work has also demonstrated a set of interesting per-
+formance tradeoﬀs based on the size of the input, and we
+hope to incorporate these additional optimizations in future
+work.
+
+Automatic Optimization. A performance tradeoﬀ arises
+
+when computing convolutions across a series of inputs. For
+example, Chetlur et al. [3] demonstrate that the performance
+of the convolution operation is parameterized by 11 dimen-
+sions; thus, optimizing the computation further is a “diﬃcult
+task.” In this paper, we analyze this sophisticated tradeoﬀ
+space in more detail; we ﬁnd that a single ratio can be used
+to characterize all three lowering techniques. Recently, the
+Theano [1] library embraced the idea of building a so-called
+“meta-optimizer” in their Nov 2014 code release. This meta-
+optimizer would treat the various approaches to computing
+convolutions as black-box solvers, and would select the op-
+timal approach for a given input. This idea is similar to
+our notion of an automatic optimizer; however, our inten-
+tion is to understand the tradeoﬀ space within a particular
+strategy, rather than relying on existing approaches.
+
+Distributed Deep Learning. Distributed systems for
+Deep Learning is a popular topic including SINGA [13],
+Google’s DistBelief [5], and Microsoft’s Project Adam [4].
+These eﬀorts concentrate on two core challenges – schedul-
+ing across diﬀerent nodes, and distributing model parame-
+ters across diﬀerent nodes. A technique used in the above
+approaches is Hogwild! [10], which was designed for a sin-
+gle node and has since been extended to a distributed set-
+ting [11]. In the same spirit, our work focuses on improving
+CNN performance in the context of a single node. In future
+work, we also plan to study CNN training in the distributed
+setting, and we believe our eﬀorts for the single-node case
+may lead to performance gains in these distributed settings.
+
+5. ACKNOWLEDGEMENTS
+
+We gratefully acknowledge the support of the Defense Ad-
+vanced Research Projects Agency (DARPA) XDATA Pro-
+gram under No. FA8750-12-2-0335 and DEFT Program un-
+der No. FA8750-13-2-0039, DARPA’s MEMEX program
+8https://code.google.com/p/cuda-convnet2/
+
+Figure 9: The Impact of Task Ratio p between GPU
+and CPU to Speed Up.
+
+model. In Figure 8(a,b), we vary d and o respectively with all
+other dimensions ﬁxed. We see that each strategy performs
+diﬀerently as we vary d and o, and neither of them dominates
+the other. As one would expect, when the number of output
+channels (o) decreases, lowering type 3 outperforms lowering
+type 1 and vice versa. The diﬀerence in eﬃciency between
+the two approaches can be up to one order of magnitude.
+
+We ﬁnd that the relative performance of the diﬀerent low-
+ering strategies is determined by the ratio between the num-
+ber of input channels and the number of output channels.
+Figure 8(c) demonstrates the relative performance between
+lowering type 1 and lowering type 3 w.r.t.
+the ratio be-
+tween input channels and output channels while all other
+dimensions are ﬁxed. We see that when the ratio increases
+(more input channels), type 3 outperforms type 1, and vice
+versa. While this allows us to choose the strategy optimally,
+on most current CNNs this ratio is within a narrow band.
+Hence, the lowering does not have a major impact on our
+performance.
+
+B. CROSS-DEVICE SCHEDULING
+
+We validate that our simple heuristic yields near-optimal
+scheduling results by estimating p, the fraction of total FLOPS
+that each device contributes. We follow the experiment pro-
+tocol as in Section 3.3 but vary the ratio p as shown in Fig-
+ure 9. Here, p denotes the fraction of jobs that run on the
+GPU. We see from Figure 9 that when p is too large or too
+small, the speedup of cross-device scheduling is less than 1;
+in essence, the GPU ﬁnishes early. Empirically, the optimal
+p is achieved at 83%. We also label the estimated p using
+our simple heuristic with the theoretical peak TFLOPS that
+the device could deliver, and ﬁnd that it is within 5% of the
+optimal scheduling plan. We also tried to estimate the p
+using the empirical TFLOPS that each device gets, and ﬁnd
+the result is similar; the speedup is still within 5% of the
+optimal p.
+
+Figure 6: Cost model of lowering strategies.
+
+Figure 7: The size of each convolution layer in
+AlexNet.
+
+Figure 8: Empirical tradeoﬀs of diﬀerent lowering
+strategies.
+
+APPENDIX
+
+A. STUDY OF LOWERING TRADEOFF
+
+A.1 Empirical and Analytical Analysis
+
+We summarize the tradeoﬀ space analytically in Figure 6
+and empirically in Figures 8 and 2. For matrix multipli-
+cation, we report the cost of OpenBLAS that is cubic to
+the input dimension. For simplicity of notation, we focus
+on analyzing the case that n is large enough such that the
+diﬀerence between m = n − k + 1 and n are secondary.
+
+(Analytical Analysis) One key observation from Fig-
+ure 6 is that lowering type 1 (resp. type 3) has the largest
+(resp. smallest) input size of lowered data and the smallest
+(resp. largest) output size after matrix multiplication. Low-
+ering type 2 is in between. If we let m and n be constant,
+we can see that lowering type 1 involves a k2 blowup on the
+data of size O(d), the number of input channels, and low-
+ering type 2 involves a k2 blowup on the data of size O(o),
+the number of output channels. The relative performance of
+the two strategies depends on the ratio of d and o.
+
+(Empirical Analysis) We validate our analytical cost
+

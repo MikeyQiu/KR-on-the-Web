@@ -3656,3 +3656,3661 @@ grid dimensions
 
 20
 
+7
+1
+0
+2
+ 
+v
+o
+N
+ 
+4
+1
+ 
+ 
+]
+
+G
+L
+.
+s
+c
+[
+ 
+ 
+2
+v
+3
+4
+4
+7
+0
+.
+5
+0
+7
+1
+:
+v
+i
+X
+r
+a
+
+Parallel Streaming Wasserstein Barycenters
+
+Matthew Staib, Sebastian Claici, Justin Solomon, and Stefanie Jegelka
+
+Computer Science and Artiﬁcial Intelligence Laboratory
+Massachusetts Institute of Technology
+{mstaib, sclaici, jsolomon, stefje}@mit.edu
+
+Abstract
+
+Eﬃciently aggregating data from diﬀerent sources is a challenging problem, particularly when
+samples from each source are distributed diﬀerently. These diﬀerences can be inherent to the
+inference task or present for other reasons: sensors in a sensor network may be placed far apart,
+aﬀecting their individual measurements. Conversely, it is computationally advantageous to split
+Bayesian inference tasks across subsets of data, but data need not be identically distributed
+across subsets. One principled way to fuse probability distributions is via the lens of optimal
+transport: the Wasserstein barycenter is a single distribution that summarizes a collection of
+input measures while respecting their geometry. However, computing the barycenter scales poorly
+and requires discretization of all input distributions and the barycenter itself. Improving on
+this situation, we present a scalable, communication-eﬃcient, parallel algorithm for computing
+the Wasserstein barycenter of arbitrary distributions. Our algorithm can operate directly on
+continuous input distributions and is optimized for streaming data. Our method is even robust
+to nonstationary input distributions and produces a barycenter estimate that tracks the input
+measures over time. The algorithm is semi-discrete, needing to discretize only the barycenter
+estimate. To the best of our knowledge, we also provide the ﬁrst bounds on the quality of the
+approximate barycenter as the discretization becomes ﬁner. Finally, we demonstrate the practical
+eﬀectiveness of our method, both in tracking moving distributions on a sphere, as well as in a
+large-scale Bayesian inference task.
+
+1
+
+Introduction
+
+A key challenge when scaling up data aggregation occurs when data comes from multiple sources,
+each with its own inherent structure. Sensors in a sensor network may be conﬁgured diﬀerently or
+placed far apart, but each individual sensor simply measures a diﬀerent view of the same quantity.
+Similarly, user data collected by a server in California will diﬀer from that collected by a server in
+Europe: the data samples may be independent but are not identically distributed.
+
+One reasonable approach to aggregation in the presence of multiple data sources is to perform
+inference on each piece independently and fuse the results. This is possible when the data can be
+distributed randomly, using methods akin to distributed optimization [Zhang et al., 2013, 2015].
+However, when the data is not split in an i.i.d. way, Bayesian inference on diﬀerent subsets of
+observed data yields slightly diﬀerent “subset posterior” distributions for each subset that must be
+combined [Minsker et al., 2014]. Further complicating matters, data sources may be nonstationary.
+
+1
+
+How can we fuse these diﬀerent data sources for joint analysis in a consistent and structure-preserving
+manner?
+
+We address this question using ideas from the theory of optimal transport. Optimal transport
+gives us a principled way to measure distances between measures that takes into account the
+underlying space on which the measures are deﬁned. Intuitively, the optimal transport distance
+between two distributions measures the amount of work one would have to do to move all mass from
+one distribution to the other. Given J input measures {µj}J
+j=1, it is natural, in this setting, to ask
+for a measure ν that minimizes the total squared distance to the input measures. This measure ν is
+called the Wasserstein barycenter of the input measures [Agueh and Carlier, 2011], and should be
+thought of as an aggregation of the input measures which preserves their geometry. This particular
+aggregation enjoys many nice properties: in the earlier Bayesian inference example, aggregating
+subset posterior distributions via their Wasserstein barycenter yields guarantees on the original
+inference task [Srivastava et al., 2015a].
+
+If the measures µj are discrete, their barycenter can be computed relatively eﬃciently via either
+a sparse linear program [Anderes et al., 2016], or regularized projection-based methods [Cuturi
+and Doucet, 2014; Benamou et al., 2015; Ye et al., 2017; Cuturi and Peyré, 2016]. However, 1.
+these techniques scale poorly with the support of the measures, and quickly become impractical
+as the support becomes large. 2. When the input measures are continuous, to the best of our
+knowledge the only option is to discretize them via sampling, but the rate of convergence to the true
+(continuous) barycenter is not well-understood. These two confounding factors make it diﬃcult to
+utilize barycenters in scenarios like parallel Bayesian inference where the measures are continuous
+and a ﬁne approximation is needed. These are the primary issues we work to address in this paper.
+Given sample access to J potentially continuous distributions µj, we propose a communication-
+eﬃcient, parallel algorithm to estimate their barycenter. Our method can be parallelized to J worker
+machines, and the messages sent between machines are merely single integers. We require a discrete
+approximation only of the barycenter itself, making our algorithm semi-discrete, and our algorithm
+scales well to ﬁne approximations (e.g. n ≈ 106). In contrast to previous work, we provide guarantees
+on the quality of the approximation as n increases. These rates apply to the general setting in
+which the µj’s are deﬁned on manifolds, with applications to directional statistics [Sra, 2016]. Our
+algorithm is based on stochastic gradient descent as in [Genevay et al., 2016] and hence is robust to
+gradual changes in the distributions: as the µj’s change over time, we maintain a moving estimate
+of their barycenter, a task which is not possible using current methods without solving a large linear
+program in each iteration.
+
+We emphasize that we aggregate the input distributions into a summary, the barycenter, which
+is itself a distribution. Instead of performing any single domain-speciﬁc task such as clustering or
+estimating an expectation, we can simply compute the barycenter of the inputs and process it later
+any arbitrary way. This generality coupled with the eﬃciency and parallelism of our algorithm yields
+immediate applications in ﬁelds from large scale Bayesian inference to e.g. streaming sensor fusion.
+
+Contributions. 1. We give a communication-eﬃcient and fully parallel algorithm for computing
+the barycenter of a collection of distributions. Although our algorithm is semi-discrete, we stress
+that the input measures can be continuous, and even nonstationary. 2. We give bounds on the
+quality of the recovered barycenter as our discretization becomes ﬁner. These are the ﬁrst such
+bounds we are aware of, and they apply to measures on arbitrary compact and connected manifolds.
+3. We demonstrate the practical eﬀectiveness of our method, both in tracking moving distributions
+
+2
+
+on a sphere, as well as in a real large-scale Bayesian inference task.
+
+1.1 Related work
+
+Optimal transport. A comprehensive treatment of optimal transport and its many applications
+is beyond the scope of our work. We refer the interested reader to the detailed monographs by Villani
+[2009] and Santambrogio [2015]. Fast algorithms for optimal transport have been developed in recent
+years via Sinkhorn’s algorithm [Cuturi, 2013] and in particular stochastic gradient methods [Genevay
+et al., 2016], on which we build in this work. These algorithms have enabled several applications
+of optimal transport and Wasserstein metrics to machine learning, for example in supervised
+learning [Frogner et al., 2015], unsupervised learning [Montavon et al., 2016; Arjovsky et al., 2017],
+and domain adaptation [Courty et al., 2016]. Wasserstein barycenters in particular have been
+applied to a wide variety of problems including fusion of subset posteriors [Srivastava et al., 2015a],
+distribution clustering [Ye et al., 2017], shape and texture interpolation [Solomon et al., 2015; Rabin
+et al., 2011], and multi-target tracking [Baum et al., 2015].
+
+When the distributions µj are discrete, transport barycenters can be computed relatively ef-
+ﬁciently via either a sparse linear program [Anderes et al., 2016] or regularized projection-based
+methods [Cuturi and Doucet, 2014; Benamou et al., 2015; Ye et al., 2017; Cuturi and Peyré, 2016].
+In settings like posterior inference, however, the distributions µj are likely continuous rather than
+discrete, and the most obvious viable approach requires discrete approximation of each µj. The result-
+ing discrete barycenter converges to the true, continuous barycenter as the approximations become
+ﬁner [Boissard et al., 2015; Kim and Pass, 2017], but the rate of convergence is not well-understood,
+and ﬁnely approximating each µj yields a very large linear program.
+
+Scalable Bayesian inference. Scaling Bayesian inference to large datasets has become an im-
+portant topic in recent years. There are many approaches to this, ranging from parallel Gibbs
+sampling [Newman et al., 2008; Johnson et al., 2013] to stochastic and streaming algorithms [Welling
+and Teh, 2011; Chen et al., 2014; Hoﬀman et al., 2013; Broderick et al., 2013]. For a more complete
+picture, we refer the reader to the survey by Angelino et al. [2016].
+
+One promising method is via subset posteriors: instead of sampling from the posterior distribution
+given by the full data, the data is split into smaller tractable subsets. Performing inference on each
+subset yields several subset posteriors, which are biased but can be combined via their Wasserstein
+barycenter [Srivastava et al., 2015a], with provable guarantees on approximation quality. This is in
+contrast to other methods that rely on summary statistics to estimate the true posterior [Minsker
+et al., 2014; Neiswanger et al., 2914] and that require additional assumptions. In fact, our algorithm
+works with arbitrary measures and on manifolds.
+
+2 Background
+
+Let (X , d) be a metric space. Given two probability measures µ ∈ P(X ) and ν ∈ P(X ) and a cost
+function c : X × X → [0, ∞), the Kantorovich optimal transport problem asks for a solution to
+
+(cid:26)(cid:90)
+
+inf
+
+X ×X
+
+c(x, y)dγ(x, y) : γ ∈ Π(µ, ν)
+
+(1)
+
+(cid:27)
+
+where Π(µ, ν) is the set of measures on the product space X × X whose marginals evaluate to µ and
+ν, respectively.
+
+3
+
+Under mild conditions on the cost function (lower semi-continuity) and the underlying space
+(completeness and separability), problem (1) admits a solution Santambrogio [2015]. Moreover, if the
+cost function is of the form c(x, y) = d(x, y)p, the optimal transportation cost is a distance metric
+on the space of probability measures. This is known as the Wasserstein distance and is given by
+
+Wp(µ, ν) =
+
+(cid:18)
+
+(cid:90)
+
+inf
+γ∈Π(µ,ν)
+
+X ×X
+
+d(x, y)pdγ(x, y)
+
+.
+
+(cid:19)1/p
+
+Optimal transport has recently attracted much attention in machine learning and adjacent
+communities [Frogner et al., 2015; Montavon et al., 2016; Courty et al., 2016; Peyré et al., 2016;
+Rolet et al., 2016; Arjovsky et al., 2017]. When µ and ν are discrete measures, problem (2) is a linear
+program, although faster regularized methods based on Sinkhorn iteration are used in practice Cuturi
+[2013]. Optimal transport can also be computed using stochastic ﬁrst-order methods Genevay et al.
+[2016].
+
+Now let µ1, . . . , µJ be measures on X . The Wasserstein barycenter problem, introduced by Agueh
+
+and Carlier [2011], is to ﬁnd a measure ν ∈ P(X ) that minimizes the functional
+
+F [ν] :=
+
+W 2
+
+2 (µj, ν).
+
+1
+J
+
+J
+(cid:88)
+
+j=1
+
+Finding the barycenter ν is the primary problem we address in this paper. When each µj is a discrete
+measure, the exact barycenter can be found via linear programming [Anderes et al., 2016], and many
+of the regularization techniques apply for approximating it [Cuturi and Doucet, 2014; Cuturi and
+Peyré, 2016]. However, the problem size grows quickly with the size of the support. When the
+measures µj are truly continuous, we are aware of only one strategy: sample from each µj in order
+to approximate it by the empirical measure, and then solve the discrete barycenter problem.
+
+We directly address the problem of computing the barycenter when the input measures can be
+continuous. We solve a semi-discrete problem, where the target measure is a ﬁnite set of points, but
+we do not discretize any other distribution.
+
+3 Algorithm
+
+We ﬁrst provide some background on the dual formulation of optimal transport. Then we derive
+a useful form of the barycenter problem, provide an algorithm to solve it, and prove convergence
+guarantees. Finally, we demonstrate how our algorithm can easily be parallelized.
+
+3.1 Mathematical preliminaries
+
+The primal optimal transport problem (1) admits a dual problem [Santambrogio, 2015]:
+
+OTc(µ, ν) =
+
+sup
+v 1-Lipschitz
+
+{EY ∼ν[v(Y )] + EX∼µ[vc(X)]} ,
+
+where vc(x) = inf y∈X {c(x, y) − v(y)} is the c-transform of v [Villani, 2009]. When ν = (cid:80)n
+is discrete, problem (4) becomes the semi-discrete problem
+
+i=1 wiδyi
+
+OTc(µ, ν) = max
+v∈Rn
+
+{(cid:104)w, v(cid:105) + EX∼µ[h(X, v)]} ,
+
+4
+
+(2)
+
+(3)
+
+(4)
+
+(5)
+
+where we deﬁne h(x, v) = vc(x) = mini=1,...,n{c(x, yi) − vi}. Semi-discrete optimal transport admits
+eﬃcient algorithms [Lévy, 2015; Kitagawa et al., 2016]; Genevay et al. [2016] in particular observed
+that given sample oracle access to µ, the semi-discrete problem can be solved via stochastic gradient
+ascent. Hence optimal transport distances can be estimated even in the semi-discrete setting.
+
+3.2 Deriving the optimization problem
+
+Absolutely continuous measures can be approximated arbitrarily well by discrete distributions with
+respect to Wasserstein distance [Kloeckner, 2012]. Hence one natural approach to the barycenter
+problem (3) is to approximate the true barycenter via discrete approximation: we ﬁx n support
+points {yi}n
+i=1 ∈ X and search over assignments of the mass wi on each point yi. In this way we wish
+to ﬁnd the discrete distribution νn = (cid:80)n
+
+i=1 wiδyi with support on those n points which optimizes
+
+min
+w∈∆n
+
+F (w) = min
+w∈∆n
+
+W 2
+
+2 (µj, νn)
+
+1
+J
+
+J
+(cid:88)
+
+j=1
+
+
+
+
+
+
+1
+J
+
+J
+(cid:88)
+
+j=1
+
+= min
+w∈∆n
+
+max
+vj ∈Rn
+
+(cid:8)(cid:104)w, vj(cid:105) + EXj ∼µj [h(Xj, vj)](cid:9)
+
+
+
+
+
+
+.
+
+where we have deﬁned F (w) := F [νn] = F [(cid:80)n
+tion (5). in Section 4, we discuss the eﬀect of diﬀerent choices for the support points {yi}n
+
+i=1.
+Noting that the variables vj are uncoupled, we can rearrange to get the following problem:
+
+i=1 wiδyi] and used the dual formulation from equa-
+
+min
+w∈∆n
+
+max
+v1,...,vJ
+
+1
+J
+
+J
+(cid:88)
+
+j=1
+
+(cid:2)(cid:104)w, vj(cid:105) + EXj ∼µj [h(Xj, vj)](cid:3) .
+
+Problem (8) is convex in w and jointly concave in the vj, and we can compute an unbiased gradient
+estimate for each by sampling Xj ∼ µj. Hence, we could solve this saddle-point problem via
+simultaneous (sub)gradient steps as in Nemirovski and Rubinstein [2005]. Such methods are simple
+to implement, but in the current form we must project onto the simplex ∆n at each iteration. This
+requires only O(n log n) time [Held et al., 1974; Michelot, 1986; Duchi et al., 2008] but makes it hard
+to decouple the problem across each distribution µj. Fortunately, we can reformulate the problem in
+a way that avoids projection entirely. By strong duality, Problem (8) can be written as
+
+max
+v1,...,vJ
+
+min
+w∈∆n
+
+
+
+
+
+
+= max
+v1,...,vJ
+
+min
+i
+
+
+
+
+(cid:42)
+
+
+
+
+
+
+
+(cid:43)
+
+vj, w
+
++
+
+1
+J
+
+J
+(cid:88)
+
+j=1
+
+1
+J
+
+J
+(cid:88)
+
+j=1
+
+1
+J
+
+J
+(cid:88)
+
+j=1
+
+vj
+i
+
+
+
+
+
+
++
+
+1
+J
+
+J
+(cid:88)
+
+j=1
+
+EXj ∼µj [h(Xj, vj)]
+
+EXj ∼µj [h(Xj, vj)]
+
+
+
+
+
+
+
+
+
+
+
+.
+
+(6)
+
+(7)
+
+(8)
+
+(9)
+
+(10)
+
+Note how the variable w disappears: for any ﬁxed vector b, minimization of (cid:104)b, w(cid:105) over w ∈ ∆n is
+equivalent to ﬁnding the minimum element of b. The optimal w can also be computed in closed form
+when the barycentric cost is entropically regularized as in [Bigot et al., 2016], which may yield better
+convergence rates but requires dense updates that, e.g., need more communication in the parallel
+setting. In either case, we are left with a concave maximization problem in v1, . . . , vJ , to which
+
+5
+
+we can directly apply stochastic gradient ascent. Unfortunately the gradients are still not sparse
+and decoupled. We obtain sparsity after one ﬁnal transformation of the problem: by replacing each
+(cid:80)J
+i with a variable si and enforcing this equality with a constraint, we turn problem (10) into
+
+j=1 vj
+
+the constrained problem
+
+max
+s,v1,...,vJ
+
+1
+J
+
+J
+(cid:88)
+
+j=1
+
+(cid:20) 1
+J
+
+min
+i
+
+(cid:21)
+si + EXj ∼µj [h(Xj, vj)]
+
+s.t.
+
+s =
+
+J
+(cid:88)
+
+j=1
+
+vj.
+
+(11)
+
+3.3 Algorithm and convergence
+
+We can now solve this problem via stochastic pro-
+jected subgradient ascent. This is described in Al-
+gorithm 1; note that the sparse adjustments after
+the gradient step are actually projections onto the
+constraint set with respect to the (cid:96)1 norm. Derivation
+of this sparse projection step is given rigorously in
+Appendix A. Not only do we have an optimization
+algorithm with sparse updates, but we can even re-
+cover the optimal weights w from standard results in
+online learning [Freund and Schapire, 1999]. Specif-
+ically, in a zero-sum game where one player plays a
+no-regret learning algorithm and the other plays a
+best-response strategy, the average strategies of both
+players converge to optimal:
+
+Theorem 3.1. Perform T iterations of stochastic
+subgradient ascent on u = (s, v1, . . . , vJ ) as in Algo-
+rithm 1, and use step size γ = R
+√
+T
+index chosen at iteration t, and write wT = 1
+T
+
+(cid:80)T
+
+4
+
+Algorithm 1 Subgradient Ascent
+
+s, v1, . . . , vJ ← 0n
+loop
+
+− γ
+
+Draw j ∼ Unif[1, . . . , J]
+Draw x ∼ µj
+iW ← argmini{c(x, yi) − vj
+i }
+iM ← argmini si
+vj
+← vj
+iW
+iW
+siM ← siM + γ/J
+← vj
+vj
++ γ/2
+iW
+iW
+vj
+← vj
++ γ/(2J)
+iM
+iM
+siW ← siW − γ/2
+siM ← siM − γ/(2J)
+
+(cid:46) Gradient update
+(cid:46) Gradient update
+(cid:46) Projection
+(cid:46) Projection
+(cid:46) Projection
+(cid:46) Projection
+
+end loop
+
+, assuming (cid:107)ut − u∗(cid:107)1 ≤ R for all t. Let it be the minimizing
+
+t=1 eit. Then we can bound
+√
+
+E[F (wT ) − F (w∗)] ≤ 4R/
+
+T .
+
+(12)
+
+The expectation is with respect to the randomness in the subgradient estimates gt.
+
+Theorem 3.1 is proved in Appendix B. The proof combines the zero-sum game idea above,
+which itself comes from [Freund and Schapire, 1999], with a regret bound for online gradient
+descent [Zinkevich, 2003; Hazan, 2016].
+
+3.4 Parallel Implementation
+
+The key realization which makes our barycenter algorithm truly scalable is that the variables
+s, v1, . . . , vJ can be separated across diﬀerent machines.
+In particular, the “sum” or “coupling”
+variable s is maintained on a master thread which runs Algorithm 2, and each vj is maintained on a
+worker thread running Algorithm 3. Each projected gradient step requires ﬁrst selecting distribution
+j. The algorithm then requires computing only iW = argmini{c(xj, yi) − vj
+i } and iM = argmini si,
+and then updating s and vj in only those coordinates. Hence only a small amount of information
+(iW and iM ) need pass between threads.
+
+6
+
+Note also that this algorithm can be adapted to the
+parallel shared-memory case, where s is a variable shared
+between threads which make sparse updates to it. Here we
+will focus on the ﬁrst master/worker scenario for simplicity.
+Where are the bottlenecks? When there are n points
+in the discrete approximation, each worker’s task of com-
+puting argmini{c(xj, yi) − vj
+i } requires O(n) computations
+of c(x, y). The master must iteratively ﬁnd the minimum
+element siM in the vector s, then update siM , and decrease
+element siW . These can be implemented respectively as
+the “ﬁnd min”, “delete min” then “insert,” and “decrease
+min” operations in a Fibonacci heap. All these operations
+together take amortized O(log n) time. Hence, it takes
+O(n) time it for all J workers to each produce one gradient
+sample in parallel, and only O(J log n) time for the master
+to process them all. Of course, communication is not free,
+but the messages are small and our approach should scale
+well for J (cid:28) n.
+
+This parallel algorithm is particularly well-suited to the
+Wasserstein posterior (WASP) [Srivastava et al., 2015b]
+framework for merging Bayesian subset posteriors.
+In
+this setting, we split the dataset X1, . . . , Xk into J sub-
+sets S1, . . . , SJ each with k/J data points, distribute
+those subsets to J diﬀerent machines, then each machine
+runs Markov Chain Monte Carlo (MCMC) to sample
+from p(θ|Si), and we aggregate these posteriors via their
+barycenter. The most expensive subroutine in the worker
+thread is actually sampling from the posterior, and ev-
+erything else is cheap in comparison. In particular, the
+machines need not even share samples from their respective
+MCMC chains.
+
+Algorithm 2 Master Thread
+
+Input: index j, distribution µ, atoms
+{yi}i=1,...,N , number J of distribu-
+tions, step size γ
+Output: barycenter weights w
+c ← 0n
+s ← 0n
+iM ← 1
+loop
+
+iW ← message from worker j
+Send iM to worker j
+ciM ← ciM + 1
+siM ← siM + γ/(2J)
+siW ← siW − γ/2
+iM ← argmini si
+
+end loop
+return w ← c/((cid:80)n
+
+i=1 ci)
+
+Algorithm 3 Worker Thread
+
+Input: index j, distribution µ, atoms
+{yi}i=1,...,N , number J of distribu-
+tions, step size γ
+v ← 0n
+loop
+
+Draw x ∼ µ
+iW ← argmini{c(x, yi) − vi}
+Send iW to master
+iM ← message from master
+viM ← viM + γ/(2J)
+viW ← viW − γ/2
+
+end loop
+
+One subtlety is that selecting worker j truly uniformly
+at random each iteration requires more synchronization,
+hence our gradient estimates are not actually independent as usual. Selecting worker threads
+as they are available will fail to yield a uniform distribution over j, as at the moment worker j
+ﬁnishes one gradient step, the probability that worker j is the next available is much less than
+1/J: worker j must resample and recompute iW , whereas other threads would have a head start.
+If workers all took precisely the same amount of time, the ordering of worker threads would be
+determinstic, and guarantees for without-replacement sampling variants of stochastic gradient ascent
+would apply [Shamir, 2016]. In practice, we have no issues with our approach.
+
+4 Consistency
+
+Prior methods for estimating the Wasserstein barycenter ν∗ of continuous measures µj ∈ P(X )
+involve ﬁrst approximating each µj by a measure µj,n that has ﬁnite support on n points, then
+
+7
+
+n of {µj,n} as a surrogate for ν∗. This approach is consistent, in that if
+computing the barycenter ν∗
+µj,n → µj as n → ∞, then also ν∗
+n → ν∗. This holds even if the barycenter is not unique, both in the
+Euclidean case [Boissard et al., 2015, Theorem 3.1] as well as when X is a Riemannian manifold [Kim
+and Pass, 2017, Theorem 5.4]. However, it is not known how fast the approximation ν∗
+n approaches
+the true barycenter ν∗, or even how fast the barycentric distance F [ν∗
+
+n] approaches F [νn].
+
+In practice, not even the approximation ν∗
+
+n is computed exactly: instead, support points are
+chosen and ν∗
+n is constrained to have support on those points. There are various heuristic methods for
+choosing these support points, ranging from mesh grids of the support, to randomly sampling points
+from the convex hull of the supports of µj , or even optimizing over the support point locations. Yet
+we are unaware of any rigorous guarantees on the quality of these approximations.
+
+While our approach still involves approximating the barycenter ν∗ by a measure ν∗
+
+n with ﬁxed
+support, we are able to provide bounds on the quality of this approximation as n → ∞. Speciﬁcally,
+we bound the rate at which F [ν∗
+n] → F [νn]. The result is intuitive, and appeals to the notion of an
+(cid:15)-cover of the support of the barycenter:
+
+Deﬁnition 4.1 (Covering Number). The (cid:15)-covering number of a compact set K ⊂ X , with respect
+to the metric g, is the minimum number N(cid:15)(K) of points {xi}N(cid:15)(K)
+∈ K needed so that for each
+y ∈ K, there is some xi with g(xi, y) ≤ (cid:15). The set {xi} is called an (cid:15)-covering.
+
+i=1
+
+Deﬁnition 4.2 (Inverse Covering Radius). Fix n ∈ Z+. We deﬁne the n-inverse covering radius
+of compact K ⊂ X as the value (cid:15)n(K) = inf{(cid:15) > 0 : N(cid:15)(K) ≤ n}, when n is large enough so the
+inﬁmum exists.
+
+Suppose throughout this section that K ⊂ Rd is endowed with a Riemannian metric g, where K
+has diameter D. In the speciﬁc case where g is the usual Euclidean metric, there is an (cid:15)-cover for
+K with at most C1(cid:15)−d points, where C1 depends only on the diameter D and dimension d [Shalev-
+Shwartz and Ben-David, 2014]. Reversing the inequality, K has an n-inverse covering radius of at
+most (cid:15) ≤ C2n−1/d when n takes the correct form.
+
+We now present and then prove our main result:
+
+n] − F [ν∗] ≤ O((cid:15)n(K) + n−1/d), where ν∗
+
+Theorem 4.1. Suppose the measures µj are supported on K, and suppose µ1 is absolutely continuous
+with respect to volume. Then the barycenter ν∗ is unique. Moreover, for each empirical approximation
+size n, if we choose support points {yi}i=1,...,n which constitute a 2(cid:15)n(K)-cover of K, it follows that
+n = (cid:80)n
+F [ν∗
+Proof. For any two measures η, η(cid:48) supported on K, we can bound W2(η, η(cid:48)) ≤ D: the worst-case
+η, η(cid:48) are point masses distance D apart, so that the transport plan sends all the mass a distance of
+D.
+
+i δyi for w∗ solving Problem (8).
+
+i=1 w∗
+
+It follows that |W2(µ, νn) + W2(µ, ν)| ≤ 2D and therefore
+
+|W 2
+
+2 (µ, νn) − W 2
+
+2 (µ, ν)| ≤ 2D · |W2(µ, νn) − W2(µ, ν)|
+
+≤ 2D · W2(νn, ν)
+
+(13)
+
+(14)
+
+8
+
+by the triangle inequality. Summing over all µ = µj, we ﬁnd that
+
+|F [νn] − F [ν]| ≤
+
+|W 2
+
+2 (µj, νn) − W 2
+
+2 (µj, ν)|
+
+1
+J
+
+1
+J
+
+J
+(cid:88)
+
+j=1
+
+J
+(cid:88)
+
+j=1
+
+≤
+
+2D · W2(νn, ν) = 2D · W2(νn, ν),
+
+completing the proof.
+
+n, ν∗) ≤ 2(cid:15)n(K) and therefore F [ν∗
+
+Remark 4.1. Absolute continuity is only needed to reason about approximating the barycenter
+with an N point discrete distribution. If the input distributions are themselves discrete distributions,
+so is the barycenter, and we can strengthen our result. For large enough n, we actually have
+W2(ν∗
+n] − F [ν∗] ≤ O((cid:15)n(K)).
+Corollary 4.1 (Convergence to ν∗). Suppose the measures µj are supported on K, with µ1 absolutely
+continuous with respect to volume. Let ν∗ be the unique minimizer of F . Then we can choose support
+points {yi}i=1,...,n such that some subsequence of ν∗
+Proof. By Theorem 4.1, we can choose support points so that F [ν∗
+sequence ν∗
+us to pass to the limit limk→∞ F [ν∗
+] = F [limk→∞ ν∗
+]. On the other hand, limk→∞ F [ν∗
+nk
+nk
+nk
+and F is strictly convex Kim and Pass [2017], thus ν∗
+nk
+
+n] → F [ν∗]. By compactness, the
+→ ν for some measure ν. Continuity of F allows
+] = F [ν∗],
+
+n admits a convergent subsequence ν∗
+nk
+
+i δyi converges weakly to ν∗.
+
+→ ν∗ weakly.
+
+n = (cid:80)n
+
+i=1 w∗
+
+Before proving Theorem 4.1, we need smoothness of the barycenter functional F with respect to
+
+Wasserstein-2 distance:
+
+Lemma 4.1. Suppose we are given measures {µj}J
+Then, F [νn] → F [ν], with |F [νn] − F [ν]| ≤ 2D · W2(νn, ν).
+Proof of Theorem 4.1. Uniqueness of ν∗ follows from Theorem 2.4 of [Kim and Pass, 2017]. From
+Theorem 5.1 in [Kim and Pass, 2017] we know further that ν∗ is absolutely continuous with respect
+to volume.
+
+n=1 supported on K, with νn → ν.
+
+j=1, ν, and {νn}∞
+
+Let N > 0, and let νN be the discrete distribution on N points, each with mass 1/N , which
+minimizes W2(νN , ν∗). This distribution satisﬁes W2(νN , ν∗) ≤ CN −1/d [Kloeckner, 2012], where C
+depends on K, the dimension d, and the metric. With our “budget” of n support points, we can
+construct a 2(cid:15)n(K)-cover as long as n is suﬃciently large. Then deﬁne a distribution νn,N with
+support on the 2(cid:15)n(K)-cover as follows: for each x in the support of νN , map x to the closest point
+x(cid:48) in the cover, and add mass 1/N to x(cid:48). Note that this deﬁnes not only the distribution νn,N , but
+also a transport plan between νN and νn,N . This map moves N points of mass 1/N each a distance
+at most 2(cid:15)n(K), so we may bound W2(νn,N , νN ) ≤ (cid:112)N · 1/N · (2(cid:15)n(K))2 = 2(cid:15)n(K). Combining
+these two bounds, we see that
+
+W2(νn,N , ν∗) ≤ W2(νn,N , νN ) + W2(νN , ν∗)
+
+≤ 2(cid:15)n(K) + CN −1/d.
+
+For each n, we choose to set N = n, which yields W2(νn,n, ν∗) ≤ 2(cid:15)n(K) + Cn−1/d. Applying
+
+Lemma 4.1, and recalling that ν∗ is the minimizer of J, we have
+
+F [νn,n] − F [ν∗] ≤ 2D · (2(cid:15)n(K) + Cn−1/d) = O((cid:15)n(K) + n−1/d).
+
+9
+
+(15)
+
+(16)
+
+(17)
+
+(18)
+
+(19)
+
+However, we must have F [ν∗
+but ν∗
+
+n has weights chosen to minimize J. Thus we must also have
+
+n] ≤ F [νn,n], because both are measures on the same n point 2(cid:15)n(K)-cover,
+
+F [ν∗
+
+n] − F [ν∗] ≤ F [νn,n] − F [ν∗] ≤ O((cid:15)n(K) + n−1/d).
+
+The high-level view of the above result is that choosing support points yi to form an (cid:15)-cover with
+respect to the metric g, and then optimizing over their weights wi via our stochastic algorithm, will
+give us a consistent picture of the behavior of the true barycenter. Also note that the proof above
+requires an (cid:15)-cover only of the support of v∗, not all of K. In particular, an (cid:15)-cover of the convex hull
+of the supports of µj is suﬃcient, as this must contain the barycenter. Other heuristic techniques
+to eﬃciently focus a limited budget of n points only on the support of ν∗ are advantageous and
+justiﬁed.
+
+While Theorem 4.1 is a good start, ideally we would also be able to provide a bound on W2(ν∗
+n, ν∗).
+This would follow readily from sharpness of the functional F [ν], or even the discrete version F (w),
+but it is not immediately clear how to achieve such a result.
+
+5 Experiments
+
+We demonstrate the applicability of our method on two experiments, one synthetic and one per-
+forming a real inference task. Together, these showcase the positive traits of our algorithm: speed,
+parallelization, robustness to non-stationarity, applicability to non-Euclidean domains, and immediate
+performance beneﬁt to Bayesian inference. We implemented our algorithm in C++ using MPI, and
+our code is posted at github.com/mstaib/stochastic-barycenter-code. Full experiment details
+are given in Appendix C.
+
+5.1 Von Mises-Fisher Distributions with Drift
+
+We demonstrate computation and tracking of the barycenter of four drifting von Mises-Fisher
+distributions on the unit sphere S2. Note that W2 and the barycentric cost are now deﬁned with
+respect to geodesic distance on S2.
+
+The distributions are randomly centered, and we move the center of each distribution 3 × 10−5
+radians (in the same direction for all distributions) each time a sample is drawn. A snapshot of the
+results is shown in Figure 1. Our algorithm is clearly able to track the barycenter as the distributions
+move.
+
+5.2 Large Scale Bayesian Inference
+
+We run logistic regression on the UCI skin segmentation dataset Bhatt and Dhall. The 245057
+datapoints are colors represented in R3, each with a binary label determing whether that color is a
+skin color. We split consecutive blocks of the dataset into 127 subsets, and due to locality in the
+dataset, the data in each subsets is not identically distributed. Each subset is assigned one thread
+of an InﬁniBand cluster on which we simultaneously sample from the subset posterior via MCMC
+and optimize the barycenter estimate. This is in contrast to [Srivastava et al., 2015a], where the
+barycenter can be computed via a linear program (LP) only after all samplers are run.
+
+Since the full dataset is tractable, we can compare the two methods via W2 distance to the
+posterior of the full dataset, which we can estimate via the large-scale optimal transport algorithm
+
+10
+
+Figure 1: The Wasserstein barycenter of four von Mises-Fisher distributions on the unit sphere S2.
+From left to right, the ﬁgures show the initial distributions merging into the Wasserstein barycenter.
+As the input distributions are moved along parallel paths on the sphere, the barycenter accurately
+tracks the new locations as shown in the ﬁnal three ﬁgures.
+
+Figure 2: Convergence of our algorithm with n ≈ 104 for diﬀerent stepsizes. In each case we recover
+a better approximation than what was possible with the LP for any n, in as little as ≈ 30 seconds.
+
+in [Genevay et al., 2016] or by LP depending on the support size. For each method, we ﬁx n
+barycenter support points on a mesh determined by samples from the subset posteriors. After 317
+seconds, or about 10000 iterations per subset posterior, our algorithm has produced a barycenter on
+n ≈ 104 support points with W2 distance about 26 from the full posterior. Similarly competitive
+results hold even for n ≈ 105 or 106, though tuning the stepsize becomes more challenging. Even in
+the 106 case, no individual 16 thread node used more than 2GB of memory. For n ≈ 104, over a
+wide range of stepsizes we can in seconds approximate the full posterior better than is possible with
+the LP as seen in Figure 2 by terminating early.
+
+In comparsion, in Table 1 we attempt to compute the barycenter LP as in Srivastava et al. [2015a]
+via Mosek [ApS, 2017], for varying values of n. Even n = 480 is not possible on a system with 16GB
+of memory, and feasible values of n result in meshes too sparse to accurately and reliably approximate
+the barycenter. Speciﬁcally, there are several cases where n increases but the approximation quality
+actually decreases: the subset posteriors are spread far apart, and the barycenter is so small relative
+to the required bounding box that likely only one grid point is close to it, and how close this grid
+
+11
+
+Table 1: Number of support points n versus computation time and W2 distance to the true posterior.
+Compared to prior work, our algorithm handles much ﬁner meshes, producing much better estimates.
+
+Linear program from [Srivastava et al., 2015a]
+
+This paper
+
+n
+
+24
+
+40
+
+60
+
+84
+
+189
+
+320
+
+396
+
+480
+
+time (s)
+W2
+
+0.5
+41.1
+
+0.97
+59.3
+
+2.9
+50.0
+
+6.1
+34.3
+
+34
+44.3
+
+163
+53.7
+
+176
+45
+
+out of memory
+out of memory
+
+104
+
+317
+26.3
+
+point is depends on the speciﬁc mesh. To avoid this behavior, one must either use a dense grid (our
+approach), or invent a better method for choosing support points that will still cover the barycenter.
+In terms of compute time, entropy regularized methods may have faired better than the LP for ﬁner
+meshes but would still not give the same result as our method. Note also that the LP timings include
+only optimization time, whereas in 317 seconds our algorithm produces samples and optimizes.
+
+6 Conclusion and Future Directions
+
+We have proposed an original algorithm for computing the Wasserstein barycenter of arbitrary
+measures given a stream of samples. Our algorithm is communication-eﬃcient, highly parallel,
+easy to implement, and enjoys consistency results that, to the best of our knowledge, are new.
+Our method has immediate impact on large-scale Bayesian inference and sensor fusion tasks: for
+Bayesian inference in particular, we obtain far ﬁner estimates of the Wasserstein-averaged subset
+posterior (WASP) [Srivastava et al., 2015a] than was possible before, enabling faster and more
+accurate inference.
+
+There are many directions for future work: we have barely scratched the surface in terms of new
+applications of large-scale Wasserstein barycenters, and there are still many possible algorithmic
+improvements. One implication of Theorem 3.1 is that a faster algorithm for solving the concave
+problem (11) immediately yields faster convergence to the barycenter. Incorporating variance reduc-
+tion [Defazio et al., 2014; Johnson and Zhang, 2013] is a promising direction, provided we maintain
+communication-eﬃciency. Recasting problem (11) as distributed consensus optimization [Nedic and
+Ozdaglar, 2009; Boyd et al., 2011] would further help scale up the barycenter computation to huge
+numbers of input measures.
+
+Acknowledgements
+
+We thank the anonymous reviewers for their helpful suggestions. We also thank MIT Supercloud
+and the Lincoln Laboratory Supercomputing Center for providing computational resources. M. Staib
+acknowledges Government support under and awarded by DoD, Air Force Oﬃce of Scientiﬁc Research,
+National Defense Science and Engineering Graduate (NDSEG) Fellowship, 32 CFR 168a. J. Solomon
+acknowledges funding from the MIT Research Support Committee (“Structured Optimization for
+Geometric Problems”), as well as Army Research Oﬃce grant W911NF-12-R-0011 (“Smooth Modeling
+of Flows on Graphs”). This research was supported by NSF CAREER award 1553284 and The
+Defense Advanced Research Projects Agency (grant number N66001-17-1-4039). The views, opinions,
+and/or ﬁndings contained in this article are those of the author and should not be interpreted as
+
+12
+
+representing the oﬃcial views or policies, either expressed or implied, of the Defense Advanced
+Research Projects Agency or the Department of Defense.
+
+References
+
+M. Agueh and G. Carlier. Barycenters in the Wasserstein Space. SIAM J. Math. Anal., 43(2):
+
+904–924, January 2011. ISSN 0036-1410. doi: 10.1137/100805741.
+
+Ethan Anderes, Steﬀen Borgwardt, and Jacob Miller. Discrete Wasserstein barycenters: Optimal
+transport for discrete data. Math Meth Oper Res, 84(2):389–409, October 2016. ISSN 1432-2994,
+1432-5217. doi: 10.1007/s00186-016-0549-x.
+
+Elaine Angelino, Matthew James Johnson, and Ryan P. Adams. Patterns of scalable bayesian
+inference. Foundations and Trends R(cid:13) in Machine Learning, 9(2-3):119–247, 2016. ISSN 1935-8237.
+doi: 10.1561/2200000052. URL http://dx.doi.org/10.1561/2200000052.
+
+MOSEK ApS. The MOSEK optimization toolbox for MATLAB manual. Version 8.0.0.53., 2017.
+
+URL http://docs.mosek.com/8.0/toolbox/index.html.
+
+Martin Arjovsky, Soumith Chintala, and Léon Bottou. Wasserstein GAN. 2017.
+
+M. Baum, P. K. Willett, and U. D. Hanebeck. On Wasserstein Barycenters and MMOSPA Estimation.
+IEEE Signal Process. Lett., 22(10):1511–1515, October 2015. ISSN 1070-9908. doi: 10.1109/LSP.
+2015.2410217.
+
+J. Benamou, G. Carlier, M. Cuturi, L. Nenna, and G. Peyré. Iterative Bregman Projections for
+Regularized Transportation Problems. SIAM J. Sci. Comput., 37(2):A1111–A1138, January 2015.
+ISSN 1064-8275. doi: 10.1137/141000439.
+
+Rajen Bhatt and Abhinav Dhall. Skin segmentation dataset. UCI Machine Learning Repository.
+
+Jérémie Bigot, Elsa Cazelles, and Nicolas Papadakis. Regularization of barycenters in the Wasserstein
+
+space. arXiv:1606.01025 [math, stat], June 2016.
+
+Emmanuel Boissard, Thibaut Le Gouic, and Jean-Michel Loubes. Distribution’s template estimate
+with Wasserstein metrics. Bernoulli, 21(2):740–759, May 2015. ISSN 1350-7265. doi: 10.3150/
+13-BEJ585.
+
+Stephen Boyd, Neal Parikh, Eric Chu, Borja Peleato, and Jonathan Eckstein. Distributed optimization
+and statistical learning via the alternating direction method of multipliers. Foundations and
+Trends R(cid:13) in Machine Learning, 3(1):1–122, 2011.
+
+Tamara Broderick, Nicholas Boyd, Andre Wibisono, Ashia C Wilson, and Michael I Jordan. Streaming
+Variational Bayes.
+In C. J. C. Burges, L. Bottou, M. Welling, Z. Ghahramani, and K. Q.
+Weinberger, editors, Advances in Neural Information Processing Systems 26, pages 1727–1735.
+Curran Associates, Inc., 2013.
+
+Tianqi Chen, Emily Fox, and Carlos Guestrin. Stochastic gradient hamiltonian monte carlo. In Eric P.
+Xing and Tony Jebara, editors, Proceedings of the 31st International Conference on Machine
+Learning, volume 32 of Proceedings of Machine Learning Research, pages 1683–1691, Bejing, China,
+22–24 Jun 2014. PMLR. URL http://proceedings.mlr.press/v32/cheni14.html.
+
+13
+
+N. Courty, R. Flamary, D. Tuia, and A. Rakotomamonjy. Optimal Transport for Domain Adaptation.
+IEEE Trans. Pattern Anal. Mach. Intell., PP(99):1–1, 2016. ISSN 0162-8828. doi: 10.1109/
+TPAMI.2016.2615921.
+
+Marco Cuturi. Sinkhorn Distances: Lightspeed Computation of Optimal Transport. In C. J. C.
+Burges, L. Bottou, M. Welling, Z. Ghahramani, and K. Q. Weinberger, editors, Advances in Neural
+Information Processing Systems 26, pages 2292–2300. Curran Associates, Inc., 2013.
+
+Marco Cuturi and Arnaud Doucet. Fast Computation of Wasserstein Barycenters. pages 685–693,
+
+2014.
+
+Marco Cuturi and Gabriel Peyré. A Smoothed Dual Approach for Variational Wasserstein Problems.
+
+SIAM J. Imaging Sci., 9(1):320–343, January 2016. doi: 10.1137/15M1032600.
+
+Aaron Defazio, Francis Bach, and Simon Lacoste-Julien. Saga: A fast incremental gradient method
+with support for non-strongly convex composite objectives. In Advances in Neural Information
+Processing Systems, pages 1646–1654, 2014.
+
+John Duchi, Shai Shalev-Shwartz, Yoram Singer, and Tushar Chandra. Eﬃcient projections onto
+the l 1-ball for learning in high dimensions. In Proceedings of the 25th International Conference
+on Machine Learning, pages 272–279. ACM, 2008.
+
+Yoav Freund and Robert E. Schapire. Adaptive Game Playing Using Multiplicative Weights. Games
+and Economic Behavior, 29(1):79–103, October 1999. ISSN 0899-8256. doi: 10.1006/game.1999.
+0738.
+
+Charlie Frogner, Chiyuan Zhang, Hossein Mobahi, Mauricio Araya, and Tomaso A Poggio. Learning
+with a Wasserstein Loss. In C. Cortes, N. D. Lawrence, D. D. Lee, M. Sugiyama, and R. Gar-
+nett, editors, Advances in Neural Information Processing Systems 28, pages 2053–2061. Curran
+Associates, Inc., 2015.
+
+Aude Genevay, Marco Cuturi, Gabriel Peyré, and Francis Bach. Stochastic Optimization for
+Large-scale Optimal Transport. In D. D. Lee, M. Sugiyama, U. V. Luxburg, I. Guyon, and
+R. Garnett, editors, Advances in Neural Information Processing Systems 29, pages 3440–3448.
+Curran Associates, Inc., 2016.
+
+Elad Hazan. Introduction to Online Convex Optimization. OPT, 2(3-4):157–325, August 2016. ISSN
+
+2167-3888, 2167-3918. doi: 10.1561/2400000013.
+
+Michael Held, Philip Wolfe, and Harlan P. Crowder. Validation of subgradient optimization.
+Mathematical Programming, 6(1):62–88, December 1974. ISSN 0025-5610, 1436-4646. doi: 10.
+1007/BF01580223.
+
+Matthew D Hoﬀman, David M Blei, Chong Wang, and John William Paisley. Stochastic variational
+
+inference. Journal of Machine Learning Research, 14(1):1303–1347, 2013.
+
+Matthew Johnson, James Saunderson, and Alan Willsky. Analyzing hogwild parallel gaus-
+sian gibbs sampling.
+In C. J. C. Burges, L. Bottou, M. Welling, Z. Ghahramani,
+and K. Q. Weinberger, editors, Advances in Neural Information Processing Systems 26,
+Inc., 2013. URL http://papers.nips.cc/paper/
+pages 2715–2723. Curran Associates,
+5043-analyzing-hogwild-parallel-gaussian-gibbs-sampling.pdf.
+
+14
+
+Rie Johnson and Tong Zhang. Accelerating stochastic gradient descent using predictive variance
+
+reduction. In Advances in Neural Information Processing Systems, pages 315–323, 2013.
+
+Young-Heon Kim and Brendan Pass. Wasserstein barycenters over Riemannian manifolds. Advances
+in Mathematics, 307:640–683, February 2017. ISSN 0001-8708. doi: 10.1016/j.aim.2016.11.026.
+
+Jun Kitagawa, Quentin Mérigot, and Boris Thibert. Convergence of a Newton algorithm for
+
+semi-discrete optimal transport. arXiv:1603.05579 [cs, math], March 2016.
+
+Benoît Kloeckner. Approximation by ﬁnitely supported measures. ESAIM Control Optim. Calc.
+
+Var., 18(2):343–359, 2012. ISSN 1292-8119.
+
+Bruno Lévy. A Numerical Algorithm for L2 Semi-Discrete Optimal Transport in 3D. ESAIM
+Math. Model. Numer. Anal., 49(6):1693–1715, November 2015. ISSN 0764-583X, 1290-3841. doi:
+10.1051/m2an/2015055.
+
+C. Michelot. A ﬁnite algorithm for ﬁnding the projection of a point onto the canonical simplex
+ISSN 0022-3239, 1573-2878. doi:
+
+of ∝n. J Optim Theory Appl, 50(1):195–200, July 1986.
+10.1007/BF00938486.
+
+Stanislav Minsker, Sanvesh Srivastava, Lizhen Lin, and David Dunson. Scalable and Robust Bayesian
+
+Inference via the Median Posterior. In PMLR, pages 1656–1664, January 2014.
+
+Grégoire Montavon, Klaus-Robert Müller, and Marco Cuturi. Wasserstein Training of Restricted
+Boltzmann Machines. In D. D. Lee, M. Sugiyama, U. V. Luxburg, I. Guyon, and R. Garnett, editors,
+Advances in Neural Information Processing Systems 29, pages 3718–3726. Curran Associates, Inc.,
+2016.
+
+Angelia Nedic and Asuman Ozdaglar. Distributed subgradient methods for multi-agent optimization.
+
+IEEE Transactions on Automatic Control, 54(1):48–61, 2009.
+
+Willie Neiswanger, Chong Wang, and Eric P. Xing. Asymptotically exact, embarrassingly parallel
+mcmc. In Proceedings of the Thirtieth Conference on Uncertainty in Artiﬁcial Intelligence, UAI’14,
+pages 623–632, Arlington, Virginia, United States, 2914. AUAI Press. ISBN 978-0-9749039-1-0.
+URL http://dl.acm.org/citation.cfm?id=3020751.3020816.
+
+Arkadi Nemirovski and Reuven Y. Rubinstein. An Eﬃcient Stochastic Approximation Algorithm
+for Stochastic Saddle Point Problems. In Moshe Dror, Pierre L’Ecuyer, and Ferenc Szidarovszky,
+editors, Modeling Uncertainty, number 46 in International Series in Operations Research &
+Management Science, pages 156–184. Springer US, 2005. ISBN 978-0-7923-7463-3 978-0-306-48102-
+4. doi: 10.1007/0-306-48102-2_8.
+
+for
+
+David Newman, Padhraic Smyth, Max Welling, and Arthur U. Asuncion.
+
+inference
+and S. T. Roweis,
+pages 1081–1088. Curran Associates,
+3330-distributed-inference-for-latent-dirichlet-allocation.pdf.
+
+Distributed
+In J. C. Platt, D. Koller, Y. Singer,
+Information Processing Systems 20,
+Inc., 2008. URL http://papers.nips.cc/paper/
+
+editors, Advances in Neural
+
+latent dirichlet allocation.
+
+Gabriel Peyré, Marco Cuturi, and Justin Solomon. Gromov-Wasserstein Averaging of Kernel and
+
+Distance Matrices. In PMLR, pages 2664–2672, June 2016.
+
+15
+
+Julien Rabin, Gabriel Peyré, Julie Delon, and Marc Bernot. Wasserstein Barycenter and Its
+Application to Texture Mixing. In Scale Space and Variational Methods in Computer Vision,
+pages 435–446. Springer, Berlin, Heidelberg, May 2011. doi: 10.1007/978-3-642-24785-9_37.
+
+Sasha Rakhlin and Karthik Sridharan. Optimization, Learning, and Games with Predictable Se-
+quences. In C. J. C. Burges, L. Bottou, M. Welling, Z. Ghahramani, and K. Q. Weinberger, editors,
+Advances in Neural Information Processing Systems 26, pages 3066–3074. Curran Associates, Inc.,
+2013.
+
+Antoine Rolet, Marco Cuturi, and Gabriel Peyré. Fast Dictionary Learning with a Smoothed
+
+Wasserstein Loss. In PMLR, pages 630–638, May 2016.
+
+Filippo Santambrogio. Optimal Transport for Applied Mathematicians, volume 87 of Progress in
+Nonlinear Diﬀerential Equations and Their Applications. Springer International Publishing, Cham,
+2015. ISBN 978-3-319-20827-5 978-3-319-20828-2. doi: 10.1007/978-3-319-20828-2.
+
+Shai Shalev-Shwartz and Shai Ben-David. Understanding Machine Learning: From Theory to
+
+Algorithms. Cambridge university press, 2014.
+
+Ohad Shamir. Without-replacement sampling for stochastic gradient methods.
+
+In D. D. Lee,
+M. Sugiyama, U. V. Luxburg, I. Guyon, and R. Garnett, editors, Advances in Neural Information
+Processing Systems 29, pages 46–54. Curran Associates, Inc., 2016. URL http://papers.nips.
+cc/paper/6245-without-replacement-sampling-for-stochastic-gradient-methods.pdf.
+
+Justin Solomon, Fernando de Goes, Gabriel Peyré, Marco Cuturi, Adrian Butscher, Andy Nguyen, Tao
+Du, and Leonidas Guibas. Convolutional Wasserstein Distances: Eﬃcient Optimal Transportation
+on Geometric Domains. ACM Trans Graph, 34(4):66:1–66:11, July 2015. ISSN 0730-0301. doi:
+10.1145/2766963.
+
+Suvrit Sra. Directional Statistics in Machine Learning: A Brief Review. arXiv:1605.00316 [stat],
+
+May 2016.
+
+Sanvesh Srivastava, Volkan Cevher, Quoc Dinh, and David Dunson. WASP: Scalable Bayes via
+barycenters of subset posteriors. In Guy Lebanon and S. V. N. Vishwanathan, editors, Proceedings
+of the Eighteenth International Conference on Artiﬁcial Intelligence and Statistics, volume 38 of
+Proceedings of Machine Learning Research, pages 912–920, San Diego, California, USA, 09–12
+May 2015a. PMLR. URL http://proceedings.mlr.press/v38/srivastava15.html.
+
+Sanvesh Srivastava, Cheng Li, and David B. Dunson. Scalable Bayes via Barycenter in Wasserstein
+
+Space. arXiv:1508.05880 [stat], August 2015b.
+
+Cédric Villani. Optimal Transport: Old and New. Number 338 in Grundlehren der mathematischen
+
+Wissenschaften. Springer, Berlin, 2009. ISBN 978-3-540-71049-3. OCLC: ocn244421231.
+
+Max Welling and Yee W Teh. Bayesian learning via stochastic gradient langevin dynamics. In
+Proceedings of the 28th International Conference on Machine Learning (ICML-11), pages 681–688,
+2011.
+
+J. Ye, P. Wu, J. Z. Wang, and J. Li. Fast Discrete Distribution Clustering Using Wasserstein
+Barycenter With Sparse Support. IEEE Trans. Signal Process., 65(9):2317–2332, May 2017. ISSN
+1053-587X. doi: 10.1109/TSP.2017.2659647.
+
+16
+
+Yuchen Zhang, John C Duchi, and Martin J Wainwright. Communication-eﬃcient algorithms for
+
+statistical optimization. Journal of Machine Learning Research, 14:3321–3363, 2013.
+
+Yuchen Zhang, John Duchi, and Martin Wainwright. Divide and conquer kernel ridge regression: A
+distributed algorithm with minimax optimal rates. Journal of Machine Learning Research, 16:
+3299–3340, 2015. URL http://jmlr.org/papers/v16/zhang15d.html.
+
+Martin Zinkevich. Online convex programming and generalized inﬁnitesimal gradient ascent. In
+Proceedings of the 20th International Conference on Machine Learning (ICML-03), pages 928–936,
+2003.
+
+A Sparse Projections
+
+Our algorithms for solving the barycenter problem in the parallel setting relied on the ability to
+eﬃciently project the matrix A = (s, v1, . . . , vJ ) back onto the constraint set s = (cid:80)J
+j=1 vj. For the
+sake of completion, we include a proof that our sparse updates actually result in projection with
+respect to the (cid:96)1 norm.
+
+At any given iteration of gradient ascent, we start with some iterate A = (s, v1, . . . , vJ ) which
+does satisfy the constraint. Suppose we selected distribution j. The gradient estimate is a sparse
+n × (J + 1) matrix M which has Mu1 = 1/J and Mvj = −1, for some indices u and v, with column
+1 corresponding to s and column j corresponding to vj. After the gradient step with stepsize γ, we
+have A + γM . Now, our constraint can be written in matrix form as Az = 0, where
+
+and so the problem of projecting A + γM onto this constraint set can be written as
+
+Equivalently, we want to ﬁnd the matrix C solving
+
+z =
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+−1
+1
+...
+1
+
+,
+
+minB (cid:107)A + γM − B(cid:107)1
+Bz = 0.
+s.t.
+
+minC (cid:107)C(cid:107)1
+s.t.
+
+(A + γM + C)z = 0.
+
+Note that
+
+(A + γM + C)z = 0 ⇔ Cz = −γM z = γ
+
+(cid:19)
+
+eu + ev
+
+.
+
+(cid:18) 1
+J
+
+Consider the sparse matrix C given by Cu1 = −γ/(2J), Cuj = γ/(2J), Cv1 = γ/2, and Cvj = −γ/2.
+Deﬁne a sparse vector λ ∈ Rn by λu = λv = −1. We wish to show that the primal dual pair (C, λ)
+solves problem (22). We can do this directly by looking at the Karush–Kuhn–Tucker conditions. It
+is easy to check that C is primal feasible, so it remains only to show that
+
+0 ∈ ∂C((cid:107)C(cid:107)1 + λT Cz) ⇔ −zλT ∈ ∂C((cid:107)C(cid:107)1).
+
+17
+
+(20)
+
+(21)
+
+(22)
+
+(23)
+
+(24)
+
+The subgradients of the (cid:96)1 norm at C are matrices G which satisfy (cid:107)G(cid:107)∞ ≤ 1 and (cid:104)G, C(cid:105) = (cid:107)C(cid:107)1.
+It is easy to check that (cid:107)zλT (cid:107)∞ = 1. Finally,
+
+(cid:104)−zλT , C(cid:105) = −λT Cz = −γλT
+
+(cid:19)
+
+eu + ev
+
+(cid:18) 1
+J
+
+(cid:19)
+
++ 1
+
+= γ ·
+
+(cid:18) 1
+J
+= (cid:107)C(cid:107)1.
+
+(25)
+
+(26)
+
+(27)
+
+Hence after the gradient step we can project onto the feasible set with respect to (cid:96)1, simply by
+adding the sparse matrix C.
+
+B Stochastic Gradient Bound
+
+We ﬁrst need a lemma which gives a regret bound for online gradient ascent:
+
+Lemma B.1 (Adapted from [Hazan, 2016, Theorem 3.1]). Run online gradient ascent on concave
+functions ft with subgradients gt ∈ ∂ft(xt). Assume (cid:107)xt − x∗(cid:107) ≤ R for some optimizer x∗ of (cid:80)T
+t=1 ft,
+and assume E[(cid:107)gt(cid:107)] ≤ G. Using stepsize γ = R
+, the expected regret after T iterations is bounded
+√
+G
+by 2RG
+
+T .
+
+√
+
+T
+
+Proof of Theorem 3.1. This is adapted from [Freund and Schapire, 1999; Rakhlin and Sridharan,
+2013].
+
+Deﬁne f (s, v, w) = (cid:104)s, w(cid:105) + 1
+J
+
+EXj ∼µj [h(Xj, vj)] as in (11). For simplicity, concatenate s
+and v into a vector u, with f (u, w) = f (s, v, w). Write w∗(u) = argminw∈∆n(cid:104)s, w(cid:105) and note that our
+objective in Equation (11) is f (u) := f (u, w∗(u)).
+
+j=1
+
+(cid:80)J
+
+Recall the online optimization setup: at time step t we play ut, then receive ft and reward ft(ut),
+then update ut and repeat. Note that if ft is given by f (ut, w∗(ut)), then online gradient ascent on
+ft is eﬀectively subgradient ascent on f . Suppose we play online subgradient ascent and achieve
+average expected regret ε(T ) after T timesteps, where the expectation is with respect to the gradient
+estimates in the learning algorithm. Then by the deﬁnition of expected regret,
+
+ε(T ) ≥ E
+
+ft(u) −
+
+(cid:34)
+
+1
+T
+
+sup
+u
+
+T
+(cid:88)
+
+t=1
+
+1
+T
+
+T
+(cid:88)
+
+t=1
+
+(cid:35)
+
+(cid:34)
+
+ft(ut)
+
+= E
+
+1
+T
+
+sup
+v
+
+T
+(cid:88)
+
+t=1
+
+f (u, wt) −
+
+f (ut, wt)
+
+.
+
+(28)
+
+(cid:35)
+
+1
+T
+
+T
+(cid:88)
+
+t=1
+
+where we write wt = w∗(ut). Simultaneously, we have
+
+1
+T
+
+T
+(cid:88)
+
+t=1
+
+f (ut, wt) − inf
+w
+
+1
+T
+
+T
+(cid:88)
+
+t=1
+
+f (ut, w) ≤
+
+f (ut, wt) −
+
+f (ut, wt) = 0
+
+(29)
+
+because wt are each chosen optimally. Summing, we have
+
+1
+T
+
+T
+(cid:88)
+
+t=1
+
+(cid:35)
+
+(cid:34)
+
+E
+
+1
+T
+
+sup
+u
+
+T
+(cid:88)
+
+t=1
+
+f (u, wt) − inf
+w
+
+f (ut, w)
+
+≤ ε(T ).
+
+(30)
+
+1
+T
+
+T
+(cid:88)
+
+t=1
+
+1
+T
+
+T
+(cid:88)
+
+t=1
+
+18
+
+Now we merely need combine this with the standard bound:
+
+inf
+w
+
+1
+T
+
+T
+(cid:88)
+
+t=1
+
+f (ut, w) ≤ inf
+w
+
+f (uT , w) ≤ sup
+
+f (u, w)
+
+inf
+w
+
+v
+
+(31)
+
+(33)
+
+≤ inf
+w
+
+sup
+u
+
+f (u, w) ≤ sup
+
+f (u, wT ) ≤ sup
+u
+
+u
+
+f (u, wt).
+
+(32)
+
+1
+T
+
+T
+(cid:88)
+
+t=1
+
+The extreme bounds on either side of this chain of inequalities are within ε(T ), hence we also have
+
+(cid:20)
+
+E
+
+sup
+u
+
+f (u, wT ) − inf
+w
+
+sup
+u
+
+f (u, w)
+
+≤ ε(T ).
+
+(cid:21)
+
+By deﬁnition of f , the left hand side is precisely E[F (wT ) − F (w∗)]. Now, noting that our gradient
+estimates g are always sparse (we always have two elements of magnitude 1, so (cid:107)g(cid:107)1 = 2), we simply
+replace ε(T ) with the particular regret bound of Lemma B.1 for online gradient ascent.
+
+C Experiment details
+
+C.1 Von Mises-Fisher Distributions with Drift
+
+The distributions are randomly centered with concentration parameter κ = 30. To verify that the
+barycenter accurately tracks when the input distributions are non-stationary, we move the center of
+each distribution 3 × 10−5 radians (in the same direction for all distributions) each time a sample is
+drawn. A snapshot of the results is shown in Figure 1.
+
+We use a sliding window of T = 105 timesteps with step size γ = 1 and on N = 104 evenly-
+distributed support points. Each thread is run for 5 × 105 iterations on a separate thread of an 8
+core workstation. The total time is roughly 80 seconds, during which our algorithm has processed a
+total of 2 × 106 samples. Clearly our algorithm is eﬃcient and is able to perform the speciﬁed task.
+
+C.2 Large Scale Bayesian Inference
+
+Subset assignment. The skin segmentation dataset is given with positive samples grouped all
+together, then negative samples grouped together. To ensure even representation of positive and
+negative samples across all subsets, while simulating the non-i.i.d data setting, each subset is
+composed of a consecutive block of positive samples and one of negative samples.
+
+MCMC chains. We used a simple Metropolis-Hastings sampler with Gaussian proposal distribu-
+tion N (0, σ2I), for σ = 0.05. We used a very conservative 105 burn-in iterations, and afterwards
+took every ﬁfth sample.
+
+Mesh selection. During the burn-in phase, we compute a minimum axis-aligned bounding box
+containing all samples from all MCMC chains. Then, for a desired mesh size of n, we choose a
+granularity δ so that cutting each axis into evenly-spaced values diﬀering by δ results in approximately
+n points total. For Table 1 in particular, the bounding box was selected as roughly
+
+[−21.4, 114.4] × [−121.8, 42.9] × [−50.8, 6.1]
+
+19
+
+for the LP code, and
+
+[−21.4, 114.2] × [−121.5, 42.8] × [−50.7, 6.1]
+
+for an arbitrary n ≈ 104 instance of our stochastic algorithm. That these match so well supports the
+consistency of our implementation. The griddings assigned for the LPs are given in Table 2.
+
+Table 2: Grid sizes chosen for LP experiments.
+
+Optimization. We experimented with diﬀerent stepsizes in {0.01, 0.1, 1, 10, 100} for n in {103, 104, 105, 106}.
+As expected, more aggressive step sizes are needed as n grows, but competitive barycenter estimates
+were possible for all n given suﬃcient iterations. The 317 seconds value corresponds to 127 × 104
+iterations total, or 10000 per sampler. The barycenter estimate wT = 1
+t=1 eit was maintained
+T
+over all 127 × 104 iterations. We found that it is sometimes helpful to use a sliding window, to
+quicker move away from initial bad barycenter estimates.
+
+(cid:80)T
+
+Error metric. We stored 104 samples from the true posterior, and computed the W2 distance
+between these samples and each candidate barycenter.
+
+n
+
+grid dimensions
+
+24
+40
+60
+84
+189
+320
+396
+480
+
+3 × 4 × 2
+4 × 5 × 2
+5 × 6 × 2
+6 × 7 × 2
+7 × 9 × 3
+8 × 10 × 4
+9 × 11 × 4
+10 × 12 × 4
+
+20
+
+7
+1
+0
+2
+ 
+v
+o
+N
+ 
+4
+1
+ 
+ 
+]
+
+G
+L
+.
+s
+c
+[
+ 
+ 
+2
+v
+3
+4
+4
+7
+0
+.
+5
+0
+7
+1
+:
+v
+i
+X
+r
+a
+
+Parallel Streaming Wasserstein Barycenters
+
+Matthew Staib, Sebastian Claici, Justin Solomon, and Stefanie Jegelka
+
+Computer Science and Artiﬁcial Intelligence Laboratory
+Massachusetts Institute of Technology
+{mstaib, sclaici, jsolomon, stefje}@mit.edu
+
+Abstract
+
+Eﬃciently aggregating data from diﬀerent sources is a challenging problem, particularly when
+samples from each source are distributed diﬀerently. These diﬀerences can be inherent to the
+inference task or present for other reasons: sensors in a sensor network may be placed far apart,
+aﬀecting their individual measurements. Conversely, it is computationally advantageous to split
+Bayesian inference tasks across subsets of data, but data need not be identically distributed
+across subsets. One principled way to fuse probability distributions is via the lens of optimal
+transport: the Wasserstein barycenter is a single distribution that summarizes a collection of
+input measures while respecting their geometry. However, computing the barycenter scales poorly
+and requires discretization of all input distributions and the barycenter itself. Improving on
+this situation, we present a scalable, communication-eﬃcient, parallel algorithm for computing
+the Wasserstein barycenter of arbitrary distributions. Our algorithm can operate directly on
+continuous input distributions and is optimized for streaming data. Our method is even robust
+to nonstationary input distributions and produces a barycenter estimate that tracks the input
+measures over time. The algorithm is semi-discrete, needing to discretize only the barycenter
+estimate. To the best of our knowledge, we also provide the ﬁrst bounds on the quality of the
+approximate barycenter as the discretization becomes ﬁner. Finally, we demonstrate the practical
+eﬀectiveness of our method, both in tracking moving distributions on a sphere, as well as in a
+large-scale Bayesian inference task.
+
+1
+
+Introduction
+
+A key challenge when scaling up data aggregation occurs when data comes from multiple sources,
+each with its own inherent structure. Sensors in a sensor network may be conﬁgured diﬀerently or
+placed far apart, but each individual sensor simply measures a diﬀerent view of the same quantity.
+Similarly, user data collected by a server in California will diﬀer from that collected by a server in
+Europe: the data samples may be independent but are not identically distributed.
+
+One reasonable approach to aggregation in the presence of multiple data sources is to perform
+inference on each piece independently and fuse the results. This is possible when the data can be
+distributed randomly, using methods akin to distributed optimization [Zhang et al., 2013, 2015].
+However, when the data is not split in an i.i.d. way, Bayesian inference on diﬀerent subsets of
+observed data yields slightly diﬀerent “subset posterior” distributions for each subset that must be
+combined [Minsker et al., 2014]. Further complicating matters, data sources may be nonstationary.
+
+1
+
+How can we fuse these diﬀerent data sources for joint analysis in a consistent and structure-preserving
+manner?
+
+We address this question using ideas from the theory of optimal transport. Optimal transport
+gives us a principled way to measure distances between measures that takes into account the
+underlying space on which the measures are deﬁned. Intuitively, the optimal transport distance
+between two distributions measures the amount of work one would have to do to move all mass from
+one distribution to the other. Given J input measures {µj}J
+j=1, it is natural, in this setting, to ask
+for a measure ν that minimizes the total squared distance to the input measures. This measure ν is
+called the Wasserstein barycenter of the input measures [Agueh and Carlier, 2011], and should be
+thought of as an aggregation of the input measures which preserves their geometry. This particular
+aggregation enjoys many nice properties: in the earlier Bayesian inference example, aggregating
+subset posterior distributions via their Wasserstein barycenter yields guarantees on the original
+inference task [Srivastava et al., 2015a].
+
+If the measures µj are discrete, their barycenter can be computed relatively eﬃciently via either
+a sparse linear program [Anderes et al., 2016], or regularized projection-based methods [Cuturi
+and Doucet, 2014; Benamou et al., 2015; Ye et al., 2017; Cuturi and Peyré, 2016]. However, 1.
+these techniques scale poorly with the support of the measures, and quickly become impractical
+as the support becomes large. 2. When the input measures are continuous, to the best of our
+knowledge the only option is to discretize them via sampling, but the rate of convergence to the true
+(continuous) barycenter is not well-understood. These two confounding factors make it diﬃcult to
+utilize barycenters in scenarios like parallel Bayesian inference where the measures are continuous
+and a ﬁne approximation is needed. These are the primary issues we work to address in this paper.
+Given sample access to J potentially continuous distributions µj, we propose a communication-
+eﬃcient, parallel algorithm to estimate their barycenter. Our method can be parallelized to J worker
+machines, and the messages sent between machines are merely single integers. We require a discrete
+approximation only of the barycenter itself, making our algorithm semi-discrete, and our algorithm
+scales well to ﬁne approximations (e.g. n ≈ 106). In contrast to previous work, we provide guarantees
+on the quality of the approximation as n increases. These rates apply to the general setting in
+which the µj’s are deﬁned on manifolds, with applications to directional statistics [Sra, 2016]. Our
+algorithm is based on stochastic gradient descent as in [Genevay et al., 2016] and hence is robust to
+gradual changes in the distributions: as the µj’s change over time, we maintain a moving estimate
+of their barycenter, a task which is not possible using current methods without solving a large linear
+program in each iteration.
+
+We emphasize that we aggregate the input distributions into a summary, the barycenter, which
+is itself a distribution. Instead of performing any single domain-speciﬁc task such as clustering or
+estimating an expectation, we can simply compute the barycenter of the inputs and process it later
+any arbitrary way. This generality coupled with the eﬃciency and parallelism of our algorithm yields
+immediate applications in ﬁelds from large scale Bayesian inference to e.g. streaming sensor fusion.
+
+Contributions. 1. We give a communication-eﬃcient and fully parallel algorithm for computing
+the barycenter of a collection of distributions. Although our algorithm is semi-discrete, we stress
+that the input measures can be continuous, and even nonstationary. 2. We give bounds on the
+quality of the recovered barycenter as our discretization becomes ﬁner. These are the ﬁrst such
+bounds we are aware of, and they apply to measures on arbitrary compact and connected manifolds.
+3. We demonstrate the practical eﬀectiveness of our method, both in tracking moving distributions
+
+2
+
+on a sphere, as well as in a real large-scale Bayesian inference task.
+
+1.1 Related work
+
+Optimal transport. A comprehensive treatment of optimal transport and its many applications
+is beyond the scope of our work. We refer the interested reader to the detailed monographs by Villani
+[2009] and Santambrogio [2015]. Fast algorithms for optimal transport have been developed in recent
+years via Sinkhorn’s algorithm [Cuturi, 2013] and in particular stochastic gradient methods [Genevay
+et al., 2016], on which we build in this work. These algorithms have enabled several applications
+of optimal transport and Wasserstein metrics to machine learning, for example in supervised
+learning [Frogner et al., 2015], unsupervised learning [Montavon et al., 2016; Arjovsky et al., 2017],
+and domain adaptation [Courty et al., 2016]. Wasserstein barycenters in particular have been
+applied to a wide variety of problems including fusion of subset posteriors [Srivastava et al., 2015a],
+distribution clustering [Ye et al., 2017], shape and texture interpolation [Solomon et al., 2015; Rabin
+et al., 2011], and multi-target tracking [Baum et al., 2015].
+
+When the distributions µj are discrete, transport barycenters can be computed relatively ef-
+ﬁciently via either a sparse linear program [Anderes et al., 2016] or regularized projection-based
+methods [Cuturi and Doucet, 2014; Benamou et al., 2015; Ye et al., 2017; Cuturi and Peyré, 2016].
+In settings like posterior inference, however, the distributions µj are likely continuous rather than
+discrete, and the most obvious viable approach requires discrete approximation of each µj. The result-
+ing discrete barycenter converges to the true, continuous barycenter as the approximations become
+ﬁner [Boissard et al., 2015; Kim and Pass, 2017], but the rate of convergence is not well-understood,
+and ﬁnely approximating each µj yields a very large linear program.
+
+Scalable Bayesian inference. Scaling Bayesian inference to large datasets has become an im-
+portant topic in recent years. There are many approaches to this, ranging from parallel Gibbs
+sampling [Newman et al., 2008; Johnson et al., 2013] to stochastic and streaming algorithms [Welling
+and Teh, 2011; Chen et al., 2014; Hoﬀman et al., 2013; Broderick et al., 2013]. For a more complete
+picture, we refer the reader to the survey by Angelino et al. [2016].
+
+One promising method is via subset posteriors: instead of sampling from the posterior distribution
+given by the full data, the data is split into smaller tractable subsets. Performing inference on each
+subset yields several subset posteriors, which are biased but can be combined via their Wasserstein
+barycenter [Srivastava et al., 2015a], with provable guarantees on approximation quality. This is in
+contrast to other methods that rely on summary statistics to estimate the true posterior [Minsker
+et al., 2014; Neiswanger et al., 2914] and that require additional assumptions. In fact, our algorithm
+works with arbitrary measures and on manifolds.
+
+2 Background
+
+Let (X , d) be a metric space. Given two probability measures µ ∈ P(X ) and ν ∈ P(X ) and a cost
+function c : X × X → [0, ∞), the Kantorovich optimal transport problem asks for a solution to
+
+(cid:26)(cid:90)
+
+inf
+
+X ×X
+
+c(x, y)dγ(x, y) : γ ∈ Π(µ, ν)
+
+(1)
+
+(cid:27)
+
+where Π(µ, ν) is the set of measures on the product space X × X whose marginals evaluate to µ and
+ν, respectively.
+
+3
+
+Under mild conditions on the cost function (lower semi-continuity) and the underlying space
+(completeness and separability), problem (1) admits a solution Santambrogio [2015]. Moreover, if the
+cost function is of the form c(x, y) = d(x, y)p, the optimal transportation cost is a distance metric
+on the space of probability measures. This is known as the Wasserstein distance and is given by
+
+Wp(µ, ν) =
+
+(cid:18)
+
+(cid:90)
+
+inf
+γ∈Π(µ,ν)
+
+X ×X
+
+d(x, y)pdγ(x, y)
+
+.
+
+(cid:19)1/p
+
+Optimal transport has recently attracted much attention in machine learning and adjacent
+communities [Frogner et al., 2015; Montavon et al., 2016; Courty et al., 2016; Peyré et al., 2016;
+Rolet et al., 2016; Arjovsky et al., 2017]. When µ and ν are discrete measures, problem (2) is a linear
+program, although faster regularized methods based on Sinkhorn iteration are used in practice Cuturi
+[2013]. Optimal transport can also be computed using stochastic ﬁrst-order methods Genevay et al.
+[2016].
+
+Now let µ1, . . . , µJ be measures on X . The Wasserstein barycenter problem, introduced by Agueh
+
+and Carlier [2011], is to ﬁnd a measure ν ∈ P(X ) that minimizes the functional
+
+F [ν] :=
+
+W 2
+
+2 (µj, ν).
+
+1
+J
+
+J
+(cid:88)
+
+j=1
+
+Finding the barycenter ν is the primary problem we address in this paper. When each µj is a discrete
+measure, the exact barycenter can be found via linear programming [Anderes et al., 2016], and many
+of the regularization techniques apply for approximating it [Cuturi and Doucet, 2014; Cuturi and
+Peyré, 2016]. However, the problem size grows quickly with the size of the support. When the
+measures µj are truly continuous, we are aware of only one strategy: sample from each µj in order
+to approximate it by the empirical measure, and then solve the discrete barycenter problem.
+
+We directly address the problem of computing the barycenter when the input measures can be
+continuous. We solve a semi-discrete problem, where the target measure is a ﬁnite set of points, but
+we do not discretize any other distribution.
+
+3 Algorithm
+
+We ﬁrst provide some background on the dual formulation of optimal transport. Then we derive
+a useful form of the barycenter problem, provide an algorithm to solve it, and prove convergence
+guarantees. Finally, we demonstrate how our algorithm can easily be parallelized.
+
+3.1 Mathematical preliminaries
+
+The primal optimal transport problem (1) admits a dual problem [Santambrogio, 2015]:
+
+OTc(µ, ν) =
+
+sup
+v 1-Lipschitz
+
+{EY ∼ν[v(Y )] + EX∼µ[vc(X)]} ,
+
+where vc(x) = inf y∈X {c(x, y) − v(y)} is the c-transform of v [Villani, 2009]. When ν = (cid:80)n
+is discrete, problem (4) becomes the semi-discrete problem
+
+i=1 wiδyi
+
+OTc(µ, ν) = max
+v∈Rn
+
+{(cid:104)w, v(cid:105) + EX∼µ[h(X, v)]} ,
+
+4
+
+(2)
+
+(3)
+
+(4)
+
+(5)
+
+where we deﬁne h(x, v) = vc(x) = mini=1,...,n{c(x, yi) − vi}. Semi-discrete optimal transport admits
+eﬃcient algorithms [Lévy, 2015; Kitagawa et al., 2016]; Genevay et al. [2016] in particular observed
+that given sample oracle access to µ, the semi-discrete problem can be solved via stochastic gradient
+ascent. Hence optimal transport distances can be estimated even in the semi-discrete setting.
+
+3.2 Deriving the optimization problem
+
+Absolutely continuous measures can be approximated arbitrarily well by discrete distributions with
+respect to Wasserstein distance [Kloeckner, 2012]. Hence one natural approach to the barycenter
+problem (3) is to approximate the true barycenter via discrete approximation: we ﬁx n support
+points {yi}n
+i=1 ∈ X and search over assignments of the mass wi on each point yi. In this way we wish
+to ﬁnd the discrete distribution νn = (cid:80)n
+
+i=1 wiδyi with support on those n points which optimizes
+
+min
+w∈∆n
+
+F (w) = min
+w∈∆n
+
+W 2
+
+2 (µj, νn)
+
+1
+J
+
+J
+(cid:88)
+
+j=1
+
+
+
+
+
+
+1
+J
+
+J
+(cid:88)
+
+j=1
+
+= min
+w∈∆n
+
+max
+vj ∈Rn
+
+(cid:8)(cid:104)w, vj(cid:105) + EXj ∼µj [h(Xj, vj)](cid:9)
+
+
+
+
+
+
+.
+
+where we have deﬁned F (w) := F [νn] = F [(cid:80)n
+tion (5). in Section 4, we discuss the eﬀect of diﬀerent choices for the support points {yi}n
+
+i=1.
+Noting that the variables vj are uncoupled, we can rearrange to get the following problem:
+
+i=1 wiδyi] and used the dual formulation from equa-
+
+min
+w∈∆n
+
+max
+v1,...,vJ
+
+1
+J
+
+J
+(cid:88)
+
+j=1
+
+(cid:2)(cid:104)w, vj(cid:105) + EXj ∼µj [h(Xj, vj)](cid:3) .
+
+Problem (8) is convex in w and jointly concave in the vj, and we can compute an unbiased gradient
+estimate for each by sampling Xj ∼ µj. Hence, we could solve this saddle-point problem via
+simultaneous (sub)gradient steps as in Nemirovski and Rubinstein [2005]. Such methods are simple
+to implement, but in the current form we must project onto the simplex ∆n at each iteration. This
+requires only O(n log n) time [Held et al., 1974; Michelot, 1986; Duchi et al., 2008] but makes it hard
+to decouple the problem across each distribution µj. Fortunately, we can reformulate the problem in
+a way that avoids projection entirely. By strong duality, Problem (8) can be written as
+
+max
+v1,...,vJ
+
+min
+w∈∆n
+
+
+
+
+
+
+= max
+v1,...,vJ
+
+min
+i
+
+
+
+
+(cid:42)
+
+
+
+
+
+
+
+(cid:43)
+
+vj, w
+
++
+
+1
+J
+
+J
+(cid:88)
+
+j=1
+
+1
+J
+
+J
+(cid:88)
+
+j=1
+
+1
+J
+
+J
+(cid:88)
+
+j=1
+
+vj
+i
+
+
+
+
+
+
++
+
+1
+J
+
+J
+(cid:88)
+
+j=1
+
+EXj ∼µj [h(Xj, vj)]
+
+EXj ∼µj [h(Xj, vj)]
+
+
+
+
+
+
+
+
+
+
+
+.
+
+(6)
+
+(7)
+
+(8)
+
+(9)
+
+(10)
+
+Note how the variable w disappears: for any ﬁxed vector b, minimization of (cid:104)b, w(cid:105) over w ∈ ∆n is
+equivalent to ﬁnding the minimum element of b. The optimal w can also be computed in closed form
+when the barycentric cost is entropically regularized as in [Bigot et al., 2016], which may yield better
+convergence rates but requires dense updates that, e.g., need more communication in the parallel
+setting. In either case, we are left with a concave maximization problem in v1, . . . , vJ , to which
+
+5
+
+we can directly apply stochastic gradient ascent. Unfortunately the gradients are still not sparse
+and decoupled. We obtain sparsity after one ﬁnal transformation of the problem: by replacing each
+(cid:80)J
+i with a variable si and enforcing this equality with a constraint, we turn problem (10) into
+
+j=1 vj
+
+the constrained problem
+
+max
+s,v1,...,vJ
+
+1
+J
+
+J
+(cid:88)
+
+j=1
+
+(cid:20) 1
+J
+
+min
+i
+
+(cid:21)
+si + EXj ∼µj [h(Xj, vj)]
+
+s.t.
+
+s =
+
+J
+(cid:88)
+
+j=1
+
+vj.
+
+(11)
+
+3.3 Algorithm and convergence
+
+We can now solve this problem via stochastic pro-
+jected subgradient ascent. This is described in Al-
+gorithm 1; note that the sparse adjustments after
+the gradient step are actually projections onto the
+constraint set with respect to the (cid:96)1 norm. Derivation
+of this sparse projection step is given rigorously in
+Appendix A. Not only do we have an optimization
+algorithm with sparse updates, but we can even re-
+cover the optimal weights w from standard results in
+online learning [Freund and Schapire, 1999]. Specif-
+ically, in a zero-sum game where one player plays a
+no-regret learning algorithm and the other plays a
+best-response strategy, the average strategies of both
+players converge to optimal:
+
+Theorem 3.1. Perform T iterations of stochastic
+subgradient ascent on u = (s, v1, . . . , vJ ) as in Algo-
+rithm 1, and use step size γ = R
+√
+T
+index chosen at iteration t, and write wT = 1
+T
+
+(cid:80)T
+
+4
+
+Algorithm 1 Subgradient Ascent
+
+s, v1, . . . , vJ ← 0n
+loop
+
+− γ
+
+Draw j ∼ Unif[1, . . . , J]
+Draw x ∼ µj
+iW ← argmini{c(x, yi) − vj
+i }
+iM ← argmini si
+vj
+← vj
+iW
+iW
+siM ← siM + γ/J
+← vj
+vj
++ γ/2
+iW
+iW
+vj
+← vj
++ γ/(2J)
+iM
+iM
+siW ← siW − γ/2
+siM ← siM − γ/(2J)
+
+(cid:46) Gradient update
+(cid:46) Gradient update
+(cid:46) Projection
+(cid:46) Projection
+(cid:46) Projection
+(cid:46) Projection
+
+end loop
+
+, assuming (cid:107)ut − u∗(cid:107)1 ≤ R for all t. Let it be the minimizing
+
+t=1 eit. Then we can bound
+√
+
+E[F (wT ) − F (w∗)] ≤ 4R/
+
+T .
+
+(12)
+
+The expectation is with respect to the randomness in the subgradient estimates gt.
+
+Theorem 3.1 is proved in Appendix B. The proof combines the zero-sum game idea above,
+which itself comes from [Freund and Schapire, 1999], with a regret bound for online gradient
+descent [Zinkevich, 2003; Hazan, 2016].
+
+3.4 Parallel Implementation
+
+The key realization which makes our barycenter algorithm truly scalable is that the variables
+s, v1, . . . , vJ can be separated across diﬀerent machines.
+In particular, the “sum” or “coupling”
+variable s is maintained on a master thread which runs Algorithm 2, and each vj is maintained on a
+worker thread running Algorithm 3. Each projected gradient step requires ﬁrst selecting distribution
+j. The algorithm then requires computing only iW = argmini{c(xj, yi) − vj
+i } and iM = argmini si,
+and then updating s and vj in only those coordinates. Hence only a small amount of information
+(iW and iM ) need pass between threads.
+
+6
+
+Note also that this algorithm can be adapted to the
+parallel shared-memory case, where s is a variable shared
+between threads which make sparse updates to it. Here we
+will focus on the ﬁrst master/worker scenario for simplicity.
+Where are the bottlenecks? When there are n points
+in the discrete approximation, each worker’s task of com-
+puting argmini{c(xj, yi) − vj
+i } requires O(n) computations
+of c(x, y). The master must iteratively ﬁnd the minimum
+element siM in the vector s, then update siM , and decrease
+element siW . These can be implemented respectively as
+the “ﬁnd min”, “delete min” then “insert,” and “decrease
+min” operations in a Fibonacci heap. All these operations
+together take amortized O(log n) time. Hence, it takes
+O(n) time it for all J workers to each produce one gradient
+sample in parallel, and only O(J log n) time for the master
+to process them all. Of course, communication is not free,
+but the messages are small and our approach should scale
+well for J (cid:28) n.
+
+This parallel algorithm is particularly well-suited to the
+Wasserstein posterior (WASP) [Srivastava et al., 2015b]
+framework for merging Bayesian subset posteriors.
+In
+this setting, we split the dataset X1, . . . , Xk into J sub-
+sets S1, . . . , SJ each with k/J data points, distribute
+those subsets to J diﬀerent machines, then each machine
+runs Markov Chain Monte Carlo (MCMC) to sample
+from p(θ|Si), and we aggregate these posteriors via their
+barycenter. The most expensive subroutine in the worker
+thread is actually sampling from the posterior, and ev-
+erything else is cheap in comparison. In particular, the
+machines need not even share samples from their respective
+MCMC chains.
+
+Algorithm 2 Master Thread
+
+Input: index j, distribution µ, atoms
+{yi}i=1,...,N , number J of distribu-
+tions, step size γ
+Output: barycenter weights w
+c ← 0n
+s ← 0n
+iM ← 1
+loop
+
+iW ← message from worker j
+Send iM to worker j
+ciM ← ciM + 1
+siM ← siM + γ/(2J)
+siW ← siW − γ/2
+iM ← argmini si
+
+end loop
+return w ← c/((cid:80)n
+
+i=1 ci)
+
+Algorithm 3 Worker Thread
+
+Input: index j, distribution µ, atoms
+{yi}i=1,...,N , number J of distribu-
+tions, step size γ
+v ← 0n
+loop
+
+Draw x ∼ µ
+iW ← argmini{c(x, yi) − vi}
+Send iW to master
+iM ← message from master
+viM ← viM + γ/(2J)
+viW ← viW − γ/2
+
+end loop
+
+One subtlety is that selecting worker j truly uniformly
+at random each iteration requires more synchronization,
+hence our gradient estimates are not actually independent as usual. Selecting worker threads
+as they are available will fail to yield a uniform distribution over j, as at the moment worker j
+ﬁnishes one gradient step, the probability that worker j is the next available is much less than
+1/J: worker j must resample and recompute iW , whereas other threads would have a head start.
+If workers all took precisely the same amount of time, the ordering of worker threads would be
+determinstic, and guarantees for without-replacement sampling variants of stochastic gradient ascent
+would apply [Shamir, 2016]. In practice, we have no issues with our approach.
+
+4 Consistency
+
+Prior methods for estimating the Wasserstein barycenter ν∗ of continuous measures µj ∈ P(X )
+involve ﬁrst approximating each µj by a measure µj,n that has ﬁnite support on n points, then
+
+7
+
+n of {µj,n} as a surrogate for ν∗. This approach is consistent, in that if
+computing the barycenter ν∗
+µj,n → µj as n → ∞, then also ν∗
+n → ν∗. This holds even if the barycenter is not unique, both in the
+Euclidean case [Boissard et al., 2015, Theorem 3.1] as well as when X is a Riemannian manifold [Kim
+and Pass, 2017, Theorem 5.4]. However, it is not known how fast the approximation ν∗
+n approaches
+the true barycenter ν∗, or even how fast the barycentric distance F [ν∗
+
+n] approaches F [νn].
+
+In practice, not even the approximation ν∗
+
+n is computed exactly: instead, support points are
+chosen and ν∗
+n is constrained to have support on those points. There are various heuristic methods for
+choosing these support points, ranging from mesh grids of the support, to randomly sampling points
+from the convex hull of the supports of µj , or even optimizing over the support point locations. Yet
+we are unaware of any rigorous guarantees on the quality of these approximations.
+
+While our approach still involves approximating the barycenter ν∗ by a measure ν∗
+
+n with ﬁxed
+support, we are able to provide bounds on the quality of this approximation as n → ∞. Speciﬁcally,
+we bound the rate at which F [ν∗
+n] → F [νn]. The result is intuitive, and appeals to the notion of an
+(cid:15)-cover of the support of the barycenter:
+
+Deﬁnition 4.1 (Covering Number). The (cid:15)-covering number of a compact set K ⊂ X , with respect
+to the metric g, is the minimum number N(cid:15)(K) of points {xi}N(cid:15)(K)
+∈ K needed so that for each
+y ∈ K, there is some xi with g(xi, y) ≤ (cid:15). The set {xi} is called an (cid:15)-covering.
+
+i=1
+
+Deﬁnition 4.2 (Inverse Covering Radius). Fix n ∈ Z+. We deﬁne the n-inverse covering radius
+of compact K ⊂ X as the value (cid:15)n(K) = inf{(cid:15) > 0 : N(cid:15)(K) ≤ n}, when n is large enough so the
+inﬁmum exists.
+
+Suppose throughout this section that K ⊂ Rd is endowed with a Riemannian metric g, where K
+has diameter D. In the speciﬁc case where g is the usual Euclidean metric, there is an (cid:15)-cover for
+K with at most C1(cid:15)−d points, where C1 depends only on the diameter D and dimension d [Shalev-
+Shwartz and Ben-David, 2014]. Reversing the inequality, K has an n-inverse covering radius of at
+most (cid:15) ≤ C2n−1/d when n takes the correct form.
+
+We now present and then prove our main result:
+
+n] − F [ν∗] ≤ O((cid:15)n(K) + n−1/d), where ν∗
+
+Theorem 4.1. Suppose the measures µj are supported on K, and suppose µ1 is absolutely continuous
+with respect to volume. Then the barycenter ν∗ is unique. Moreover, for each empirical approximation
+size n, if we choose support points {yi}i=1,...,n which constitute a 2(cid:15)n(K)-cover of K, it follows that
+n = (cid:80)n
+F [ν∗
+Proof. For any two measures η, η(cid:48) supported on K, we can bound W2(η, η(cid:48)) ≤ D: the worst-case
+η, η(cid:48) are point masses distance D apart, so that the transport plan sends all the mass a distance of
+D.
+
+i δyi for w∗ solving Problem (8).
+
+i=1 w∗
+
+It follows that |W2(µ, νn) + W2(µ, ν)| ≤ 2D and therefore
+
+|W 2
+
+2 (µ, νn) − W 2
+
+2 (µ, ν)| ≤ 2D · |W2(µ, νn) − W2(µ, ν)|
+
+≤ 2D · W2(νn, ν)
+
+(13)
+
+(14)
+
+8
+
+by the triangle inequality. Summing over all µ = µj, we ﬁnd that
+
+|F [νn] − F [ν]| ≤
+
+|W 2
+
+2 (µj, νn) − W 2
+
+2 (µj, ν)|
+
+1
+J
+
+1
+J
+
+J
+(cid:88)
+
+j=1
+
+J
+(cid:88)
+
+j=1
+
+≤
+
+2D · W2(νn, ν) = 2D · W2(νn, ν),
+
+completing the proof.
+
+n, ν∗) ≤ 2(cid:15)n(K) and therefore F [ν∗
+
+Remark 4.1. Absolute continuity is only needed to reason about approximating the barycenter
+with an N point discrete distribution. If the input distributions are themselves discrete distributions,
+so is the barycenter, and we can strengthen our result. For large enough n, we actually have
+W2(ν∗
+n] − F [ν∗] ≤ O((cid:15)n(K)).
+Corollary 4.1 (Convergence to ν∗). Suppose the measures µj are supported on K, with µ1 absolutely
+continuous with respect to volume. Let ν∗ be the unique minimizer of F . Then we can choose support
+points {yi}i=1,...,n such that some subsequence of ν∗
+Proof. By Theorem 4.1, we can choose support points so that F [ν∗
+sequence ν∗
+us to pass to the limit limk→∞ F [ν∗
+] = F [limk→∞ ν∗
+]. On the other hand, limk→∞ F [ν∗
+nk
+nk
+nk
+and F is strictly convex Kim and Pass [2017], thus ν∗
+nk
+
+n] → F [ν∗]. By compactness, the
+→ ν for some measure ν. Continuity of F allows
+] = F [ν∗],
+
+n admits a convergent subsequence ν∗
+nk
+
+i δyi converges weakly to ν∗.
+
+→ ν∗ weakly.
+
+n = (cid:80)n
+
+i=1 w∗
+
+Before proving Theorem 4.1, we need smoothness of the barycenter functional F with respect to
+
+Wasserstein-2 distance:
+
+Lemma 4.1. Suppose we are given measures {µj}J
+Then, F [νn] → F [ν], with |F [νn] − F [ν]| ≤ 2D · W2(νn, ν).
+Proof of Theorem 4.1. Uniqueness of ν∗ follows from Theorem 2.4 of [Kim and Pass, 2017]. From
+Theorem 5.1 in [Kim and Pass, 2017] we know further that ν∗ is absolutely continuous with respect
+to volume.
+
+n=1 supported on K, with νn → ν.
+
+j=1, ν, and {νn}∞
+
+Let N > 0, and let νN be the discrete distribution on N points, each with mass 1/N , which
+minimizes W2(νN , ν∗). This distribution satisﬁes W2(νN , ν∗) ≤ CN −1/d [Kloeckner, 2012], where C
+depends on K, the dimension d, and the metric. With our “budget” of n support points, we can
+construct a 2(cid:15)n(K)-cover as long as n is suﬃciently large. Then deﬁne a distribution νn,N with
+support on the 2(cid:15)n(K)-cover as follows: for each x in the support of νN , map x to the closest point
+x(cid:48) in the cover, and add mass 1/N to x(cid:48). Note that this deﬁnes not only the distribution νn,N , but
+also a transport plan between νN and νn,N . This map moves N points of mass 1/N each a distance
+at most 2(cid:15)n(K), so we may bound W2(νn,N , νN ) ≤ (cid:112)N · 1/N · (2(cid:15)n(K))2 = 2(cid:15)n(K). Combining
+these two bounds, we see that
+
+W2(νn,N , ν∗) ≤ W2(νn,N , νN ) + W2(νN , ν∗)
+
+≤ 2(cid:15)n(K) + CN −1/d.
+
+For each n, we choose to set N = n, which yields W2(νn,n, ν∗) ≤ 2(cid:15)n(K) + Cn−1/d. Applying
+
+Lemma 4.1, and recalling that ν∗ is the minimizer of J, we have
+
+F [νn,n] − F [ν∗] ≤ 2D · (2(cid:15)n(K) + Cn−1/d) = O((cid:15)n(K) + n−1/d).
+
+9
+
+(15)
+
+(16)
+
+(17)
+
+(18)
+
+(19)
+
+However, we must have F [ν∗
+but ν∗
+
+n has weights chosen to minimize J. Thus we must also have
+
+n] ≤ F [νn,n], because both are measures on the same n point 2(cid:15)n(K)-cover,
+
+F [ν∗
+
+n] − F [ν∗] ≤ F [νn,n] − F [ν∗] ≤ O((cid:15)n(K) + n−1/d).
+
+The high-level view of the above result is that choosing support points yi to form an (cid:15)-cover with
+respect to the metric g, and then optimizing over their weights wi via our stochastic algorithm, will
+give us a consistent picture of the behavior of the true barycenter. Also note that the proof above
+requires an (cid:15)-cover only of the support of v∗, not all of K. In particular, an (cid:15)-cover of the convex hull
+of the supports of µj is suﬃcient, as this must contain the barycenter. Other heuristic techniques
+to eﬃciently focus a limited budget of n points only on the support of ν∗ are advantageous and
+justiﬁed.
+
+While Theorem 4.1 is a good start, ideally we would also be able to provide a bound on W2(ν∗
+n, ν∗).
+This would follow readily from sharpness of the functional F [ν], or even the discrete version F (w),
+but it is not immediately clear how to achieve such a result.
+
+5 Experiments
+
+We demonstrate the applicability of our method on two experiments, one synthetic and one per-
+forming a real inference task. Together, these showcase the positive traits of our algorithm: speed,
+parallelization, robustness to non-stationarity, applicability to non-Euclidean domains, and immediate
+performance beneﬁt to Bayesian inference. We implemented our algorithm in C++ using MPI, and
+our code is posted at github.com/mstaib/stochastic-barycenter-code. Full experiment details
+are given in Appendix C.
+
+5.1 Von Mises-Fisher Distributions with Drift
+
+We demonstrate computation and tracking of the barycenter of four drifting von Mises-Fisher
+distributions on the unit sphere S2. Note that W2 and the barycentric cost are now deﬁned with
+respect to geodesic distance on S2.
+
+The distributions are randomly centered, and we move the center of each distribution 3 × 10−5
+radians (in the same direction for all distributions) each time a sample is drawn. A snapshot of the
+results is shown in Figure 1. Our algorithm is clearly able to track the barycenter as the distributions
+move.
+
+5.2 Large Scale Bayesian Inference
+
+We run logistic regression on the UCI skin segmentation dataset Bhatt and Dhall. The 245057
+datapoints are colors represented in R3, each with a binary label determing whether that color is a
+skin color. We split consecutive blocks of the dataset into 127 subsets, and due to locality in the
+dataset, the data in each subsets is not identically distributed. Each subset is assigned one thread
+of an InﬁniBand cluster on which we simultaneously sample from the subset posterior via MCMC
+and optimize the barycenter estimate. This is in contrast to [Srivastava et al., 2015a], where the
+barycenter can be computed via a linear program (LP) only after all samplers are run.
+
+Since the full dataset is tractable, we can compare the two methods via W2 distance to the
+posterior of the full dataset, which we can estimate via the large-scale optimal transport algorithm
+
+10
+
+Figure 1: The Wasserstein barycenter of four von Mises-Fisher distributions on the unit sphere S2.
+From left to right, the ﬁgures show the initial distributions merging into the Wasserstein barycenter.
+As the input distributions are moved along parallel paths on the sphere, the barycenter accurately
+tracks the new locations as shown in the ﬁnal three ﬁgures.
+
+Figure 2: Convergence of our algorithm with n ≈ 104 for diﬀerent stepsizes. In each case we recover
+a better approximation than what was possible with the LP for any n, in as little as ≈ 30 seconds.
+
+in [Genevay et al., 2016] or by LP depending on the support size. For each method, we ﬁx n
+barycenter support points on a mesh determined by samples from the subset posteriors. After 317
+seconds, or about 10000 iterations per subset posterior, our algorithm has produced a barycenter on
+n ≈ 104 support points with W2 distance about 26 from the full posterior. Similarly competitive
+results hold even for n ≈ 105 or 106, though tuning the stepsize becomes more challenging. Even in
+the 106 case, no individual 16 thread node used more than 2GB of memory. For n ≈ 104, over a
+wide range of stepsizes we can in seconds approximate the full posterior better than is possible with
+the LP as seen in Figure 2 by terminating early.
+
+In comparsion, in Table 1 we attempt to compute the barycenter LP as in Srivastava et al. [2015a]
+via Mosek [ApS, 2017], for varying values of n. Even n = 480 is not possible on a system with 16GB
+of memory, and feasible values of n result in meshes too sparse to accurately and reliably approximate
+the barycenter. Speciﬁcally, there are several cases where n increases but the approximation quality
+actually decreases: the subset posteriors are spread far apart, and the barycenter is so small relative
+to the required bounding box that likely only one grid point is close to it, and how close this grid
+
+11
+
+Table 1: Number of support points n versus computation time and W2 distance to the true posterior.
+Compared to prior work, our algorithm handles much ﬁner meshes, producing much better estimates.
+
+Linear program from [Srivastava et al., 2015a]
+
+This paper
+
+n
+
+24
+
+40
+
+60
+
+84
+
+189
+
+320
+
+396
+
+480
+
+time (s)
+W2
+
+0.5
+41.1
+
+0.97
+59.3
+
+2.9
+50.0
+
+6.1
+34.3
+
+34
+44.3
+
+163
+53.7
+
+176
+45
+
+out of memory
+out of memory
+
+104
+
+317
+26.3
+
+point is depends on the speciﬁc mesh. To avoid this behavior, one must either use a dense grid (our
+approach), or invent a better method for choosing support points that will still cover the barycenter.
+In terms of compute time, entropy regularized methods may have faired better than the LP for ﬁner
+meshes but would still not give the same result as our method. Note also that the LP timings include
+only optimization time, whereas in 317 seconds our algorithm produces samples and optimizes.
+
+6 Conclusion and Future Directions
+
+We have proposed an original algorithm for computing the Wasserstein barycenter of arbitrary
+measures given a stream of samples. Our algorithm is communication-eﬃcient, highly parallel,
+easy to implement, and enjoys consistency results that, to the best of our knowledge, are new.
+Our method has immediate impact on large-scale Bayesian inference and sensor fusion tasks: for
+Bayesian inference in particular, we obtain far ﬁner estimates of the Wasserstein-averaged subset
+posterior (WASP) [Srivastava et al., 2015a] than was possible before, enabling faster and more
+accurate inference.
+
+There are many directions for future work: we have barely scratched the surface in terms of new
+applications of large-scale Wasserstein barycenters, and there are still many possible algorithmic
+improvements. One implication of Theorem 3.1 is that a faster algorithm for solving the concave
+problem (11) immediately yields faster convergence to the barycenter. Incorporating variance reduc-
+tion [Defazio et al., 2014; Johnson and Zhang, 2013] is a promising direction, provided we maintain
+communication-eﬃciency. Recasting problem (11) as distributed consensus optimization [Nedic and
+Ozdaglar, 2009; Boyd et al., 2011] would further help scale up the barycenter computation to huge
+numbers of input measures.
+
+Acknowledgements
+
+We thank the anonymous reviewers for their helpful suggestions. We also thank MIT Supercloud
+and the Lincoln Laboratory Supercomputing Center for providing computational resources. M. Staib
+acknowledges Government support under and awarded by DoD, Air Force Oﬃce of Scientiﬁc Research,
+National Defense Science and Engineering Graduate (NDSEG) Fellowship, 32 CFR 168a. J. Solomon
+acknowledges funding from the MIT Research Support Committee (“Structured Optimization for
+Geometric Problems”), as well as Army Research Oﬃce grant W911NF-12-R-0011 (“Smooth Modeling
+of Flows on Graphs”). This research was supported by NSF CAREER award 1553284 and The
+Defense Advanced Research Projects Agency (grant number N66001-17-1-4039). The views, opinions,
+and/or ﬁndings contained in this article are those of the author and should not be interpreted as
+
+12
+
+representing the oﬃcial views or policies, either expressed or implied, of the Defense Advanced
+Research Projects Agency or the Department of Defense.
+
+References
+
+M. Agueh and G. Carlier. Barycenters in the Wasserstein Space. SIAM J. Math. Anal., 43(2):
+
+904–924, January 2011. ISSN 0036-1410. doi: 10.1137/100805741.
+
+Ethan Anderes, Steﬀen Borgwardt, and Jacob Miller. Discrete Wasserstein barycenters: Optimal
+transport for discrete data. Math Meth Oper Res, 84(2):389–409, October 2016. ISSN 1432-2994,
+1432-5217. doi: 10.1007/s00186-016-0549-x.
+
+Elaine Angelino, Matthew James Johnson, and Ryan P. Adams. Patterns of scalable bayesian
+inference. Foundations and Trends R(cid:13) in Machine Learning, 9(2-3):119–247, 2016. ISSN 1935-8237.
+doi: 10.1561/2200000052. URL http://dx.doi.org/10.1561/2200000052.
+
+MOSEK ApS. The MOSEK optimization toolbox for MATLAB manual. Version 8.0.0.53., 2017.
+
+URL http://docs.mosek.com/8.0/toolbox/index.html.
+
+Martin Arjovsky, Soumith Chintala, and Léon Bottou. Wasserstein GAN. 2017.
+
+M. Baum, P. K. Willett, and U. D. Hanebeck. On Wasserstein Barycenters and MMOSPA Estimation.
+IEEE Signal Process. Lett., 22(10):1511–1515, October 2015. ISSN 1070-9908. doi: 10.1109/LSP.
+2015.2410217.
+
+J. Benamou, G. Carlier, M. Cuturi, L. Nenna, and G. Peyré. Iterative Bregman Projections for
+Regularized Transportation Problems. SIAM J. Sci. Comput., 37(2):A1111–A1138, January 2015.
+ISSN 1064-8275. doi: 10.1137/141000439.
+
+Rajen Bhatt and Abhinav Dhall. Skin segmentation dataset. UCI Machine Learning Repository.
+
+Jérémie Bigot, Elsa Cazelles, and Nicolas Papadakis. Regularization of barycenters in the Wasserstein
+
+space. arXiv:1606.01025 [math, stat], June 2016.
+
+Emmanuel Boissard, Thibaut Le Gouic, and Jean-Michel Loubes. Distribution’s template estimate
+with Wasserstein metrics. Bernoulli, 21(2):740–759, May 2015. ISSN 1350-7265. doi: 10.3150/
+13-BEJ585.
+
+Stephen Boyd, Neal Parikh, Eric Chu, Borja Peleato, and Jonathan Eckstein. Distributed optimization
+and statistical learning via the alternating direction method of multipliers. Foundations and
+Trends R(cid:13) in Machine Learning, 3(1):1–122, 2011.
+
+Tamara Broderick, Nicholas Boyd, Andre Wibisono, Ashia C Wilson, and Michael I Jordan. Streaming
+Variational Bayes.
+In C. J. C. Burges, L. Bottou, M. Welling, Z. Ghahramani, and K. Q.
+Weinberger, editors, Advances in Neural Information Processing Systems 26, pages 1727–1735.
+Curran Associates, Inc., 2013.
+
+Tianqi Chen, Emily Fox, and Carlos Guestrin. Stochastic gradient hamiltonian monte carlo. In Eric P.
+Xing and Tony Jebara, editors, Proceedings of the 31st International Conference on Machine
+Learning, volume 32 of Proceedings of Machine Learning Research, pages 1683–1691, Bejing, China,
+22–24 Jun 2014. PMLR. URL http://proceedings.mlr.press/v32/cheni14.html.
+
+13
+
+N. Courty, R. Flamary, D. Tuia, and A. Rakotomamonjy. Optimal Transport for Domain Adaptation.
+IEEE Trans. Pattern Anal. Mach. Intell., PP(99):1–1, 2016. ISSN 0162-8828. doi: 10.1109/
+TPAMI.2016.2615921.
+
+Marco Cuturi. Sinkhorn Distances: Lightspeed Computation of Optimal Transport. In C. J. C.
+Burges, L. Bottou, M. Welling, Z. Ghahramani, and K. Q. Weinberger, editors, Advances in Neural
+Information Processing Systems 26, pages 2292–2300. Curran Associates, Inc., 2013.
+
+Marco Cuturi and Arnaud Doucet. Fast Computation of Wasserstein Barycenters. pages 685–693,
+
+2014.
+
+Marco Cuturi and Gabriel Peyré. A Smoothed Dual Approach for Variational Wasserstein Problems.
+
+SIAM J. Imaging Sci., 9(1):320–343, January 2016. doi: 10.1137/15M1032600.
+
+Aaron Defazio, Francis Bach, and Simon Lacoste-Julien. Saga: A fast incremental gradient method
+with support for non-strongly convex composite objectives. In Advances in Neural Information
+Processing Systems, pages 1646–1654, 2014.
+
+John Duchi, Shai Shalev-Shwartz, Yoram Singer, and Tushar Chandra. Eﬃcient projections onto
+the l 1-ball for learning in high dimensions. In Proceedings of the 25th International Conference
+on Machine Learning, pages 272–279. ACM, 2008.
+
+Yoav Freund and Robert E. Schapire. Adaptive Game Playing Using Multiplicative Weights. Games
+and Economic Behavior, 29(1):79–103, October 1999. ISSN 0899-8256. doi: 10.1006/game.1999.
+0738.
+
+Charlie Frogner, Chiyuan Zhang, Hossein Mobahi, Mauricio Araya, and Tomaso A Poggio. Learning
+with a Wasserstein Loss. In C. Cortes, N. D. Lawrence, D. D. Lee, M. Sugiyama, and R. Gar-
+nett, editors, Advances in Neural Information Processing Systems 28, pages 2053–2061. Curran
+Associates, Inc., 2015.
+
+Aude Genevay, Marco Cuturi, Gabriel Peyré, and Francis Bach. Stochastic Optimization for
+Large-scale Optimal Transport. In D. D. Lee, M. Sugiyama, U. V. Luxburg, I. Guyon, and
+R. Garnett, editors, Advances in Neural Information Processing Systems 29, pages 3440–3448.
+Curran Associates, Inc., 2016.
+
+Elad Hazan. Introduction to Online Convex Optimization. OPT, 2(3-4):157–325, August 2016. ISSN
+
+2167-3888, 2167-3918. doi: 10.1561/2400000013.
+
+Michael Held, Philip Wolfe, and Harlan P. Crowder. Validation of subgradient optimization.
+Mathematical Programming, 6(1):62–88, December 1974. ISSN 0025-5610, 1436-4646. doi: 10.
+1007/BF01580223.
+
+Matthew D Hoﬀman, David M Blei, Chong Wang, and John William Paisley. Stochastic variational
+
+inference. Journal of Machine Learning Research, 14(1):1303–1347, 2013.
+
+Matthew Johnson, James Saunderson, and Alan Willsky. Analyzing hogwild parallel gaus-
+sian gibbs sampling.
+In C. J. C. Burges, L. Bottou, M. Welling, Z. Ghahramani,
+and K. Q. Weinberger, editors, Advances in Neural Information Processing Systems 26,
+Inc., 2013. URL http://papers.nips.cc/paper/
+pages 2715–2723. Curran Associates,
+5043-analyzing-hogwild-parallel-gaussian-gibbs-sampling.pdf.
+
+14
+
+Rie Johnson and Tong Zhang. Accelerating stochastic gradient descent using predictive variance
+
+reduction. In Advances in Neural Information Processing Systems, pages 315–323, 2013.
+
+Young-Heon Kim and Brendan Pass. Wasserstein barycenters over Riemannian manifolds. Advances
+in Mathematics, 307:640–683, February 2017. ISSN 0001-8708. doi: 10.1016/j.aim.2016.11.026.
+
+Jun Kitagawa, Quentin Mérigot, and Boris Thibert. Convergence of a Newton algorithm for
+
+semi-discrete optimal transport. arXiv:1603.05579 [cs, math], March 2016.
+
+Benoît Kloeckner. Approximation by ﬁnitely supported measures. ESAIM Control Optim. Calc.
+
+Var., 18(2):343–359, 2012. ISSN 1292-8119.
+
+Bruno Lévy. A Numerical Algorithm for L2 Semi-Discrete Optimal Transport in 3D. ESAIM
+Math. Model. Numer. Anal., 49(6):1693–1715, November 2015. ISSN 0764-583X, 1290-3841. doi:
+10.1051/m2an/2015055.
+
+C. Michelot. A ﬁnite algorithm for ﬁnding the projection of a point onto the canonical simplex
+ISSN 0022-3239, 1573-2878. doi:
+
+of ∝n. J Optim Theory Appl, 50(1):195–200, July 1986.
+10.1007/BF00938486.
+
+Stanislav Minsker, Sanvesh Srivastava, Lizhen Lin, and David Dunson. Scalable and Robust Bayesian
+
+Inference via the Median Posterior. In PMLR, pages 1656–1664, January 2014.
+
+Grégoire Montavon, Klaus-Robert Müller, and Marco Cuturi. Wasserstein Training of Restricted
+Boltzmann Machines. In D. D. Lee, M. Sugiyama, U. V. Luxburg, I. Guyon, and R. Garnett, editors,
+Advances in Neural Information Processing Systems 29, pages 3718–3726. Curran Associates, Inc.,
+2016.
+
+Angelia Nedic and Asuman Ozdaglar. Distributed subgradient methods for multi-agent optimization.
+
+IEEE Transactions on Automatic Control, 54(1):48–61, 2009.
+
+Willie Neiswanger, Chong Wang, and Eric P. Xing. Asymptotically exact, embarrassingly parallel
+mcmc. In Proceedings of the Thirtieth Conference on Uncertainty in Artiﬁcial Intelligence, UAI’14,
+pages 623–632, Arlington, Virginia, United States, 2914. AUAI Press. ISBN 978-0-9749039-1-0.
+URL http://dl.acm.org/citation.cfm?id=3020751.3020816.
+
+Arkadi Nemirovski and Reuven Y. Rubinstein. An Eﬃcient Stochastic Approximation Algorithm
+for Stochastic Saddle Point Problems. In Moshe Dror, Pierre L’Ecuyer, and Ferenc Szidarovszky,
+editors, Modeling Uncertainty, number 46 in International Series in Operations Research &
+Management Science, pages 156–184. Springer US, 2005. ISBN 978-0-7923-7463-3 978-0-306-48102-
+4. doi: 10.1007/0-306-48102-2_8.
+
+for
+
+David Newman, Padhraic Smyth, Max Welling, and Arthur U. Asuncion.
+
+inference
+and S. T. Roweis,
+pages 1081–1088. Curran Associates,
+3330-distributed-inference-for-latent-dirichlet-allocation.pdf.
+
+Distributed
+In J. C. Platt, D. Koller, Y. Singer,
+Information Processing Systems 20,
+Inc., 2008. URL http://papers.nips.cc/paper/
+
+editors, Advances in Neural
+
+latent dirichlet allocation.
+
+Gabriel Peyré, Marco Cuturi, and Justin Solomon. Gromov-Wasserstein Averaging of Kernel and
+
+Distance Matrices. In PMLR, pages 2664–2672, June 2016.
+
+15
+
+Julien Rabin, Gabriel Peyré, Julie Delon, and Marc Bernot. Wasserstein Barycenter and Its
+Application to Texture Mixing. In Scale Space and Variational Methods in Computer Vision,
+pages 435–446. Springer, Berlin, Heidelberg, May 2011. doi: 10.1007/978-3-642-24785-9_37.
+
+Sasha Rakhlin and Karthik Sridharan. Optimization, Learning, and Games with Predictable Se-
+quences. In C. J. C. Burges, L. Bottou, M. Welling, Z. Ghahramani, and K. Q. Weinberger, editors,
+Advances in Neural Information Processing Systems 26, pages 3066–3074. Curran Associates, Inc.,
+2013.
+
+Antoine Rolet, Marco Cuturi, and Gabriel Peyré. Fast Dictionary Learning with a Smoothed
+
+Wasserstein Loss. In PMLR, pages 630–638, May 2016.
+
+Filippo Santambrogio. Optimal Transport for Applied Mathematicians, volume 87 of Progress in
+Nonlinear Diﬀerential Equations and Their Applications. Springer International Publishing, Cham,
+2015. ISBN 978-3-319-20827-5 978-3-319-20828-2. doi: 10.1007/978-3-319-20828-2.
+
+Shai Shalev-Shwartz and Shai Ben-David. Understanding Machine Learning: From Theory to
+
+Algorithms. Cambridge university press, 2014.
+
+Ohad Shamir. Without-replacement sampling for stochastic gradient methods.
+
+In D. D. Lee,
+M. Sugiyama, U. V. Luxburg, I. Guyon, and R. Garnett, editors, Advances in Neural Information
+Processing Systems 29, pages 46–54. Curran Associates, Inc., 2016. URL http://papers.nips.
+cc/paper/6245-without-replacement-sampling-for-stochastic-gradient-methods.pdf.
+
+Justin Solomon, Fernando de Goes, Gabriel Peyré, Marco Cuturi, Adrian Butscher, Andy Nguyen, Tao
+Du, and Leonidas Guibas. Convolutional Wasserstein Distances: Eﬃcient Optimal Transportation
+on Geometric Domains. ACM Trans Graph, 34(4):66:1–66:11, July 2015. ISSN 0730-0301. doi:
+10.1145/2766963.
+
+Suvrit Sra. Directional Statistics in Machine Learning: A Brief Review. arXiv:1605.00316 [stat],
+
+May 2016.
+
+Sanvesh Srivastava, Volkan Cevher, Quoc Dinh, and David Dunson. WASP: Scalable Bayes via
+barycenters of subset posteriors. In Guy Lebanon and S. V. N. Vishwanathan, editors, Proceedings
+of the Eighteenth International Conference on Artiﬁcial Intelligence and Statistics, volume 38 of
+Proceedings of Machine Learning Research, pages 912–920, San Diego, California, USA, 09–12
+May 2015a. PMLR. URL http://proceedings.mlr.press/v38/srivastava15.html.
+
+Sanvesh Srivastava, Cheng Li, and David B. Dunson. Scalable Bayes via Barycenter in Wasserstein
+
+Space. arXiv:1508.05880 [stat], August 2015b.
+
+Cédric Villani. Optimal Transport: Old and New. Number 338 in Grundlehren der mathematischen
+
+Wissenschaften. Springer, Berlin, 2009. ISBN 978-3-540-71049-3. OCLC: ocn244421231.
+
+Max Welling and Yee W Teh. Bayesian learning via stochastic gradient langevin dynamics. In
+Proceedings of the 28th International Conference on Machine Learning (ICML-11), pages 681–688,
+2011.
+
+J. Ye, P. Wu, J. Z. Wang, and J. Li. Fast Discrete Distribution Clustering Using Wasserstein
+Barycenter With Sparse Support. IEEE Trans. Signal Process., 65(9):2317–2332, May 2017. ISSN
+1053-587X. doi: 10.1109/TSP.2017.2659647.
+
+16
+
+Yuchen Zhang, John C Duchi, and Martin J Wainwright. Communication-eﬃcient algorithms for
+
+statistical optimization. Journal of Machine Learning Research, 14:3321–3363, 2013.
+
+Yuchen Zhang, John Duchi, and Martin Wainwright. Divide and conquer kernel ridge regression: A
+distributed algorithm with minimax optimal rates. Journal of Machine Learning Research, 16:
+3299–3340, 2015. URL http://jmlr.org/papers/v16/zhang15d.html.
+
+Martin Zinkevich. Online convex programming and generalized inﬁnitesimal gradient ascent. In
+Proceedings of the 20th International Conference on Machine Learning (ICML-03), pages 928–936,
+2003.
+
+A Sparse Projections
+
+Our algorithms for solving the barycenter problem in the parallel setting relied on the ability to
+eﬃciently project the matrix A = (s, v1, . . . , vJ ) back onto the constraint set s = (cid:80)J
+j=1 vj. For the
+sake of completion, we include a proof that our sparse updates actually result in projection with
+respect to the (cid:96)1 norm.
+
+At any given iteration of gradient ascent, we start with some iterate A = (s, v1, . . . , vJ ) which
+does satisfy the constraint. Suppose we selected distribution j. The gradient estimate is a sparse
+n × (J + 1) matrix M which has Mu1 = 1/J and Mvj = −1, for some indices u and v, with column
+1 corresponding to s and column j corresponding to vj. After the gradient step with stepsize γ, we
+have A + γM . Now, our constraint can be written in matrix form as Az = 0, where
+
+and so the problem of projecting A + γM onto this constraint set can be written as
+
+Equivalently, we want to ﬁnd the matrix C solving
+
+z =
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+−1
+1
+...
+1
+
+,
+
+minB (cid:107)A + γM − B(cid:107)1
+Bz = 0.
+s.t.
+
+minC (cid:107)C(cid:107)1
+s.t.
+
+(A + γM + C)z = 0.
+
+Note that
+
+(A + γM + C)z = 0 ⇔ Cz = −γM z = γ
+
+(cid:19)
+
+eu + ev
+
+.
+
+(cid:18) 1
+J
+
+Consider the sparse matrix C given by Cu1 = −γ/(2J), Cuj = γ/(2J), Cv1 = γ/2, and Cvj = −γ/2.
+Deﬁne a sparse vector λ ∈ Rn by λu = λv = −1. We wish to show that the primal dual pair (C, λ)
+solves problem (22). We can do this directly by looking at the Karush–Kuhn–Tucker conditions. It
+is easy to check that C is primal feasible, so it remains only to show that
+
+0 ∈ ∂C((cid:107)C(cid:107)1 + λT Cz) ⇔ −zλT ∈ ∂C((cid:107)C(cid:107)1).
+
+17
+
+(20)
+
+(21)
+
+(22)
+
+(23)
+
+(24)
+
+The subgradients of the (cid:96)1 norm at C are matrices G which satisfy (cid:107)G(cid:107)∞ ≤ 1 and (cid:104)G, C(cid:105) = (cid:107)C(cid:107)1.
+It is easy to check that (cid:107)zλT (cid:107)∞ = 1. Finally,
+
+(cid:104)−zλT , C(cid:105) = −λT Cz = −γλT
+
+(cid:19)
+
+eu + ev
+
+(cid:18) 1
+J
+
+(cid:19)
+
++ 1
+
+= γ ·
+
+(cid:18) 1
+J
+= (cid:107)C(cid:107)1.
+
+(25)
+
+(26)
+
+(27)
+
+Hence after the gradient step we can project onto the feasible set with respect to (cid:96)1, simply by
+adding the sparse matrix C.
+
+B Stochastic Gradient Bound
+
+We ﬁrst need a lemma which gives a regret bound for online gradient ascent:
+
+Lemma B.1 (Adapted from [Hazan, 2016, Theorem 3.1]). Run online gradient ascent on concave
+functions ft with subgradients gt ∈ ∂ft(xt). Assume (cid:107)xt − x∗(cid:107) ≤ R for some optimizer x∗ of (cid:80)T
+t=1 ft,
+and assume E[(cid:107)gt(cid:107)] ≤ G. Using stepsize γ = R
+, the expected regret after T iterations is bounded
+√
+G
+by 2RG
+
+T .
+
+√
+
+T
+
+Proof of Theorem 3.1. This is adapted from [Freund and Schapire, 1999; Rakhlin and Sridharan,
+2013].
+
+Deﬁne f (s, v, w) = (cid:104)s, w(cid:105) + 1
+J
+
+EXj ∼µj [h(Xj, vj)] as in (11). For simplicity, concatenate s
+and v into a vector u, with f (u, w) = f (s, v, w). Write w∗(u) = argminw∈∆n(cid:104)s, w(cid:105) and note that our
+objective in Equation (11) is f (u) := f (u, w∗(u)).
+
+j=1
+
+(cid:80)J
+
+Recall the online optimization setup: at time step t we play ut, then receive ft and reward ft(ut),
+then update ut and repeat. Note that if ft is given by f (ut, w∗(ut)), then online gradient ascent on
+ft is eﬀectively subgradient ascent on f . Suppose we play online subgradient ascent and achieve
+average expected regret ε(T ) after T timesteps, where the expectation is with respect to the gradient
+estimates in the learning algorithm. Then by the deﬁnition of expected regret,
+
+ε(T ) ≥ E
+
+ft(u) −
+
+(cid:34)
+
+1
+T
+
+sup
+u
+
+T
+(cid:88)
+
+t=1
+
+1
+T
+
+T
+(cid:88)
+
+t=1
+
+(cid:35)
+
+(cid:34)
+
+ft(ut)
+
+= E
+
+1
+T
+
+sup
+v
+
+T
+(cid:88)
+
+t=1
+
+f (u, wt) −
+
+f (ut, wt)
+
+.
+
+(28)
+
+(cid:35)
+
+1
+T
+
+T
+(cid:88)
+
+t=1
+
+where we write wt = w∗(ut). Simultaneously, we have
+
+1
+T
+
+T
+(cid:88)
+
+t=1
+
+f (ut, wt) − inf
+w
+
+1
+T
+
+T
+(cid:88)
+
+t=1
+
+f (ut, w) ≤
+
+f (ut, wt) −
+
+f (ut, wt) = 0
+
+(29)
+
+because wt are each chosen optimally. Summing, we have
+
+1
+T
+
+T
+(cid:88)
+
+t=1
+
+(cid:35)
+
+(cid:34)
+
+E
+
+1
+T
+
+sup
+u
+
+T
+(cid:88)
+
+t=1
+
+f (u, wt) − inf
+w
+
+f (ut, w)
+
+≤ ε(T ).
+
+(30)
+
+1
+T
+
+T
+(cid:88)
+
+t=1
+
+1
+T
+
+T
+(cid:88)
+
+t=1
+
+18
+
+Now we merely need combine this with the standard bound:
+
+inf
+w
+
+1
+T
+
+T
+(cid:88)
+
+t=1
+
+f (ut, w) ≤ inf
+w
+
+f (uT , w) ≤ sup
+
+f (u, w)
+
+inf
+w
+
+v
+
+(31)
+
+(33)
+
+≤ inf
+w
+
+sup
+u
+
+f (u, w) ≤ sup
+
+f (u, wT ) ≤ sup
+u
+
+u
+
+f (u, wt).
+
+(32)
+
+1
+T
+
+T
+(cid:88)
+
+t=1
+
+The extreme bounds on either side of this chain of inequalities are within ε(T ), hence we also have
+
+(cid:20)
+
+E
+
+sup
+u
+
+f (u, wT ) − inf
+w
+
+sup
+u
+
+f (u, w)
+
+≤ ε(T ).
+
+(cid:21)
+
+By deﬁnition of f , the left hand side is precisely E[F (wT ) − F (w∗)]. Now, noting that our gradient
+estimates g are always sparse (we always have two elements of magnitude 1, so (cid:107)g(cid:107)1 = 2), we simply
+replace ε(T ) with the particular regret bound of Lemma B.1 for online gradient ascent.
+
+C Experiment details
+
+C.1 Von Mises-Fisher Distributions with Drift
+
+The distributions are randomly centered with concentration parameter κ = 30. To verify that the
+barycenter accurately tracks when the input distributions are non-stationary, we move the center of
+each distribution 3 × 10−5 radians (in the same direction for all distributions) each time a sample is
+drawn. A snapshot of the results is shown in Figure 1.
+
+We use a sliding window of T = 105 timesteps with step size γ = 1 and on N = 104 evenly-
+distributed support points. Each thread is run for 5 × 105 iterations on a separate thread of an 8
+core workstation. The total time is roughly 80 seconds, during which our algorithm has processed a
+total of 2 × 106 samples. Clearly our algorithm is eﬃcient and is able to perform the speciﬁed task.
+
+C.2 Large Scale Bayesian Inference
+
+Subset assignment. The skin segmentation dataset is given with positive samples grouped all
+together, then negative samples grouped together. To ensure even representation of positive and
+negative samples across all subsets, while simulating the non-i.i.d data setting, each subset is
+composed of a consecutive block of positive samples and one of negative samples.
+
+MCMC chains. We used a simple Metropolis-Hastings sampler with Gaussian proposal distribu-
+tion N (0, σ2I), for σ = 0.05. We used a very conservative 105 burn-in iterations, and afterwards
+took every ﬁfth sample.
+
+Mesh selection. During the burn-in phase, we compute a minimum axis-aligned bounding box
+containing all samples from all MCMC chains. Then, for a desired mesh size of n, we choose a
+granularity δ so that cutting each axis into evenly-spaced values diﬀering by δ results in approximately
+n points total. For Table 1 in particular, the bounding box was selected as roughly
+
+[−21.4, 114.4] × [−121.8, 42.9] × [−50.8, 6.1]
+
+19
+
+for the LP code, and
+
+[−21.4, 114.2] × [−121.5, 42.8] × [−50.7, 6.1]
+
+for an arbitrary n ≈ 104 instance of our stochastic algorithm. That these match so well supports the
+consistency of our implementation. The griddings assigned for the LPs are given in Table 2.
+
+Table 2: Grid sizes chosen for LP experiments.
+
+Optimization. We experimented with diﬀerent stepsizes in {0.01, 0.1, 1, 10, 100} for n in {103, 104, 105, 106}.
+As expected, more aggressive step sizes are needed as n grows, but competitive barycenter estimates
+were possible for all n given suﬃcient iterations. The 317 seconds value corresponds to 127 × 104
+iterations total, or 10000 per sampler. The barycenter estimate wT = 1
+t=1 eit was maintained
+T
+over all 127 × 104 iterations. We found that it is sometimes helpful to use a sliding window, to
+quicker move away from initial bad barycenter estimates.
+
+(cid:80)T
+
+Error metric. We stored 104 samples from the true posterior, and computed the W2 distance
+between these samples and each candidate barycenter.
+
+n
+
+grid dimensions
+
+24
+40
+60
+84
+189
+320
+396
+480
+
+3 × 4 × 2
+4 × 5 × 2
+5 × 6 × 2
+6 × 7 × 2
+7 × 9 × 3
+8 × 10 × 4
+9 × 11 × 4
+10 × 12 × 4
+
+20
+

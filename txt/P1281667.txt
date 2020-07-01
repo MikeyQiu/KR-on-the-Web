@@ -1,0 +1,2157 @@
+Probabilistic Recurrent State-Space Models
+
+Andreas Doerr 1 2 Christian Daniel 1 Martin Schiegg 1 Duy Nguyen-Tuong 1 Stefan Schaal 2 3 Marc Toussaint 4
+Sebastian Trimpe 2
+
+Abstract
+
+given by
+
+8
+1
+0
+2
+ 
+b
+e
+F
+ 
+0
+1
+ 
+ 
+]
+L
+M
+
+.
+t
+a
+t
+s
+[
+ 
+ 
+2
+v
+5
+9
+3
+0
+1
+.
+1
+0
+8
+1
+:
+v
+i
+X
+r
+a
+
+State-space models (SSMs) are a highly expres-
+sive model class for learning patterns in time se-
+ries data and for system identiﬁcation. Determin-
+istic versions of SSMs (e.g. LSTMs) proved ex-
+tremely successful in modeling complex time se-
+ries data. Fully probabilistic SSMs, however, are
+often found hard to train, even for smaller prob-
+lems. To overcome this limitation, we propose a
+novel model formulation and a scalable training
+algorithm based on doubly stochastic variational
+inference and Gaussian processes. In contrast to
+existing work, the proposed variational approxi-
+mation allows one to fully capture the latent state
+temporal correlations. These correlations are the
+key to robust training. The effectiveness of the
+proposed PR-SSM is evaluated on a set of real-
+world benchmark datasets in comparison to state-
+of-the-art probabilistic model learning methods.
+Scalability and robustness are demonstrated on a
+high dimensional problem.
+
+1. Introduction
+
+System identiﬁcation, i.e. learning dynamics models from
+data (Ljung, 1998; 2010), is a key ingredient of model-
+predictive control (Camacho & Alba, 2013) and model-
+based reinforcement learning (RL) (Deisenroth & Ras-
+mussen, 2011; Doerr et al., 2017b). State-Space Models
+(SSMs) are one popular class of representations (Billings,
+2013), which describe a system with input ut and output yt
+in terms of a latent Markovian state xt. Based on a transi-
+tion model f and an observation model g, as well as process
+and measurement noise (cid:15)t and γt, a time-discrete SSM is
+
+1Bosch Center for Artiﬁcial Intelligence, Renningen, Germany
+2Max Planck Institute for Intelligent Systems, Stuttgart/T¨ubingen,
+Germany 3Computational Learning and Motor Control Lab, Uni-
+versity of Southern California, USA 4Machine Learning and
+Robotics Lab, University of Stuttgart, Germany. Correspondence
+to: Andreas Doerr <andreasdoerr@gmx.net>.
+
+xt+1 = f (xt, ut) + (cid:15)t ,
+yt = g(xt, ut) + γt .
+
+(1)
+
+Typically, in real systems, the latent state xt cannot be mea-
+sured directly but has to be inferred from a series of noisy
+output observations. For linear SSMs, this inference prob-
+lem and the model learning can be solved simultaneously by
+subspace identiﬁcation (Van Overschee & De Moor, 2012).
+Efﬁcient methods also exist for the deterministic, but non-
+linear counterpart, e.g. recurrent neural networks (RNNs)
+(Hochreiter & Schmidhuber, 1997).
+
+However, for tasks such as learning control policies, proba-
+bilistic models enable safe learning and alleviate model bias
+(Deisenroth & Rasmussen, 2011). Robust training of proba-
+bilistic, non-linear SSMs is a challenging and only partially
+solved problem, especially for higher dimensional systems
+(Frigola et al., 2013; 2014; Eleftheriadis et al., 2017; Svens-
+son & Sch¨on, 2017). This paper proposes the Probabilistic
+Recurrent State-Space Model 1 (PR-SSM2), a framework
+which tackles the key challenges preventing robust training
+of probabilistic, non-linear SSMs. PR-SSM takes inspira-
+tion from RNN model learning. In particular, the latent state
+transition model is unrolled over time, therefore accounting
+for temporal correlations whilst simultaneously allowing
+learning by backpropagation through time and mitigating
+the problem of latent state initialization. Grounded in the
+theory of Gaussian Processes (GPs), the proposed method
+enables probabilistic model predictions, inferring complex
+latent state distributions, and principled model complexity
+regularization. Furthermore, we propose an adapted form
+of a recognition model for the initial state distribution. This
+facilitates scalability through batch learning and learning of
+slow or unstable system dynamics.
+
+In summary, the key contributions of this paper are:
+
+• Combining gradient-based and sample-based inference
+for efﬁcient learning of nonlinear Gaussian process
+state-space models.
+
+• Tractable variational approximation, maintaining the
+
+1Code available after publication at: https://github.
+
+com/andreasdoerr/PR-SSM .
+
+2Pronounced prism.
+
+Probabilistic Recurrent State-Space Models
+
+true latent state posterior and temporal correlations.
+• Doubly stochastic inference scheme for scalability.
+• Recognition model, which allows robust training and
+prediction by initializing the latent state distribution.
+
+Together, these contributions allow for robust training of the
+PR-SSM. The proposed framework is evaluated on a set of
+real-world system identiﬁcation datasets and benchmarked
+against a range of state-of-the art methods.
+
+2. Related Work
+
+Modeling the behavior of systems with only partially observ-
+able states has been an active ﬁeld of research for many years
+and several schools of thought have emerged. Representa-
+tions range from SSMs (Van Overschee & De Moor, 2012)
+over Predictive State Representations (PSRs) (Littman &
+Sutton, 2002; Singh et al., 2003; Rudary & Singh, 2004) to
+autoregressive models (Murray-Smith & Girard, 2001; Gi-
+rard et al., 2003; Likar & Kocijan, 2007; Billings, 2013), as
+well as hybrid versions combining these approaches (Mattos
+et al., 2015; 2016; Doerr et al., 2017a).
+
+Autoregressive (history-based) methods avoid the complex
+inference of a latent state and instead directly learn a map-
+ping from a history of h past inputs and observations to
+the next observation, i.e. yt+1 = f (yt:t−h, ut:t−h). These
+models face the issue of feeding back observation noise into
+the dynamics model. Recent work addresses this problem
+by either actively accounting for input noise (McHutchon &
+Rasmussen, 2011) or reverting to a hybrid, autoregressive
+formulation in a latent, but noise free state (Mattos et al.,
+2016; Doerr et al., 2017a). Such models can be made deep
+and trained in a recurrent manner as presented in (Mattos
+et al., 2015). In theory, a horizon h identical to the true
+latent state dimensionality (dimension of xt) is sufﬁcient to
+model all relevant dependencies of the system under consid-
+eration (Ljung, 1998). In practice, however, autoregressive
+models typically need a much larger history horizon to cope
+with noisy observations and arbitrary sampling frequencies.
+
+Thus, in this paper, we focus on SSMs based on a compact,
+Markovian state representations. Furthermore, SSMs allow
+the direct application of many existing control algorithms,
+which rely on the explicit representation of the latent state.
+Within the ﬁeld of latent state models, exact solutions for
+state inference and model learning are known for linear
+SSMs and can be obtained by the well known Kalman ﬁl-
+ter/smoother (Kalman, 1960) and subspace identiﬁcation
+(Van Overschee & De Moor, 2012). In the case of non-
+linear latent state transition dynamics, both deterministic
+and probabilistic variants are active ﬁelds of research.
+
+Deterministic variants such as Long Short-Term Memory
+(LSTM) models have been shown to be powerful repre-
+sentations for tasks such as natural language processing
+
+(Venugopalan et al., 2014) or text understanding (Sutskever
+et al., 2011). However, for the purpose of system identiﬁca-
+tion and control, probabilistic predictions are often required
+to make model errors explicit (Deisenroth & Rasmussen,
+2011). PR-SSM learning can be interpreted as a probabilis-
+tic version of the learning procedure in these deep recurrent
+models. Both procedures share the explicit unrolling of tran-
+sition and observation model. Errors between the predicted
+and the observed system output are propagated back over
+time. Therefore, the transition dynamics is to be learned but
+the latent state (distribution) is implicitly given. This way,
+the challenging initialization and optimization of latent state
+variables is prevented. In contrast to deep recurrent models,
+the PR-SSM loss and model regularization is automatically
+obtained from the model. Furthermore, PR-SSMs obtain
+predictive distributions and the proposed initial state recog-
+nition model facilitates learning on shorter sub-trajectories
+and unstable systems, which is not possible in deep recurrent
+models.
+
+Gaussian Process State-Space Models (GP-SSMs) are a pop-
+ular class of probabilistic SSMs (Wang et al., 2008; Ko &
+Fox, 2009; Turner et al., 2010; Frigola et al., 2013; 2014;
+Eleftheriadis et al., 2017). The use of GPs allows for a fully
+Bayesian treatment of the modeling problem resulting in
+an automatic complexity trade-off, which regularizes the
+learning problem. Filtering and smoothing in GP-SSMs,
+has already been covered extensively: deterministic (e.g.
+linearization) as well as stochastic (e.g. particles) meth-
+ods are presented in (Ko & Fox, 2009; Deisenroth et al.,
+2012). These methods, however, assume an established sys-
+tem model which is generally not available without prior
+knowledge. In this work, the latent state smoothing distribu-
+tion is given implicitly and optimized jointly during model
+learning.
+
+Approaches to probabilistic GP-SSMs mainly differ in their
+approximations to the model’s joint distribution (e.g. when
+solving for the smoothing distribution or for the observa-
+tion likelihood). One class of approaches aims to solve for
+the true distribution which requires sample-based methods,
+e.g. Particle Markov Chain Monte Carlo (PMCMC), as in
+(Frigola et al., 2013; 2014). These methods are close to ex-
+act but computationally inefﬁcient and intractable for higher
+latent state dimensions or larger datasets. A second class of
+approaches is based on variational inference and mean ﬁeld
+approximations (Mattos et al., 2015; F¨oll et al., 2017). These
+methods, however, operate on latent autoregressive models
+which can be initialized by the observed output time series,
+such that the learned latent representation acts as a smoothed
+version of the observations. In Markovian latent spaces, no
+such prior information is available and therefore initializa-
+tion is non-trivial. Model optimization based on mean ﬁeld
+approximations empirically leads to highly suboptimal local
+solutions. Bridging the gap between both classes, recent
+
+Probabilistic Recurrent State-Space Models
+
+methods strive to recover (temporal) latent state structure. In
+(Eleftheriadis et al., 2017), a linear, time-varying latent state
+structure is enforced as a tractable compromise between
+the true non-linear dependencies and no dependencies as
+in mean ﬁeld variational inference. However, to facilitate
+learning, a complex recognition model over the linear time-
+varying dynamics is required. In contrast, the proposed
+PR-SSM can efﬁciently incorporate the true dynamics by
+combining sampling- and gradient-based learning.
+
+3. Gaussian Process State-Space Model
+
+This section presents the general model background for GP-
+SSMs. Following a short recap of GPs in Sec. 3.1 and a
+speciﬁc sparse GP prior in Sec. 3.2, PR-SSM as one particu-
+lar GP-SSM is introduced in Sec. 3.3.
+
+3.1. Gaussian Process
+
+A GP (Williams & Rasmussen, 2005) is a distribution
+over functions f : RD → R that is fully deﬁned by a
+mean function m(·) and covariance function k(·, ·). For
+each ﬁnite set of points X = [x1, . . . , xN ] from the
+function’s domain, the corresponding function evaluations
+f = [f (x1), . . . , f (xN )] are jointly Gaussian as given by
+
+p(f | X) = N (f | mX , KX,X ) ,
+
+(2)
+
+with mean vector mX having elements mi = m(xi) and
+covariance matrix KX,X with entries Kij = k(xi, xj).
+Given observed function values f at input locations X, the
+GP predictive distribution at a new input location x∗ is
+obtained as the conditional distribution
+
+p(f ∗ | x∗, f , X) = N (f ∗ | µ, σ2),
+
+with posterior mean and variance
+
+µ = mx∗ + kx∗,X K−1
+σ2 = kx∗,x∗ − kx∗,X K−1
+
+X,X (f − mX ) ,
+X,X kX,x∗ ,
+
+(3)
+
+(4)
+
+(5)
+
+where kA,B denotes the scalar or vector of covariances for
+each pair of elements in A and B. In this work, the squared
+exponential kernel with Automatic Relevance Determina-
+tion (ARD) (Williams & Rasmussen, 2005) with hyper-
+parameters θGP is employed. Due to the proposed sampling-
+based inference scheme (cf. Sec. 4), any other differentiable
+kernel might be incorporated instead.
+
+3.2. GP Sparsiﬁcation
+
+Commonly, the GP prediction in (3) is obtained by con-
+ditioning on all training data X, y. To alleviate the com-
+putational cost, several sparse approximations have been
+presented (Snelson & Ghahramani, 2006). By introducing
+P inducing GP targets z = [z1, . . . , zP ] at pseudo input
+
+points ζ = [ζ1, . . . , ζP ], which are jointly Gaussian with
+the latent function f , the true GP predictive distribution is
+approximated by conditioning only on this set of inducing
+points,
+
+p(f ∗ | x∗, f , X) ≈ p(f ∗ | x∗, z, ζ) ,
+
+p(z) = N (z | mζ, Kζ,ζ) .
+
+(6)
+
+(7)
+
+The predicted function values consequently become mutu-
+ally independent given the inducing points.
+
+3.3. PR-SSM Model Deﬁnition
+
+The PR-SSM is built upon a GP prior on the transition func-
+tion f (·) and a parametric observation model g(·). This is
+a common model structure, which can be assumed without
+loss of generality over (1), since any observation model can
+be absorbed into a sufﬁciently large latent state (Frigola-
+Alcade, 2015). Eliminating the non-parametric observa-
+tion model, however, mitigates the problem of ‘severe non-
+identiﬁability’ between transition model f (·) and observa-
+tion model g(·) (Frigola et al., 2014). Independent GP priors
+are employed for each latent state dimension d given indi-
+vidual inducing points ζd and zd.
+
+In the following derivations, the system’s latent state, input
+and output at time t are denoted by xt ∈ RDx , ut ∈ RDu ,
+and yt ∈ RDy , respectively. The shorthand ˆxt = (xt, ut)
+denotes the transition model’s input at time t. The output
+of the transition model is denoted by ft+1 = f ( ˆxt). A
+time series of observations from time a to time b (including)
+is abbreviated by ya:b (analogously for the other model
+variables).
+
+The joint distribution of all PR-SSM random variables is
+given by
+
+p(y1:T , x1:T , f2:T , z) =
+
+p(yt | xt)
+
+p(x1)p(z) (8)
+
+(cid:35)
+
+(cid:34) T
+(cid:89)
+
+t=1
+(cid:34) T
+(cid:89)
+
+t=2
+
+p(xt | ft)p(ft | ˆxt−1, z)
+
+,
+
+(cid:35)
+
+where p(ft | ˆxt−1, z) = (cid:81)Dx
+d=1 p(ft,d | ˆxt−1, zd) and
+z ≡ [z1, . . . zDx ]. A graphical model of the resulting PR-
+SSM is shown in Fig. 1.
+
+The individual contributions to (8) are given by the ob-
+servation model and the transition model, which are now
+described in detail. The observation model is governed by
+
+p(yt | xt) = N (yt | g(xt), diag(σ2
+
+y,1, . . . , σ2
+
+y,Dy
+
+)),
+
+(9)
+
+with observation function
+
+g(xt) = Cxt .
+
+(10)
+
+Probabilistic Recurrent State-Space Models
+
+yt
+
+xt
+
+ut
+
+yt+1
+
+xt+1
+
+ut+1
+
+ft
+
+ft+1
+
+Figure 1. Graphical model of the PR-SSM. Gray nodes are ob-
+served variables in contrast to latent variables in white nodes.
+Thick lines indicate variables, which are jointly Gaussian under a
+GP prior.
+
+In particular, the matrix C is chosen to select the Dy ﬁrst
+entries of xt by deﬁning C := [I, 0] ∈ RDy×Dx with I
+being the identity matrix. This model is suitable for ob-
+servation spaces that are low-dimensional compared to the
+latent state dimensionality, i.e. Dy < Dx, which is often
+the case for physical systems with a restricted number of
+sensors. The ﬁrst Dy latent state dimensions can there-
+fore be interpreted as noise free sensor measurements. For
+high-dimensional observation spaces (e.g. images), a more
+involved observation model (e.g. a neural network) may be
+seamlessly incorporated into the presented framework as
+long as g(·) is differentiable. Process noise is modeled as
+
+p(xt | ft) = N (xt | ft, diag(σ2
+
+x,1, . . . , σ2
+
+x,Dx
+
+)) .
+
+(11)
+
+The transition dynamics is described independently for each
+latent state dimension d by p(ft,d | ˆxt−1, zd)p(zd). This
+probability is given by the sparse GP prior (7) and predictive
+distribution (6), where x∗ = ˆxt and f ∗ = ft,d. The initial
+system state distribution p(x1) is unknown and has to be
+estimated.
+
+4. PR-SSM Inference
+
+Computing the log likelihood or a posterior based on (8)
+is generally intractable due to the nonlinear GP dynam-
+ics model in the latent state. However, the log marginal
+likelihood log p(y1:T ) (evidence) can be bounded from be-
+low by the Evidence Lower BOound (ELBO) (Blei et al.,
+2017). This ELBO is derived via Jensen’s inequality by in-
+troducing a computationally simpler, variational distribution
+q(x1:T , f2:T , z) to approximate the model’s true posterior
+distribution p(x1:T , f2:T , z | y1:T ) (cf. eq. (8)). In contrast
+to previous work (Frigola et al., 2014; Mattos et al., 2015;
+Eleftheriadis et al., 2017), the proposed approximation ex-
+plicitly incorporates the true temporal correlations in the
+latent state, whilst being scalable to large datasets. The
+inference scheme is inspired by doubly stochastic varia-
+tional inference for deep GPs as presented in (Salimbeni &
+Deisenroth, 2017).
+
+4.1. Variational Sparse GP
+
+PR-SSM employs a variational sparse GP (Titsias, 2009)
+based on a variational distribution q(z) on the GP’s inducing
+outputs as previously used in (Frigola et al., 2014; Elefthe-
+riadis et al., 2017). For the standard regression problem,
+the inducing output distribution can be optimally eliminated
+and turns out to be a Gaussian distribution. Eliminating the
+inducing outputs, however, results in dependencies between
+inducing outputs and data which, in turn, leads to a complex-
+ity of O(N P 2), where N is the number of data points and
+P the number of inducing points (Titsias, 2009). Unfortu-
+nately, this complexity is still prohibitive for large datasets.
+Therefore, we resort to an explicit representation of the
+variational distribution over inducing outputs as previously
+proposed in (Hensman et al., 2013). This explicit represen-
+tation enables scalability by utilizing stochastic gradient-
+based optimization since individual GP predictions become
+independent given the explicit inducing points. Following
+a mean-ﬁeld variational approximation the inducing output
+distribution is given as q(z) = (cid:81)Dx
+d=1 N (zd | µd, Σd) for
+each latent state dimension d with diagonal variance Σd.
+Marginalizing out the inducing outputs, the GP predictive
+distribution is obtained as Gaussian with mean and variance
+given by
+
+µ = m ˆxt + α( ˆxt)(µd − mζd ) ,
+σ2 = k ˆxt, ˆxt − α( ˆxt)(Kζd,ζd − Σd)α( ˆxt)T ,
+
+α( ˆxt) := k ˆxt,ζd K −1
+
+ζd,ζd
+
+.
+
+4.2. Variational Approximation
+
+In previous work (Mattos et al., 2015), a factorized vari-
+ational distribution is considered based on a mean-ﬁeld
+approximation for the latent states x1:T . Their variational
+distribution is given by
+
+q(x1:T , f2:T , z) =
+
+q(zd)
+
+p(ft,d | ˆxt−1, zd)
+
+(12)
+
+(13)
+
+(14)
+
+(cid:35)(cid:35)
+
+(cid:34) T
+(cid:89)
+
+t=2
+
+(cid:35)
+
+q(xt)
+
+.
+
+(cid:34) Dx(cid:89)
+
+d=1
+
+(cid:34) T
+(cid:89)
+
+t=1
+
+This choice, however, leads to several caveats: (i) The num-
+ber of model parameters grows linearly with the length of
+the time series since each latent state is parametrized by its
+individual distribution q(xt) for every time step. (ii) Ini-
+tializing the latent state is non-trivial since the observation
+mapping is unknown and generally not bijective. (iii) The
+model design does not represent correlations between time
+steps. Instead, these correlations are only introduced by en-
+forcing pairwise couplings during the optimization process.
+The ﬁrst two problems have been addressed in (Mattos et al.,
+2015; Eleftheriadis et al., 2017) by introducing a recognition
+
+T
+(cid:88)
+
+t=1
+
+Dx(cid:88)
+
+d=1
+
+Probabilistic Recurrent State-Space Models
+
+model, e.g. a Bi-RNN3, which acts as a smoother which
+can be learned through backpropagation and which allows
+to obtain the latent states given the input/output sequence.
+
+The issue of representing correlations between time steps,
+however, is currently an open problem which we aim to
+address with our proposed model structure. Properly rep-
+resenting these correlations is a crucial step in making the
+optimization problem tractable in order to learn GP-SSMs
+for complex systems.
+
+For PR-SSM, the variational distribution is given by
+
+q(x1:T , f2:T , z) =
+
+p(xt | ft)
+
+q(x1)·
+
+(15)
+
+(cid:35)
+
+(cid:35)
+
+(cid:34) T
+(cid:89)
+
+t=2
+(cid:34) T
+(cid:89)
+
+Dx(cid:89)
+
+t=2
+
+d=1
+
+4.3. Variational Evidence Lower Bound
+
+Following standard variational inference techniques (Blei
+et al., 2017), the ELBO is given by
+
+log p(y1:T ) ≥ Eq(x1:T ,f2:T ,z)
+
+log
+
+(cid:20)
+
+p(y1:T ,x1:T ,f2:T ,z)
+q(x1:T , f2:T , z)
+
+(cid:21)
+
+=: LPR-SSM .
+
+(16)
+
+Maximizing the ELBO is equivalent
+to minimizing
+KL(q(x1:T , f2:T , z) (cid:107) p(x1:T , f2:T , z | y1:T )) (Blei et al.,
+2017), therefore this is a way to optimize the approximated
+model parameter distribution with respect to the intractable,
+true model parameter posterior.
+
+Based on (8) and (15) and using standard variational calcu-
+lus, the ELBO (16) can be transformed into
+
+p(ft,d | ˆxt−1, zd)q(zd)
+
+,
+
+LPR-SSM =
+
+Eq(xt)[log p(yt | xt)]
+
+with
+
+−
+
+KL(q(zd) (cid:107) p(zd; ζd)) .
+
+(17)
+
+q(x1) = N (x1 | µx1, Σx1) , q(zd) = N (zd | µd, Σd) .
+
+In contrast to previous work, the proposed variational dis-
+tribution does not factorize over the latent state but takes
+into account the true transition model, based on the sparse
+GP approximation from (8). In previous work, stronger ap-
+proximations have been required to achieve an analytically
+tractable ELBO. This work, however, deals with the more
+complex distribution by combining sampling and gradient-
+based methods.
+
+In (Frigola et al., 2014), the variational distribution over
+inducing outputs has been optimally eliminated. This leads
+to a smoothing problem in a second system requiring com-
+putationally expensive, e.g. sample-based, smoothing meth-
+ods. Instead, we approximate the distribution by a Gaussian,
+which is the optimal solution in case of sparse GP regression
+(cf. (Titsias, 2009)).
+
+include the varia-
+The PR-SSM model parameters
+tional parameters for
+the initial state and inducing
+points as well as deterministic parameters for noise
+models and GP kernel hyper-parameters: θPR-SSM =
+(µx1, Σx1, µ1:Dx , Σ1:Dx, ζ1:Dx , σ2
+, θGP,1:Dx ).
+Note that in the PR-SSM, the number of parameters grows
+only with the number of latent dimensions, but not with the
+length of the time series.
+
+x,1:Dx
+
+y,1:Dy
+
+, σ2
+
+3A bi-directional RNN operates on a sequence from left to
+right and vice versa to obtain predictions based on past and future
+inputs.
+
+The ﬁrst part is the expected log-likelihood of the observed
+system outputs y based on the observation model and the
+variational latent state distribution q(x). This term captures
+the capability of the learned latent state model to explain the
+observed system behavior. The second term is a regularizer
+on the inducing output distribution that penalizes deviations
+from the GP prior. Due to this term, PR-SSM automatically
+trades off data ﬁt against model complexity. A detailed
+derivation of the ELBO can be found in the supplementary
+material.
+
+4.4. Stochastic Gradient ELBO Optimization
+
+Training the proposed PR-SSM requires maximizing the
+ELBO in (17) with respect to the model parameters θPR-SSM.
+While the second term, as KL between two Gaussian dis-
+tributions, can be easily computed, the ﬁrst term requires
+evaluation of an expectation with respect to the latent state
+distribution q(x). Since the true non-linear, latent dynamics
+is maintained in the variational approximation (15), analytic
+evaluation of q(x) is still intractable. To make this pro-
+cess tractable, the Markovian structure of the unobserved
+states and the sparse GP approximation can be exploited to
+enable a differentiable, sampling-based estimation of the
+expectation term. Speciﬁcally, the marginal latent state dis-
+tribution q(xt) at time t is conditionally independent of past
+time steps, given the previous state distribution q(xt−1) and
+the explicit representation of GP inducing points. Samples
+˜xt ∼ q(xt) can therefore be obtained by recursively draw-
+ing from the sparse GP posterior in (14) for t = 1, . . . , T .
+Drawing samples from a Gaussian distribution can be made
+differentiable with respect to its parameters µd, σ2
+d using the
+
+Probabilistic Recurrent State-Space Models
+
+re-parametrisation trick (Kingma & Welling, 2013) by ﬁrst
+drawing samples (cid:15) ∼ N (0, 1) and then computing
+
+˜xt+1,d = µd( ˆxt) + (cid:15)
+
+d( ˆxt, ˆxt) + σ2
+σ2
+
+x,d ,
+
+(18)
+
+(cid:113)
+
+with ˆxt = ( ˜xt, ut) and ˜x1 ∼ q(x1). The gradient is prop-
+agated back through time due to this re-paramatrization
+and unrolling of the latent state. Using (18), an unbiased
+estimator of the ﬁrst term in the ELBO in (17) is given by
+
+Eq(xt)[log(yt | xt)] ≈
+
+log p(yt | ˜x(i)
+
+t ) .
+
+(19)
+
+1
+N
+
+N
+(cid:88)
+
+i=1
+
+Based on the stochastic ELBO evaluation, analytic gradi-
+ents of (17) can be derived to facilitate stochastic gradient-
+descent-based model optimization.
+
+4.5. Model Predictions
+
+After model optimization based on the ELBO (17), model
+predictions for a new input sequence u1:T and initial latent
+state x1 can be obtained based on the approximate, varia-
+tional posterior distribution in (15). In contrast to (Mattos
+et al., 2015), no approximations such as moment matching
+are required for model predictions. Instead, the complex
+latent state distribution is approximated based on samples as
+in (18). The predicted observation distribution can then be
+computed from the latent distribution according to the obser-
+vation model in (9). Instead of a ﬁxed, uninformative initial
+latent state, a learned recognition model can be utilized to
+ﬁnd a more informative model initialization (cf. 5).
+
+5. Extensions for Large Datasets
+
+Optimizing the ELBO (17) based on the full gradient is
+prohibitive for large datasets and long trajectories. Instead,
+a stochastic optimization scheme based on mini-batches of
+sub-trajectories is introduced.
+
+Directly optimizing the initial latent state distribution q(x1)
+for each sub-trajectory would lead to a full parametriza-
+tion of the latent state which is undesirable as described
+in Sec. 4.2. Instead, we propose a parametric recognition
+model, which initializes the latent state q(x1). In recent
+work on SSMs (Mattos et al., 2015; Eleftheriadis et al.,
+2017), a recognition model is introduced to parametrize the
+smoothing distribution p(x1:T | y1:T , u1:T ). In this work, a
+similar idea is employed but only to model the initial latent
+state
+
+q(x1) = N (x1 | µ1, Σ1) ≈ q(x1 | y1:L, u1:L) ,
+
+µ1, Σ1 = h(y1:L, u1:L; θrecog) .
+
+(20)
+
+(21)
+
+The initial latent state distribution is approximated by a
+Gaussian, where mean and variance are modeled by a recog-
+nition model h. The recognition model acts as a smoother,
+
+Figure 2. Predictions of the initial, untrained (left) and the ﬁnal,
+trained PR-SSM (right) based on the full gradient ELBO optimiza-
+tion. The system input/output data (blue) is visualized together
+with the model prediction (orange) for a part of the Furnace dataset.
+Samples of the latent space distribution and output distribution
+are shown in gray. The shaded areas visualize mean +/- two std.
+The initial model exhibits a random walk behavior in the latent
+space. In the trained model, the decay of the initial state uncer-
+tainty can be observed in the ﬁrst time steps. In this experiment,
+no recognition model has been used (cf. Sec. 5).
+
+operating on the ﬁrst L elements of the system input/output
+data to infer the ﬁrst latent state. Instead of directly optimiz-
+ing q(x1) during training, errors are propagated back into
+the recognition model h, which is parametrized by θrecog.
+
+Additionally, while q(x1) can be inferred during training, no
+information about the initial latent state is available during
+prediction. Thus, the recognition model is also required to
+enable predictions on test sequences, where the initial latent
+state is unknown.
+
+6. Experimental Evaluation
+
+In the following, we present insights into the PR-SSM opti-
+mization schemes, a comparison to state-of-the-art model
+learning methods on real world datasets and results from a
+large scale experiment.
+
+6.1. PR-SSM Learning
+
+For small datasets (i.e. short training trajectory lengths), the
+model can be trained based on the full gradient of the ELBO
+in (17). A comparison of the model predictions before and
+after training with the full ELBO gradient is visualized in
+Fig. 2.
+
+Empirically, three major shortcomings of the full gradient-
+based optimization schemes are observed: (i) Computing
+the full gradient for long trajectories is expensive and prone
+to the well-known problems of exploding and vanishing
+gradients (Pascanu et al., 2013). (ii) An uninformative initial
+state is prohibitive for unstable systems or systems with
+slowly decaying initial state transients. (iii) Momentum-
+
+Probabilistic Recurrent State-Space Models
+
+Table 1. Comparison of model learning methods on ﬁve real-world benchmark examples. The RMSE result (mean (std) over 5 indepen-
+dently learned models) is given for the free simulation on the test dataset. For each dataset, the best result (solid underline) and second
+best result (dashed underline) is indicated. The proposed PR-SSM consistently outperforms the reference (SS-GP-SSM) in the class of
+Markovian state space models and robustly achieves performance comparable to the one of state-of-the-art latent, autoregressive models.
+Best viewed in color.
+
+ONE-STEP-AHEAD,
+AUTOREGRESSIVE
+
+MULTI-STEP-AHEAD, LATENT SPACE
+AUTOREGRESSIVE
+
+MARKOVIAN STATE-SPACE
+MODELS
+
+TASK
+
+GP-NARX
+
+NIGP
+
+REVARB 1
+
+REVARB 2
+
+MSGP
+
+SS-GP-SSM
+
+PR-SSM
+
+ACTUATOR
+0.627 (0.005)
+BALLBEAM 0.284 (0.222)
+0.701 (0.015)
+DRIVES
+1.201 (0.000)
+FURNACE
+0.310 (0.044)
+DRYER
+
+0.599 (0)
+0.087 (0)
+0.373 (0)
+1.205 (0)
+0.268 (0)
+
+0.438 (0.049) 0.613 (0.190) 0.771 (0.098) 0.696 (0.034) 0.502 (0.031)
+0.139 (0.007) 0.209 (0.012) 0.124 (0.034) 411.6 (273.0) 0.073 (0.007)
+0.828 (0.025) 0.868 (0.113) 0.451 (0.021) 0.718 (0.009) 0.492 (0.038)
+1.195 (0.002) 1.188 (0.001) 1.277 (0.127) 1.318 (0.027) 1.249 (0.029)
+0.851 (0.011) 0.355 (0.027) 0.146 (0.004) 0.152 (0.006) 0.140 (0.018)
+
+SARCOS
+
+0.169 (-)
+
+N.A.
+
+N.A.
+
+N.A.
+
+N.A.
+
+N.A.
+
+0.049 (-)
+
+the learned recognition model almost perfectly initializes
+the latent state, leading to much smaller deviations in the
+predicted observations and far less predictive uncertainty.
+Notice how the recognition model is most certain about
+the distribution of the ﬁrst latent state dimension (orange),
+which is directly coupled to the observation through the
+parametric observation model (cf. (9)). The uncertainty for
+the remaining, latent states, in contrast, is slightly higher.
+
+Comparing the full ELBO gradient-based model learning
+and the stochastic version with the recognition model, the
+stochastic model learning is far more robust and counteracts
+the overﬁtting tendencies in the full gradient-based model
+learning. A comparison of the model learning progress for
+both methods is depicted in the supplementary material.
+Due to the improved optimization robustness and the appli-
+cability to larger datasets, the stochastic, recognition-model-
+based optimization scheme is employed for the model learn-
+ing benchmark presented in the next section.
+
+6.2. Model Learning Benchmark
+
+The performance of PR-SSM is assessed in comparison
+to state-of-the-art model learning methods on several real-
+world datasets as previously utilized by (Mattos et al., 2015).
+The suite of reference methods is composed of: One-step
+ahead autoregressive GP models: GP-FITC (Snelson &
+Ghahramani, 2006) and NIGP (McHutchon & Rasmussen,
+2011). Multi-step-ahead autoregressive and recurrent GP
+models in latent space: REVARB based on 1 respectively
+2 hidden layers (Mattos et al., 2015) and MSGP (Doerr
+et al., 2017a). GP-SSMs, based on a full Markovian state:
+SS-GP-SSM (Svensson & Sch¨on, 2017) and the proposed
+PR-SSM. Currently, no published and runnable code exists
+for the model learning frameworks presented in (Turner
+et al., 2010; Frigola et al., 2013; 2014; Eleftheriadis et al.,
+2017). Reproducing these methods is not straightforward
+
+Figure 3. Comparison of the fully trained PR-SSM predictions with
+(lower row) and without (upper row) initial state recognition model
+on a test dataset. The initial transient based on the uncertainty from
+an uninformative initial state distribution q(x1) = N (x1 | 0, I)
+decays, as shown in upper plots. Below the outcome is shown
+when q(x1) is initialized by the smoothing distribution q(x1 |
+y1:L, u1:L), given the ﬁrst L steps of system input/output. Using
+the recognition model yields a signiﬁcantly improved latent state
+initialization and therefore decreases the initial state uncertainty
+and the initial transient behavior.
+
+based optimizers (e.g. Adam) exhibit fragile optimization
+performance and are prone to overﬁtting.
+
+The proposed method addresses these problems by employ-
+ing the stochastic ELBO gradient based on minibatches of
+sub-trajectories and the initial state recognition model (cf.
+Sec. 5). Fig. 3 visualizes the initial state distribution q(x1)
+and the corresponding predictive output distribution p(y1)
+for the fully trained model based on the full gradient (top
+row), as well as for the model based on the stochastic gra-
+dient and recognition model (bottom row). The transient
+dynamics and the associated model uncertainty is clearly
+visible for the ﬁrst 15 time steps until the initial transient
+decays and approaches the true system behavior. In contrast,
+
+Probabilistic Recurrent State-Space Models
+
+Figure 4. Free simulation results for the benchmark methods on the Drives test dataset. The true, observed system output (blue) is
+compared to the individual model’s predictive output distribution (orange, mean +/- two std). Results are presented for the one-step-ahead
+models GP-NARX and NIGP in the left column. REVARB and MSGP (shown in the middle column) are both based on multi-step
+optimized autoregressive GP models in latent space. In the right column, the SS-GP-SSMs, as a model based on a Markovian latent state,
+is compared to the proposed PR-SSM.
+
+and outside the scope of this work. To enable a fair compar-
+ison, all methods is given access to a predeﬁned amount of
+input/output data for initialization. Details about the bench-
+mark methods, their conﬁguration, as well as the benchmark
+datasets can be found in the supplementary material.
+
+The benchmark results are summarized in Tab. 1. A de-
+tailed visualization of the resulting model predictions on the
+Drives dataset is shown in Fig. 4. For the one-step-ahead
+models (GP-NARX, NIGP), two variants are used to obtain
+long-term predictive distributions: Propagating the mean
+(no uncertainty propagation) and approximating the true pos-
+terior by a Gaussian using exact moment matching (Girard
+et al., 2003). The results show that PR-SSM consistently
+outperforms the SS-GP-SSM learning method. Similarly,
+performance is improved in comparison to baseline methods
+(GP-NARX and NIGP). In the ensemble of models based
+on long-term optimized autoregressive structure (REVARB,
+MSGP), no method is clearly superior. However, the perfor-
+mance of PR-SSM is in all cases close to the one of the best
+performing method. Note that PR-SSM demonstrates robust
+model learning performance and does not exhibit severe
+failure any dataset as some of the contestants do.
+
+6.3. Large Scale Experiment
+
+To evaluate the scalability, results are provided for the for-
+ward dynamics model of the SARCOS 7 degree of freedom
+robotic arm. The task is characterized by 60 experiments of
+length 337 (approx 20.000 datapoints), 7 input, and 7 output
+dimensions. PR-SSM is set up with a latent state dimension-
+ality Dx = 14. From the set of reference methods, only the
+
+Figure 5. Results on the Sarcos large scale task: Predictions from
+the GP-NARX baseline (red) and the PR-SSM (orange) for two
+out of seven joint positions. The ground truth, measured joint
+positions are shown in blue. PR-SSM clearly improves over the GP-
+NARX predictions. Similar results are obtained for PR-SSM on the
+remaining 5 joints, where the GP-NARX model fails completely
+(cf. supplementary materials for details).
+
+GP-NARX model can be adapted to run efﬁciently on this
+dataset without major efforts. The details about the task and
+method conﬁguration are given in the supplementary mate-
+rial. A visualization of the model predictions is shown in
+Fig 5 and prediction RMSEs are listed in Tab. 1. The results
+show that PR-SSM is able to robustly and accurately learn
+the forward dynamics for all system outputs from all experi-
+mental data. In contrast, the GP-NARX baseline achieves
+worse predictions and fails to predict the remaining ﬁve
+joints (not shown).
+
+7. Conclusion
+
+In this work, we presented Probabilistic Recurrent State-
+Space Models (PR-SSM), a novel model structure and ef-
+ﬁcient inference scheme for learning probabilistic, Marko-
+vian state-space models. Based on GP priors and doubly
+
+Probabilistic Recurrent State-Space Models
+
+stochastic variational inference, a novel model optimization
+criterion is derived, which is closely related to the one of
+powerful, but deterministic, RNNs or LSTMs. By maintain-
+ing the true latent state distribution and thereby enabling
+long-term gradients, efﬁcient inference in latent spaces be-
+comes feasible. Furthermore, a novel recognition model
+enables learning of unstable or slow dynamics as well as
+scalability to large datasets. Robustness, scalability and
+high performance in model learning is demonstrated on real-
+world datasets in comparison to state-of-the-art methods.
+
+A limitation of PR-SSM is its dependency on an a-priori
+ﬁxed latent state dimensionality. This shortcoming could po-
+tentially be resolved by a sparsity enforcing latent state prior,
+which would suppress unnecessary latent state dimensions.
+
+Acknowledgements
+
+This research was supported in part by National Sci-
+ence Foundation grants IIS-1205249, IIS-1017134, EECS-
+0926052, the Ofﬁce of Naval Research, the Okawa Founda-
+tion, and the Max-Planck-Society.
+
+References
+
+Billings, Stephen A. Nonlinear system identiﬁcation: NAR-
+MAX methods in the time, frequency, and spatio-temporal
+domains. John Wiley & Sons, 2013.
+
+Blei, David M, Kucukelbir, Alp, and McAuliffe, Jon D.
+Variational inference: A review for statisticians. Journal
+of the American Statistical Association, 112(518):859–
+877, 2017.
+
+Camacho, Eduardo F and Alba, Carlos Bordons. Model
+predictive control. Springer Science & Business Media,
+2013.
+
+Deisenroth, Marc P and Rasmussen, Carl Edward. PILCO:
+A model-based and data-efﬁcient approach to policy
+search. In Proceedings of the 28th International Confer-
+ence on Machine Learning (ICML), pp. 465–472, 2011.
+
+Deisenroth, Marc Peter, Turner, Ryan Darby, Huber,
+Marco F, Hanebeck, Uwe D, and Rasmussen, Carl Ed-
+ward. Robust ﬁltering and smoothing with gaussian pro-
+cesses. IEEE Transactions on Automatic Control, 57(7):
+1865–1871, 2012.
+
+Doerr, Andreas, Daniel, Christian, Nguyen-Tuong, Duy,
+Marco, Alonso, Schaal, Stefan, Marc, Toussaint, and
+Trimpe, Sebastian. Optimizing long-term predictions
+for model-based policy search. In Conference on Robot
+Learning (CORL), pp. 227–238, 2017a.
+
+Doerr, Andreas, Nguyen-Tuong, Duy, Marco, Alonso,
+Schaal, Stefan, and Trimpe, Sebastian. Model-based
+
+policy search for automatic tuning of multivariate PID
+controllers. In Proceedings of the IEEE International
+Conference on Robotics and Automation (ICRA), 2017b.
+
+Eleftheriadis, Stefanos, Nicholson, Tom, Deisenroth, Marc,
+and Hensman, James. Identiﬁcation of Gaussian process
+state space models. In Advances in Neural Information
+Processing Systems (NIPS), pp. 5315–5325, 2017.
+
+F¨oll, Roman, Haasdonk, Bernard, Hanselmann, Markus,
+and Ulmer, Holger. Deep recurrent Gaussian process
+with variational sparse spectrum approximation. arXiv
+preprint arXiv:1711.00799, 2017.
+
+Frigola, Roger, Lindsten, Fredrik, Sch¨on, Thomas B, and
+Rasmussen, Carl E. Bayesian inference and learning
+in Gaussian process state-space models with particle
+In Advances in Neural Information Process-
+MCMC.
+ing Systems (NIPS), pp. 3156–3164, 2013.
+
+Frigola, Roger, Chen, Yutian, and Rasmussen, Carl Edward.
+Variational Gaussian process state-space models. In Ad-
+vances in Neural Information Processing Systems (NIPS),
+pp. 3680–3688, 2014.
+
+Frigola-Alcade, Roger. Bayesian time series learning with
+Gaussian processes. University of Cambridge, 2015.
+
+Girard, Agathe, Rasmussen, Carl Edward, Quinonero-
+Candela, J, Murray-Smith, R, Winther, O, and Larsen, J.
+Multiple-step ahead prediction for non linear dynamic
+systemsa Gaussian process treatment with propagation of
+the uncertainty. In Advances in Neural Information Pro-
+cessing Systems (NIPS), volume 15, pp. 529–536, 2003.
+
+Hensman, James, Fusi, Nicolo, and Lawrence, Neil D.
+arXiv preprint
+
+Gaussian processes for big data.
+arXiv:1309.6835, 2013.
+
+Hochreiter, Sepp and Schmidhuber, J¨urgen. LSTM can
+solve hard long time lag problems. In Advances in Neural
+Information Processing Systems (NIPS), pp. 473–479,
+1997.
+
+Kalman, R.E. A new approach to linear ﬁltering and pre-
+diction problems. Journal of Basic Engineering, 82(1):
+35–45, 1960.
+
+Kingma, Diederik P and Welling, Max. Auto-encoding
+variational bayes. arXiv preprint arXiv:1312.6114, 2013.
+
+Ko, Jonathan and Fox, Dieter. Gp-BayesFilters: Bayesian
+ﬁltering using Gaussian process prediction and observa-
+tion models. Autonomous Robots, 27(1):75–90, 2009.
+
+Kocijan, Juˇs, Girard, Agathe, Banko, Blaˇz, and Murray-
+Smith, Roderick. Dynamic systems identiﬁcation with
+Gaussian processes. Mathematical and Computer Mod-
+elling of Dynamical Systems, 11(4):411–424, 2005.
+
+Probabilistic Recurrent State-Space Models
+
+Likar, Bojan and Kocijan, Juˇs. Predictive control of a
+gas–liquid separation plant based on a Gaussian process
+model. Computers & chemical engineering, 31(3):142–
+152, 2007.
+
+Salimbeni, Hugh and Deisenroth, Marc. Doubly stochastic
+variational inference for deep Gaussian processes. In Ad-
+vances in Neural Information Processing Systems (NIPS),
+pp. 4591–4602, 2017.
+
+Littman, Michael L and Sutton, Richard S. Predictive rep-
+resentations of state. In Advances in Neural Information
+Processing Systems (NIPS), pp. 1555–1561, 2002.
+
+Ljung, Lennart. System identiﬁcation. In Signal analysis
+
+and prediction, pp. 163–173. Springer, 1998.
+
+Ljung, Lennart. Perspectives on system identiﬁcation. An-
+
+nual Reviews in Control, 34(1):1–12, 2010.
+
+Mattos, C´esar Lincoln C, Dai, Zhenwen, Damianou,
+Andreas, Forth, Jeremy, Barreto, Guilherme A, and
+Lawrence, Neil D. Recurrent Gaussian processes. arXiv
+preprint arXiv:1511.06644, 2015.
+
+Mattos, C´esar Lincoln C, Damianou, Andreas, Barreto, Guil-
+herme A, and Lawrence, Neil D. Latent autoregressive
+Gaussian processes models for robust system identiﬁca-
+tion. IFAC-PapersOnLine, 49(7):1121–1126, 2016.
+
+McHutchon, Andrew and Rasmussen, Carl Edwards. Gaus-
+sian process training with input noise. In Advances in
+Neural Information Processing Systems (NIPS), pp. 1341–
+1349, 2011.
+
+Moor, De. DaISy: Database for the identiﬁcation of
+systems. http://homes.esat.kuleuven.be/
+˜smc/daisy/, 2017. [Online; accessed 30-Jan-2017].
+
+Murray-Smith, Roderick and Girard, Agathe. Gaussian
+process priors with ARMA noise models. In Irish Signals
+and Systems Conference, Maynooth, pp. 147–152, 2001.
+
+Narendra, Kumpati S and Parthasarathy, Kannan. Identi-
+ﬁcation and control of dynamical systems using neural
+networks. IEEE Transactions on neural networks, 1(1):
+4–27, 1990.
+
+Nrgaard, Magnus. Hydraulic actuator dataset. http:
+//www.iau.dtu.dk/nnbook/systems.html,
+2000. [Online; accessed 30-Jan-2017].
+
+Pascanu, Razvan, Mikolov, Tomas, and Bengio, Yoshua.
+On the difﬁculty of training recurrent neural networks.
+In Proceedings of the 30th International Conference on
+Machine Learning (ICML), pp. 1310–1318, 2013.
+
+Rudary, Matthew R and Singh, Satinder P. A nonlinear
+predictive state representation. In Advances in Neural
+Information Processing Systems (NIPS), pp. 855–862,
+2004.
+
+Singh, Satinder P, Littman, Michael L, Jong, Nicholas K,
+Pardoe, David, and Stone, Peter. Learning predictive state
+representations. In Proceedings of the 20th International
+Conference on Machine Learning (ICML), pp. 712–719,
+2003.
+
+Snelson, Edward and Ghahramani, Zoubin. Sparse Gaussian
+processes using pseudo-inputs. In Advances in Neural
+Information Processing Systems (NIPS), volume 18, pp.
+1257, 2006.
+
+Sutskever, Ilya, Martens, James, and Hinton, Geoffrey E.
+Generating text with recurrent neural networks. In Pro-
+ceedings of the 28th International Conference on Ma-
+chine Learning (ICML), pp. 1017–1024, 2011.
+
+Svensson, Andreas and Sch¨on, Thomas B. A ﬂexible state–
+space model for learning nonlinear dynamical systems.
+Automatica, 80:189–199, 2017.
+
+Titsias, Michalis K. Variational learning of inducing vari-
+ables in sparse Gaussian processes. In Proceedings of the
+12th International Conference on Artiﬁcial Intelligence
+and Statistics (AISTATS), volume 5, pp. 567–574, 2009.
+
+Turner, Ryan, Deisenroth, Marc, and Rasmussen, Carl.
+State-space inference and learning with Gaussian pro-
+cesses. In Proceedings of the 13th International Confer-
+ence on Artiﬁcial Intelligence and Statistics (AISTATS),
+pp. 868–875, 2010.
+
+Van Overschee, Peter and De Moor, BL. Subspace identiﬁ-
+cation for linear systems: TheoryImplementationApplica-
+tions. Springer Science & Business Media, 2012.
+
+Venugopalan, Subhashini, Xu, Huijuan, Donahue, Jeff,
+Rohrbach, Marcus, Mooney, Raymond, and Saenko, Kate.
+Translating videos to natural language using deep recur-
+rent neural networks. arXiv preprint arXiv:1412.4729,
+2014.
+
+Vijayakumar, Sethu and Schaal, Stefan. LWPR: An O(n)
+algorithm for incremental real time learning in high di-
+mensional space. In Proceedings of the 17th International
+Conference on Machine Learning (ICML), 2000.
+
+Wang, Jack M, Fleet, David J, and Hertzmann, Aaron. Gaus-
+sian process dynamical models for human motion. IEEE
+transactions on pattern analysis and machine intelligence,
+30(2):283–298, 2008.
+
+Wigren, Torbj¨orn. Input-output data sets for development
+and benchmarking in nonlinear identiﬁcation. Technical
+
+Probabilistic Recurrent State-Space Models
+
+report, Department of Information Technology, Uppsala
+University, 2010.
+
+Williams, Christopher KI and Rasmussen, Carl Edward.
+Gaussian processes for machine learning. MIT Press,
+2005.
+
+Probabilistic Recurrent State-Space Models
+
+This supplementary material provides details about the
+derivations and conﬁguration of the proposed PR-SSM in
+Sec. A. Sec. B elaborates on the reference methods and the
+employed datasets in the model learning benchmark. Finally,
+additional experimental results from PR-SSM learning, the
+model learning benchmark, and the large scale experiment
+are summarized in Sec. C.
+
+A. Probabilistic Recurrent State-Space Model
+
+A.1. Evidence Lower Bound (ELBO)
+
+Summarizing the model assumptions from the main paper,
+the model’s joint distribution is given by
+
+p(y1:T , x1:T , f2:T , z) =
+
+p(yt | xt)
+
+(cid:35)
+
+(cid:35)
+
+p(xt | ft)
+
+(cid:34) T
+(cid:89)
+
+t=1
+(cid:34) T
+(cid:89)
+
+t=2
+(cid:34) T
+(cid:89)
+
+Dx(cid:89)
+
+d=1
+
+t=2
+p(x1) .
+
+p(ft,d | ˆxt−1, zd)p(zd)
+
+The variational distribution over the unknown model vari-
+ables is deﬁned as
+
+q(x1:T , f2:T , z) =
+
+p(xt | ft)
+
+(cid:35)
+
+(cid:34) T
+(cid:89)
+
+t=2
+(cid:34) T
+(cid:89)
+
+Dx(cid:89)
+
+d=1
+
+t=2
+q(x1) .
+
+p(ft,d | ˆxt−1, zd)q(zd)
+
+(cid:35)
+
+(22)
+
+(cid:35)
+
+(23)
+
+Together, the derivation of the ELBO is given below in (24)
+to (29).
+
+In the ELBO, as derived in (29), the last term is a regular-
+ization on the initial state distribution. For the full gradient-
+based optimization in the main paper, an uninformative
+initial distribution is chosen and ﬁxed, such that the third
+term is dropped. In the stochastic optimization scheme,
+this term acts as a regularization preventing the recognition
+model to become overconﬁdent in its predictions.
+
+A.2. Model Conﬁguration
+
+The PR-SSM exhibits a large number of model (hyper-)
+parameters θPR-SSM which need to be initialized. However,
+empirically, most of these model parameters can be initial-
+ized to a default setting as given in Tab. 2. This default
+conﬁguration has been employed for all benchmark experi-
+ments presented in the main paper.
+
+The PR-SSM’s latent state dynamics model and noise mod-
+els are conﬁgured to initially exhibit a random walk behavior.
+
+Table 2. Default conﬁguration for the initialization of the PR-SSM
+(hyper-) parameters θPR-SSM. This conﬁguration has been employed
+for all experiments in the benchmark section.
+
+PARAMETER
+
+INDUCING INPUTS
+
+INDUCING
+OUTPUTS
+
+PROCESS NOISE
+SENSOR NOISE
+
+KERNEL HYPER-
+PARAMETERS
+
+INITIALIZATION
+ζd ∼ U (−2, 2) ∈ RP ×(Dx+Du)
+q(zd) = N (zd | µd, Σd) ∈ RP
+µd,i ∼ N (µd,i | 0, 0.052)
+Σd = 0.012 · I
+σ2
+X,i = 0.0022 ∀i ∈ [1, DX]
+σ2
+Y,i = 1.02 ∀i ∈ [1, DY]
+σ2
+f = 0.52
+l2
+i = 2 ∀i ∈ [1, Dx]
+
+Table 3. Structural conﬁguration of the PR-SSM as utilized in the
+benchmark experiments.
+
+PARAMETER
+
+INITIALIZATION
+
+INDUCING POINTS
+STATE SAMPLES
+
+P = 20
+N = 50
+
+SUBTRAJECTORIES
+
+NBATCH = 10
+Tsub = 100
+
+LATENT SPACE
+
+Dx = 4
+
+This behavior is clearly visible for the prediction based on
+the untrained model in Fig. 2 of the main paper. The GP
+prior is approximating the identity function based on an
+identity mean function and almost zero inducing outputs (up
+to a small Gaussian noise term to avoid singularities). The
+inducing inputs are spread uniformly over the function’s do-
+main. The noise processes are initializes such as to achieve
+high correlations between latent states over time (i.e. small
+process noise magnitude). At the same time, a larger obser-
+vation noise is required to obtain a inﬂation of predictive
+uncertainty over time. This inﬂation of predictive uncer-
+tainty is again clearly visible in Fig. 2 of the main paper.
+Both noise terms are chosen in a way to obtain numerically
+stable gradients for both the sample based log likelihood and
+the backpropagation through time in the ELBO evaluation.
+
+The number of samples used in the ELBO approximation,
+number of inducing points in the GP approximation and
+batch size are, in contrast, a trade-off between model ac-
+curacy and computational speed. The proposed default
+conﬁguration empirically showed good performance whilst
+being computationally tractable.
+
+Two tuning parameters remain, which are problem speciﬁc
+and have to be chosen for each dataset individually. Depend-
+ing on the true system’s timescales/sampling frequency and
+system order, the length of subtrajectories Tsub for mini-
+batching and the latent state dimensionality Dx have to be
+
+Probabilistic Recurrent State-Space Models
+
+log p(y1:T ) ≥ Eq(x1:T ,f2:T ,z)
+
+log
+
+= Eq(x1:T ,f2:T ,z)
+
+log
+
+(cid:21)
+
+p(y1:T ,x1:T ,f2:T ,z)
+q(x1:T , f2:T , z)
+(cid:104)(cid:81)T
+
+t=1 p(yt | xt)
+(cid:104)(cid:81)T
+
+(cid:105) (cid:104)(cid:81)T
+
+t=2 p(xt | ft)
+
+t=2 p(xt | ft)
+(cid:105) (cid:104)(cid:81)T
+
+(cid:105) (cid:104)(cid:81)T
+
+(cid:81)Dx
+
+t=2
+
+d=1 p(ft,d | ˆxt−1, zd)p(zd)
+
+p(x1)
+
+(cid:105)
+
+(cid:81)Dx
+
+(cid:105)
+d=1 p(ft,d | ˆxt−1, zd)q(zd)
+
+t=2
+
+q(x1)
+
+= Eq(x1:T ,f2:T ,z)
+
+log
+
+(cid:104)(cid:81)T
+
+t=1 p(yt | xt)
+
+(cid:104)(cid:81)Dx
+
+(cid:105) (cid:104)(cid:81)Dx
+
+(cid:105)
+d=1 p(zd)
+(cid:105)
+d=1 q(zd)
+(cid:35)
+
+q(x1)
+
+p(x1)
+
+
+
+
+
+= Eq(x1:T ,f2:T ,z)
+
+log
+
+p(yt | xt)
+
++ Eq(x1:T ,f2:T ,z)
+
+T
+(cid:89)
+
+t=1
+
+(cid:34) Dx(cid:88)
+
+d=1
+
+(cid:35)
+
+log
+
+p(zd)
+q(zd)
+
++ Eq(x1:T ,f2:T ,z)
+
+log
+
+(cid:20)
+
+(cid:21)
+
+p(x1)
+q(x1)
+
+(cid:20)
+
+
+
+
+
+(cid:34)
+
+= Eq(x1:T )
+
+log
+
+p(yt | xt)
+
++ Eq(z)
+
+(cid:34)
+
+T
+(cid:89)
+
+t=1
+
+(cid:34) Dx(cid:88)
+
+d=1
+
+log
+
+p(zd)
+q(zd)
+
+(cid:35)
+
+(cid:20)
+
++ Eq(x1)
+
+log
+
+(cid:21)
+
+p(x1)
+q(x1)
+
+Eq(xt) [log p(yt | xt)] +
+
+KL(q(zd) (cid:107) p(zd)) + KL(q(x1) (cid:107) p(x1))
+
+(cid:35)
+
+Dx(cid:88)
+
+d=1
+
+=
+
+T
+(cid:88)
+
+t=1
+
+(24)
+
+
+
+
+
+(25)
+
+(26)
+
+(27)
+
+(28)
+
+(29)
+
+Table 4. Summary of the real-world, non-linear system identiﬁ-
+cation benchmark tasks. All datasets are generated by recording
+input/output data of actual physical plants. For each dataset, the
+lengths of training and test set are given together with the number
+of past input and outputs used for the NARX dynamics models.
+
+Ntrain Ntest Lu, Ly
+
+ACTUATOR (NRGAARD, 2000)
+BALLBEAM (MOOR, 2017)
+DRIVES (WIGREN, 2010)
+FURNACE (MOOR, 2017)
+DRYER (MOOR, 2017)
+
+512
+500
+250
+148
+500
+
+512
+500
+250
+148
+500
+
+10
+10
+10
+3
+2
+
+speciﬁed manually. For the benchmark datasets we choose
+Tsub = 100 and Dx = 4.
+
+B. Model Learning Benchmark Details
+
+In the main paper, the proposed PR-SSM’s long-term pre-
+dictive performance is compared to several state-of-the-art
+methods. The benchmark is set up similar to the evalua-
+tion presented in (Doerr et al., 2017a). Details about the
+individual benchmark methods, their conﬁguration and the
+employed datasets can be found in the following sections.
+Minor adjustments with respect to the set up in (Doerr et al.,
+2017a) will be pointed out in the following. These have been
+introduced to enable fair comparison between all benchmark
+methods.
+
+B.1. Benchmark Methods
+
+The proposed PR-SSM is evaluated in comparison to meth-
+ods from three classes: one-step ahead autoregressive mod-
+els (GP-NARX, NIGP), multi-step ahead autoregressive
+models in latent space (REVARB, MSGP) and Markov
+state-space models (SS-GP-SSM). To enable a fair com-
+parison, all methods have access to a predeﬁned amount of
+input/output data for initialization.
+
+(i) GP-NARX (Kocijan et al., 2005): The system dynam-
+ics is modeled as yt+1 = f (yt, . . . , yt−Ly , ut, . . . , ut−Lu )
+with a GP prior on f . The GP has a zero mean function and
+a squared exponential kernel with automatic relevance deter-
+mination. The kernel hyper-parameters, signal variance and
+lengthscales, are optimized based on the standard maximum
+likelihood objective. A sparse approximation (Snelson &
+Ghahramani, 2006), based on 100 inducing inputs is em-
+ployed. Moment matching (Girard et al., 2003) is employed
+to obtain a long-term predictive distribution.
+
+(ii) NIGP (McHutchon & Rasmussen, 2011): Noise Input
+GPs (NIGP) account for uncertainty in the input by treating
+input points as deterministic and inﬂating the corresponding
+output uncertainty, leading to state dependent noise, i.e.
+heteroscedastic GPs. The experimental results are based on
+the publicly available Matlab code. Since no sparse version
+is available, training is performed on the full training dataset.
+Training on the full dataset is however not possible for larger
+datasets and provides an advantage to NIGP. Experiments
+based on a random data subset of size 100 lead to decreased
+performance in the order of the GP-NARX results or worse.
+
+Probabilistic Recurrent State-Space Models
+
+(iii) REVARB (Mattos et al., 2015): Recurrent Variational
+Bayes (REVARB) is a recent proposition to optimize the
+lower bound to the log-marginal likelihood log p(y) using
+variational techniques. This framework is based on the vari-
+ational sparse GP framework (Titsias, 2009), but allows
+for computation of (time-)recurrent GP structures and deep
+GP structures (stacking multiple GP-layers in each time-
+step). For our benchmark, we run REVARB using one
+(REVARB1) respectively two (REVARB2) hidden layers,
+where each layer is provided with 100 inducing inputs. We
+closely follow the original setup as presented by (Mattos
+et al., 2015), performing 50 initial optimization steps based
+on ﬁxed variances and up to 10000 steps based on variable
+variances. Unlike for the other benchmark methods, the au-
+toregressive history of REVARB implicitly becomes longer
+when introducing additional hidden layers.
+
+(iv) MSGP (Doerr et al., 2017a): MSGP is a GP-NARX
+model operating in a latent, noise free state, which is trained
+by optimizing its long-term predictions. The experimental
+results are obtained according to the conﬁguration described
+in (Doerr et al., 2017a), again using 100 inducing points and
+moment matching.
+
+(v) SS-GP-SSM (Svensson & Sch¨on, 2017): The Sparse-
+Spectrum GP-SSM is employing a sparse spectrum GP ap-
+proximation to model the system’s transition dynamics in a
+Markovian, latent space. The available Matlab implementa-
+tion is restricted to a 2D latent space. In the experimental
+results, a default conﬁguration is employed as given by:
+K = 2000, N = 40, n basis u = n basis x = 7. The
+variables are deﬁned as given in the code published for
+(Svensson & Sch¨on, 2017).
+
+B.2. Benchmark Datasets
+
+The benchmarks datasets are composed of popular sys-
+tem identiﬁcation datasets from related work (Narendra
+& Parthasarathy, 1990; Kocijan et al., 2005; Mattos et al.,
+2016). They incorporate measured input output data from
+technical systems like hydraulic actuators, furnaces, hair
+dryers or electrical motors. For all of these problems, both
+inputs and outputs are one-dimensional Du = Dy = 1.
+However, the system’s true state is higher dimensional such
+that an autoregressive history or an explicit latent state repre-
+sentation is required to capture the relevant dynamics. The
+number of historic inputs and outputs for the autoregres-
+sive methods is ﬁxed a-priori for each dataset as previously
+used in other publications. For model training, datasets
+are normalized to zero mean and variance one based on the
+available training data. References to the individual datasets,
+training and test trajectory length, and the utilized history
+for the GP-NARX models are summarized in Tab. 4.
+
+Figure 6. Comparison of the learning progress of the proposed
+method on the Drive dataset given the full ELBO gradient (blue)
+and the stochastic gradient, based on minibatches and the recog-
+nition model (orange). RMSE and log likelihood results over
+learning iterations are shown for the free simulation on training
+and test dataset. The full gradient optimization scheme overﬁtts
+(in particular visible in the log likelihood) and exposes a difﬁcult
+optimization objective (cf. spikes in model loss). Stochastically
+optimizing the model-based on the proposed minibatched ELBO
+estimates and employing the recognition model signiﬁcantly re-
+duces overﬁtting and leads to more robust learning.
+
+C. Additional Results
+
+C.1. Optimization Schemes Comparison
+
+In Fig. 6, the RMSE and the negative log likelihood, which
+is obtained for the model’s long-term prediction, is depicted
+over learning iterations for the training- (solid line) and test-
+(dotted line) set from the Drives dataset. The full gradient
+optimization (blue) obtains smaller training loss in compari-
+son to the stochastic optimization scheme for both RMSE
+and negative log likelihood. The resulting test performance
+however indicates similar performance in terms of RMSE
+whilst showing clear overﬁtting of the full-gradient-based
+model in terms of log likelihood. Additionally, optimizing,
+based on the full gradient, is much more delicate and less
+robust as indicated by the spikes in loss and the higher vari-
+ance of incurred optimization progress. Fig. 6 depicts mean
+(lines) and minimum to maximum intervals (shaded areas)
+of incurred loss, based on ﬁve independent model trainings.
+
+C.2. Detailed Benchmark Results
+
+In Tab. 5, detailed results are provided for the benchmark
+experiments. The reference learning methods in the pre-
+sented benchmark are highly deceptive to changes in the
+data pre-processing and the long-term prediction method.
+Therefore, results are detailed for GP-NARX, NIGP, RE-
+VARB 1, and REVARB 2 for all combinations of normal-
+ized/unnormalized training data and mean or moment match-
+ing predictions. The results for methods MSGP, SS-GP-
+
+Probabilistic Recurrent State-Space Models
+
+Figure 7. Detailed results from the Sarcos large scale task: Predictions from the GP-NARX model (red) and the PR-SSM (green) for all
+seven joint positions as obtained for the ﬁrst test experiment. The ground truth, measured joint positions are shown in blue. PR-SSM is
+clearly able to capture the robot arm dynamics, whereas the GP-NARX model only succesfully captures a rough model of the robot arm
+dynamics for two out of seven joints.
+
+given by the seven joint torques (Du = 7).
+
+The original training dataset (44.484 datapoints) recorded at
+100 Hz has been downsampled to 50 Hz. It is split into 66
+independent experiments as indicated by the discontinuities
+in the original time-series data. Six out of 66 experiments
+have been utilized for testing whereas the other 60 experi-
+ments remain for training. None of the reference methods
+from the model learning benchmark is out-of-the-box appli-
+cable to this large scale dataset. To obtain a baseline, the
+sparse GP-NARX model has been trained on a subset of
+training experiments (400 inducing points, approx. 2000
+training data points). The PR-SSM can be directly trained
+on the full training dataset utilizing its stochastic, mini-
+batched optimization scheme. PR-SSM is setup similar to
+the conﬁguration described in the benchmark experiment
+but based on a 14 dimensional latent state (Dx = 14). Long-
+term prediction results on one of the test experiments are
+visualized in Fig. 7. PR-SSM robustly predicts the robot
+arm motions for all joints and clearly improves over the
+GP-NARX baseline. In contrast, the GP-NARX baseline
+can not predict the dynamics on 5 out of 7 joints.
+
+SSM and PR-SSM are always computed for the normalized
+datasets using the method speciﬁc propagation of uncer-
+tainty schemes.
+
+Obtaining uncertainty estimates is one key requirement for
+employing the long-term predictions, e.g. in model-based
+control. Therefore, only the predictive results based on the
+approximate propagation of uncertainty through moment
+matching is considered in the main paper, although better
+results in RMSE are sometimes obtained from employing
+only the mean predictions. A comparison of the predictive
+results based on mean and moment matching predictions
+on the Drives dataset is shown in Fig. 5. The results from
+the unnormalized datasets and moment matching are in line
+with the results published in (Doerr et al., 2017a).
+
+C.3. Large Scale Experiment Details
+
+The Sarcos task is based on a publicly available dataset com-
+prising joint positions, velocities, acceleration and torques
+of a seven degrees-of-freedom SARCOS anthropomorphic
+robot arm. This dataset has been previously used in (Vi-
+jayakumar & Schaal, 2000; Williams & Rasmussen, 2005)
+in the task of learning the system’s inverse dynamics, there-
+fore mapping joint position, velocities, and accelerations
+to the required joint torques. This task can be framed as a
+standard regression problem, which is solved in a supervised
+fashion. In contrast, in this paper, we consider the task of
+learning the forward dynamics, i.e. predicting the joint posi-
+tions given a sequence of joint torques. The system output is
+therefore given by the seven joint positions (Dy = 7). Joint
+velocities and acceleration, as latent states, are not available
+for learning but have to be inferred. The system input is
+
+Probabilistic Recurrent State-Space Models
+
+Table 5. Comparison of model learning methods on ﬁve real-world benchmark examples. The RMSE result (mean (std) over 5 indepen-
+dently learned models) is given for the free simulation on the test dataset. For each dataset, the best result (solid underline) and second
+best result (dashed underline) is indicated. The proposed PR-SSM consistently outperforms the reference (SS-GP-SSM) in the class of
+Markovian state space models and robustly achieves performance comparable to the one of state-of-the-art latent, autoregressive models.
+
+ONE-STEP-AHEAD
+AUTOREGRESSIVE
+
+MULTI-STEP-AHEAD AUTOREGRESSIVE IN
+LATENT SPACE
+
+MARKOVIAN STATE-SPACE
+MODELS
+
+DATA UNNORMALIZED + MEAN PREDICTION
+
+DEFAULT CONFIGURATION
+
+TASK
+
+GP-NARX
+
+NIGP
+
+REVARB 1
+
+REVARB 2
+
+MSGP
+
+SS-GP-SSM
+
+PR-SSM
+
+ACTUATOR 0.645 (0.018) 0.752 (0)
+BALLBEAM 0.169 (0.005) 0.165 (0)
+0.579 (0.004) 0.378 (0)
+DRIVES
+1.199 (0.001) 1.195 (0)
+FURNACE
+DRYER
+0.278 (0.003) 0.281 (0)
+
+0.496 (0.057) 0.565 (0.047) 0.771 (0.098)
+0.138 (0.001) 0.073 (0.000) 0.124 (0.034)
+0.718 (0.081) 0.282 (0.031) 0.451 (0.021)
+1.210 (0.034) 1.945 (0.016) 1.277 (0.127)
+0.149 (0.017) 0.128 (0.001) 0.146 (0.004)
+
+0.696 (0.034)
+411.550 (273.043)
+0.718 (0.009)
+1.318 (0.027)
+0.152 (0.006)
+
+0.502 (0.031)
+0.073 (0.007)
+0.492 (0.038)
+1.249 (0.029)
+0.140 (0.018)
+
+DATA UNNORMALIZED + MOMENT MATCHING
+
+DEFAULT CONFIGURATION
+
+TASK
+
+GP-NARX
+
+NIGP
+
+REVARB 1
+
+REVARB 2
+
+MSGP
+
+SS-GP-SSM
+
+PR-SSM
+
+ACTUATOR 0.633 (0.018) 0.601 (0)
+BALLBEAM 0.077 (0.000) 0.078 (0)
+0.688 (0.003) 0.398 (0)
+DRIVES
+1.198 (0.002) 1.195 (0)
+FURNACE
+0.284 (0.003) 0.280 (0)
+DRYER
+
+0.430 (0.026) 0.618 (0.047) 0.771 (0.098)
+0.131 (0.005) 0.073 (0.000) 0.124 (0.034)
+0.801 (0.032) 0.733 (0.087) 0.451 (0.021)
+1.192 (0.002) 1.947 (0.032) 1.277 (0.127)
+0.878 (0.016) 0.123 (0.002) 0.146 (0.004)
+
+0.696 (0.034)
+411.550 (273.043)
+0.718 (0.009)
+1.318 (0.027)
+0.152 (0.006)
+
+0.502 (0.031)
+0.073 (0.007)
+0.492 (0.038)
+1.249 (0.029)
+0.140 (0.018)
+
+DATA NORMALIZATION + MEAN PREDICTION
+
+DEFAULT CONFIGURATION
+
+TASK
+
+GP-NARX
+
+NIGP
+
+REVARB 1
+
+REVARB 2
+
+MSGP
+
+SS-GP-SSM
+
+PR-SSM
+
+ACTUATOR 0.665 (0.014) 0.791 (0)
+BALLBEAM 0.357 (0.199) 0.154 (0)
+0.564 (0.029) 0.369 (0)
+DRIVES
+1.201 (0.001) 1.205 (0)
+FURNACE
+0.282 (0.001) 0.269 (0)
+DRYER
+
+0.506 (0.092) 0.559 (0.069) 0.771 (0.098)
+0.141 (0.004) 0.206 (0.008) 0.124 (0.034)
+0.605 (0.027) 0.376 (0.026) 0.451 (0.021)
+1.196 (0.002) 1.189 (0.001) 1.277 (0.127)
+0.146 (0.004)
+0.113 (0)
+0.123 (0.001)
+
+0.696 (0.034)
+411.550 (273.043)
+0.718 (0.009)
+1.318 (0.027)
+0.152 (0.006)
+
+0.502 (0.031)
+0.073 (0.007)
+0.492 (0.038)
+1.249 (0.029)
+0.140 (0.018)
+
+DATA NORMALIZATION + MOMENT MATCHING
+
+DEFAULT CONFIGURATION
+
+TASK
+
+GP-NARX
+
+NIGP
+
+REVARB 1
+
+REVARB 2
+
+MSGP
+
+SS-GP-SSM
+
+PR-SSM
+
+ACTUATOR 0.627 (0.005) 0.599 (0)
+BALLBEAM 0.284 (0.222) 0.087 (0)
+0.701 (0.015) 0.373 (0)
+DRIVES
+FURNACE
+1.201 (0.000) 1.205 (0)
+0.310 (0.044) 0.268 (0)
+DRYER
+
+0.438 (0.049) 0.613 (0.190) 0.771 (0.098)
+0.139 (0.007) 0.209 (0.012) 0.124 (0.034)
+0.828 (0.025) 0.868 (0.113) 0.451 (0.021)
+1.195 (0.002) 1.188 (0.001) 1.277 (0.127)
+0.851 (0.011) 0.355 (0.027) 0.146 (0.004)
+
+0.696 (0.034)
+411.550 (273.043)
+0.718 (0.009)
+1.318 (0.027)
+0.152 (0.006)
+
+0.502 (0.031)
+0.073 (0.007)
+0.492 (0.038)
+1.249 (0.029)
+0.140 (0.018)
+

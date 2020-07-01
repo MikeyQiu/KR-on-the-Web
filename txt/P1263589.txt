@@ -1,0 +1,1624 @@
+Self-Imitation Learning
+
+Junhyuk Oh * 1 Yijie Guo * 1 Satinder Singh 1 Honglak Lee 2 1
+
+8
+1
+0
+2
+ 
+n
+u
+J
+ 
+4
+1
+ 
+ 
+]
+
+G
+L
+.
+s
+c
+[
+ 
+ 
+1
+v
+5
+3
+6
+5
+0
+.
+6
+0
+8
+1
+:
+v
+i
+X
+r
+a
+
+Abstract
+
+This paper proposes Self-Imitation Learning
+(SIL), a simple off-policy actor-critic algorithm
+that learns to reproduce the agent’s past good de-
+cisions. This algorithm is designed to verify our
+hypothesis that exploiting past good experiences
+can indirectly drive deep exploration. Our empiri-
+cal results show that SIL signiﬁcantly improves
+advantage actor-critic (A2C) on several hard ex-
+ploration Atari games and is competitive to the
+state-of-the-art count-based exploration methods.
+We also show that SIL improves proximal policy
+optimization (PPO) on MuJoCo tasks.
+
+1. Introduction
+The trade-off between exploration and exploitation is one of
+the fundamental challenges in reinforcement learning (RL).
+The agent needs to exploit what it already knows in order to
+maximize reward. But, the agent also needs to explore new
+behaviors in order to ﬁnd a potentially better policy. The
+resulting performance of an RL agent emerges from this
+interaction between exploration and exploitation.
+
+This paper studies how exploiting the agent’s past experi-
+ences improves learning in RL. More speciﬁcally, we hy-
+pothesize that learning to reproduce past good experiences
+can indirectly lead to deeper exploration depending on the
+domain. A simple example of how this can occur can be
+seen through our results on an example Atari game, Mon-
+tezuma’s Revenge (see Figure 1). In this domain, the ﬁrst
+and more proximal source of reward is obtained by pick-
+ing up the key. Obtaining the key is a precondition of the
+second and more distal source of reward (i.e., opening the
+door with the key). Many existing methods occasionally
+generate experiences that pick up the key and obtain the ﬁrst
+reward, but fail to exploit these experiences often enough
+to learn how to open the door by exploring after picking up
+
+*Equal contribution 1University of Michigan 2Google Brain.
+Correspondence to: Junhyuk Oh <junhyuk@umich.edu>, Yijie
+Guo <guoyijie@umich.edu>.
+
+Proceedings of the 35 th International Conference on Machine
+Learning, Stockholm, Sweden, PMLR 80, 2018. Copyright 2018
+by the author(s).
+
+Figure 1. Learning curves on Montezuma’s Revenge. (Left) The
+agent needs to pick up the key in order to open the door. Picking
+up the key gives a small reward. (Right) The baseline (A2C) often
+picks up the key as shown by the best episode reward in 100K
+steps (A2C (Best)), but it fails to consistently reproduce such an
+experience. In contrast, self-imitation learning (A2C+SIL) quickly
+learns to pick up the key as soon as the agent experiences it, which
+leads to the next source of reward (door).
+
+the key. Thus, they end up with a poor policy (see A2C in
+Figure 1). On the other hand, by exploiting the experiences
+that pick up the key, the agent is able to explore onwards
+from the state where it has the key to successfully learn how
+to open the door (see A2C+SIL in Figure 1). Of course, this
+sort of exploitation can also hurt performance in problems
+where there are proximal distractor rewards and repeated
+exploitation of such rewards does not help in learning about
+more distal and higher rewards; in other words, these two as-
+pects may both be present. In this paper we will empirically
+investigate many different domains to see how exploiting
+past experiences can be beneﬁcial for learning agents.
+
+The main contributions of this paper are as follows: (1) To
+study how exploiting past good experiences affects learning,
+we propose a Self-Imitation Learning (SIL) algorithm which
+learns to imitate the agent’s own past good decisions. In
+brief, the SIL algorithm stores experiences in a replay buffer,
+learns to imitate state-action pairs in the replay buffer only
+when the return in the past episode is greater than the agent’s
+value estimate. (2) We provide a theoretical justiﬁcation
+of the SIL objective by showing that the SIL objective is
+derived from the lower bound of the optimal Q-function. (3)
+The SIL algorithm is very simple to implement and can be
+applied to any actor-critic architecture. (4) We demonstrate
+that SIL combined with advantage actor-critic (A2C) is
+competitive to the state-of-the-art count-based exploration
+
+Self-Imitation Learning
+
+actor-critic methods (e.g., Reactor-PixelCNN (Ostrovski
+et al., 2017)) on several hard exploration Atari games (Belle-
+mare et al., 2013); SIL also improves the overall perfor-
+mance of A2C across 49 Atari games. Finally, SIL improves
+the performance of proximal policy optimization (PPO) on
+MuJoCo continuous control tasks (Brockman et al., 2016;
+Todorov et al., 2012), demonstrating that SIL may be gener-
+ally applicable to any actor-critic architecture.
+
+2. Related Work
+Exploration There has been a long history of work on
+improving exploration in RL, including recent work that can
+scale up to large state spaces (Stadie et al., 2015; Osband
+et al., 2016; Bellemare et al., 2016; Ostrovski et al., 2017).
+Many existing methods use some notion of curiosity or
+uncertainty as a signal for exploration (Schmidhuber, 1991;
+Strehl & Littman, 2008). In contrast, this paper focuses
+on exploiting past good experiences for better exploration.
+Though the role of exploitation for exploration has been
+discussed (Thrun, 1992), prior work has mostly considered
+exploiting what the agent has learned, whereas we consider
+exploiting what the agent has experienced, but has not yet
+learned.
+
+Episodic control Episodic control (Lengyel & Dayan,
+2008) can be viewed as an extreme way of exploiting past
+experiences in the sense that the agent repeats the same
+actions that gave the best outcome in the past. MFEC (Blun-
+dell et al., 2016) and NEC (Pritzel et al., 2017) scaled up
+this idea to complex domains. However, these methods are
+slow during test-time because the agent needs to retrieve
+relevant states for each step and may generalize poorly as
+the resulting policy is non-parametric.
+
+Experience replay Experience replay (Lin, 1992) is a
+natural way of exploiting past experiences for parametric
+policies. Prioritized experience replay (Moore & Atkeson,
+1992; Schaul et al., 2016) proposed an efﬁcient way of
+learning from past experiences by prioritizing them based
+on temporal-difference error. Our self-imitation learning
+also prioritizes experiences based on the full episode re-
+wards. Optimality tightening (He et al., 2017) introduced an
+objective based on the lower/upper bound of the optimal Q-
+function, which is similar to a part of our theoretical result.
+These recent advances in experience replay have focused on
+value-based methods such as Q-learning, and are not easily
+applicable to actor-critic architectures.
+
+Experience replay for actor-critic
+In fact, actor-critic
+framework (Sutton et al., 1999; Konda & Tsitsiklis, 2000)
+can also utilize experience replay. Many existing meth-
+ods are based on off-policy policy evaluation (Precup et al.,
+2001; 2000), which involves importance sampling. For ex-
+ample, ACER (Wang et al., 2017) and Reactor (Gruslys
+et al., 2018) use Retrace (Munos et al., 2016) to evaluate
+
+the learner from the behavior policy. Due to importance
+sampling, this approach may not beneﬁt much from the
+past experience if the policy in the past is very different
+from the current policy. Although DPG (Silver et al., 2014;
+Lillicrap et al., 2016) performs experience replay without
+importance sampling, it is limited to continuous control.
+Our self-imitation learning objective does not involve im-
+portance sampling and is applicable to both discrete and
+continuous control.
+
+Connection between policy gradient and Q-learning
+The recent studies on the relationship between policy gra-
+dient and Q-learning have shown that entropy-regularized
+policy gradient and Q-learning are closely related or even
+equivalent depending on assumptions (Nachum et al., 2017;
+O’Donoghue et al., 2017; Schulman et al., 2017a; Haarnoja
+et al., 2017). Our application of self-imitation learning to
+actor-critic (A2C+SIL) can be viewed as an instance of
+PGQL (O’Donoghue et al., 2017) in that we perform Q-
+learning on top of actor-critic architecture (see Section 4).
+Unlike Q-learning in PGQL, however, we use the proposed
+lower bound Q-learning to exploit good experiences.
+
+Learning from imperfect demonstrations A few stud-
+ies have attempted to learn from imperfect demonstrations,
+such as DQfD (Hester et al., 2018), Q-ﬁlter (Nair et al.,
+2017), and normalized actor-critic (Xu et al., 2018). Our
+self-imitation learning has a similar ﬂavor in that the agent
+learns from imperfect demonstrations. However, we treat
+the agent’s own experiences as demonstrations without us-
+ing expert demonstrations. Although a similar idea has been
+discussed for program synthesis (Liang et al., 2016; Abo-
+laﬁa et al., 2018), this prior work used classiﬁcation loss
+without justiﬁcation. On the other hand, we propose a new
+objective, provide a theoretical justiﬁcation, and systemati-
+cally investigate how it drives exploration in RL.
+
+3. Self-Imitation Learning
+The goal of self-imitation learning (SIL) is to imitate the
+agent’s past good experiences in the actor-critic framework.
+To this end, we propose to store past episodes with cu-
+mulative rewards in a replay buffer: D = {(st, at, Rt)},
+where st, at are a state and an action at time-step t, and
+Rt = (cid:80)∞
+k=t γk−trk is the discounted sum of rewards with
+a discount factor γ. To exploit only good state-action pairs
+in the replay buffer, we propose the following off-policy
+actor-critic loss:
+
+Lsil
+
+(cid:2)Lsil
+
+Lsil = Es,a,R∈D
+policy + βsilLsil
+policy = − log πθ(a|s) (R − Vθ(s))+
+(cid:107)(R − Vθ(s))+(cid:107)2
+
+value =
+
+Lsil
+
+(cid:3)
+
+value
+
+1
+2
+
+(1)
+
+(2)
+
+(3)
+
+where (·)+ = max(·, 0), and πθ, Vθ(s) are the policy (i.e.,
+actor) and the value function parameterized by θ. βsil ∈ R+
+
+Algorithm 1 Actor-Critic with Self-Imitation Learning
+
+Self-Imitation Learning
+
+Initialize parameter θ
+Initialize replay buffer D ← ∅
+Initialize episode buffer E ← ∅
+for each iteration do
+
+# Collect on-policy samples
+for each step do
+
+Execute an action st, at, rt, st+1 ∼ πθ(at|st)
+Store transition E ← E ∪ {(st, at, rt)}
+
+end for
+if st+1 is terminal then
+
+# Update replay buffer
+Compute returns Rt = (cid:80)∞
+D ← D ∪ {(st, at, Rt)} for all t in E
+Clear episode buffer E ← ∅
+
+k γk−trk for all t in E
+
+end if
+# Perform actor-critic using on-policy samples
+θ ← θ − η∇θLa2c
+# Perform self-imitation learning
+for m = 1 to M do
+
+(Eq. 4)
+
+Sample a mini-batch {(s, a, R)} from D
+θ ← θ − η∇θLsil
+
+(Eq. 1)
+
+end for
+
+end for
+
+is a hyperparameter for the value loss.
+
+Note that Lsil
+policy can be viewed as policy gradient using
+the value Vθ(s) as the state-dependent baseline except that
+we use the off-policy Monte-Carlo return (R) instead of
+on-policy return. Lsil
+policy can also be interpreted as cross
+entropy loss (i.e., classiﬁcation loss for discrete action) with
+sample weights proportional to the gap between the return
+and the agent’s value estimate (R − Vθ). If the return in
+the past is greater than the agent’s value estimate (R > Vθ),
+the agent learns to choose the action chosen in the past
+in the given state. Otherwise (R ≤ Vθ), and such a state-
+action pair is not used to update the parameter due to the
+(·)+ operator. This encourages the agent to imitate its own
+decisions in the past only when such decisions resulted
+in larger returns than expected. Lsil
+value updates the value
+estimate towards the off-policy return R.
+
+Prioritized Replay The proposed self-imitation learning
+objective Lsil is based on our theoretical result discussed in
+Section 4. In theory, the replay buffer (D) can be any trajec-
+tories from any policies. However, only good state-action
+pairs that satisfy R > Vθ can contribute to the gradient
+during self-imitation learning (Eq. 1). Therefore, in order to
+get many state-action pairs that satisfy R > Vθ, we propose
+to use the prioritized experience replay (Schaul et al., 2016).
+More speciﬁcally, we sample transitions from the replay
+buffer using the clipped advantage (R − Vθ(s))+ as priority
+
+(i.e., sampling probability is proportional to (R − Vθ(s))+).
+This naturally increases the proportion of valid samples that
+satisfy the constraint (R − Vθ(s))+ in SIL objective and
+thus contribute to the gradient.
+
+Advantage Actor-Critic with SIL (A2C+SIL) Our self-
+imitation learning can be combined with any actor-critic
+method.
+In this paper, we focus on the combination of
+advantage actor-critic (A2C) (Mnih et al., 2016) and self-
+imitation learning (A2C+SIL), as described in Algorithm 1.
+The objective of A2C (La2c) is given by (Mnih et al., 2016):
+
+La2c
+
+(cid:2)La2c
+
+La2c = Es,a∼πθ
+policy = − log πθ(at|st)(V n
+t (cid:107)2
+
+(cid:107)Vθ(st) − V n
+
+value =
+
+La2c
+
+policy + βa2cLa2c
+
+(cid:3)
+
+value
+t − Vθ(st)) − αHπθ
+t
+
+(4)
+
+(5)
+
+(6)
+
+where Hπ
+a π(a|st) log π(a|st) denotes the entropy
+in simpliﬁed notation, and α is a weight for entropy regular-
+ization. V n
+d=0 γdrt+d + γnVθ(st+n) is the n-step
+bootstrapped value.
+
+t = (cid:80)n−1
+
+To sum up, A2C+SIL performs both on-policy A2C update
+(La2c) and self-imitation learning from the replay buffer M
+times (Lsil) to exploit past good experiences. A2C+SIL
+is relatively simple to implement as it does not involve
+importance sampling.
+
+1
+2
+t = − (cid:80)
+
+4. Theoretical Justiﬁcation
+In this section, we justify the following claim.
+Claim. The self-imitation learning objective (Lsil in Eq. 1)
+can be viewed as an implementation of lower-bound-soft-
+Q-learning (Section 4.2) under the entropy-regularized RL
+framework.
+
+To show the above claim, we ﬁrst introduce the entropy-
+regularized RL (Haarnoja et al., 2017) in Section 4.1. Sec-
+tion 4.2 introduces lower-bound-soft-Q-learning, an off-
+policy Q-learning algorithm, which learns the optimal
+action-value function from good state-action pairs. Sec-
+tion 4.3 proves the above claim by showing the equivalence
+between self-imitation learning and lower-bound-soft-Q-
+learning. Section 4.4 further discusses the relationship be-
+tween A2C and self-imitation learning.
+
+4.1. Entropy-Regularized Reinforcement Learning
+
+The goal of entropy-regularized RL is to learn a stochastic
+policy which maximizes the entropy of the policy as well
+as the γ-discounted sum of rewards (Haarnoja et al., 2017;
+Ziebart et al., 2008):
+
+π∗ = argmaxπ
+
+Eπ
+
+(cid:34) ∞
+(cid:88)
+
+(cid:35)
+γt (rt + αHπ
+t )
+
+t=0
+
+(7)
+
+where Hπ
+t = − log π(at|st) is the entropy of the policy π,
+and α ≥ 0 represents the weight of entropy bonus. Intu-
+
+itively, in the entropy-regularized RL, a policy that has a
+high entropy is preferred (i.e., diverse actions chosen given
+the same state).
+
+The optimal soft Q-function and the optimal soft value func-
+tion are deﬁned as:
+
+Q∗(st, at) = Eπ∗
+
+rt +
+
+(cid:34)
+
+∞
+(cid:88)
+
+(cid:35)
+γk−t(rk + αHπ∗
+k )
+
+V ∗(st) = α log
+
+(cid:88)
+
+a
+
+k=t+1
+exp (Q∗(st, a)/α) .
+
+It is shown that the optimal policy π∗ has the following form
+(see Ziebart (2010); Haarnoja et al. (2017) for the proof):
+
+π∗(a|s) = exp((Q∗(s, a) − V ∗(s))/α).
+
+(10)
+
+This result provides the relationship among the optimal Q-
+function, the optimal policy, and the optimal value function,
+which will be useful in Section 4.3.
+
+4.2. Lower Bound Soft Q-Learning
+Lower bound of optimal soft Q-value Let π∗ be an op-
+timal policy in entropy-regularized RL (Eq. 7). It is straight-
+forward that the expected return of any behavior policy µ
+can serve as a lower bound of the optimal soft Q-value as
+follows:
+
+Q∗(st, at) = Eπ∗
+
+rt +
+
+γk−t(rk + αHπ∗
+k )
+
+(11)
+
+(cid:35)
+
+≥ Eµ
+
+rt +
+
+(cid:35)
+γk−t(rk + αHµ
+k )
+
+,
+
+(12)
+
+(cid:34)
+
+(cid:34)
+
+∞
+(cid:88)
+
+k=t+1
+
+∞
+(cid:88)
+
+k=t+1
+
+because the entropy-regularized return of the optimal policy
+is always greater or equal to that of any other policies.
+
+Lower bound soft Q-learning Suppose that we have full
+episode trajectories from a behavior policy µ, which consists
+of state-action-return triples: (st, at, Rt) where Rt = rt +
+(cid:80)∞
+k ) is the entropy-regularized return.
+We propose lower bound soft Q-learning which updates
+Qθ(s, a) parameterized by θ towards the optimal soft Q-
+value as follows (t is omitted for brevity):
+
+k=t+1 γk−t(rk + αHµ
+
+Llb = Es,a,R∼µ
+
+(cid:107)(R − Qθ(s, a))+(cid:107)2
+
+,
+
+(13)
+
+(cid:21)
+
+(cid:20) 1
+2
+
+where (·)+ = max(·, 0). Intuitively, we update the Q-value
+only when the return is greater than the Q-value estimate
+(R > Qθ(s, a)). This is justiﬁed by the fact that the lower
+bound (Eq. 12) implies that the estimated Q-value is lower
+than the optimal soft Q-value: Q∗(s, a) ≥ R > Qθ(s, a)
+when the environment is deterministic. Otherwise (R ≤
+Qθ(s, a)), such state-action pairs do not provide any useful
+
+Self-Imitation Learning
+
+information about the optimal soft Q-value, so they are not
+used for training. We call this lower-bound-soft-Q-learning
+as it updates Q-values towards the lower bounds of the
+optimal Q-values observed from the behavior policy.
+
+4.3. Connection between SIL and Lower Bound Soft
+
+Q-Learning
+
+(8)
+
+(9)
+
+In this section, we derive an equivalent form of lower-bound-
+soft-Q-learning (Eq. 13) for the actor-critic architecture and
+show a connection to self-imitation learning objective.
+
+Suppose that we have a parameterized soft Q-function Qθ.
+According to the form of optimal soft value function and
+optimal policy in the entropy-regularized RL (Eq. 9-10), it
+is natural to consider the following forms of a value function
+Vθ and a policy πθ:
+
+(cid:88)
+
+Vθ(s) = α log
+
+exp(Qθ(s, a)/α)
+
+a
+πθ(a|s) = exp((Qθ(s, a) − Vθ(s))/α).
+
+(14)
+
+(15)
+
+From these deﬁnitions, Qθ can be written as:
+
+Qθ(s, a) = Vθ(s) + α log πθ(a|s).
+
+(16)
+
+For convenience, let us deﬁne the following:
+
+ˆR = R − α log πθ(a|s)
+∆ = R − Qθ(s, a) = ˆR − Vθ(s).
+
+By plugging Eq. 16 into Eq. 13, we can derive the gradient
+estimator of lower-bound-soft-Q-learning for the actor-critic
+architecture as follows:
+
+∇θEs,a,R∼µ
+
+(cid:107)(R − Qθ(s, a))+(cid:107)2
+
+(cid:21)
+
+(cid:20) 1
+2
+
+= E [−∇θQθ(s, a)∆+]
+= E [−∇θ (α log πθ(a|s) + Vθ(s)) ∆+]
+= E [−α∇θ log πθ(a|s)∆+ − ∇θVθ(s)∆+]
+= E (cid:2)α∇θLlb
+policy − ∇θVθ(s)∆+
+= E (cid:2)α∇θLlb
+policy − ∇θVθ(s)(R − Qθ(s, a))+
+(cid:104)
+policy − ∇θVθ(s)( ˆR − Vθ(s))+
+= E
+α∇θLlb
+(cid:20)
+(cid:13)
+(cid:13)
+(cid:13)( ˆR − Vθ(s))+
+α∇θLlb
+(cid:13)
+(cid:13)
+(cid:13)
+
+policy + ∇θ
+
+= E
+
+2(cid:21)
+
+(cid:105)
+
+(cid:3)
+
+1
+2
+policy + ∇θLlb
+
+(cid:3) .
+
+value
+
+= E (cid:2)α∇θLlb
+
+(cid:3)
+
+Each loss term in Eq. 27 is given by:
+
+Llb
+
+policy = − log πθ(a|s)
+
+Llb
+
+value =
+
+(cid:13)
+(cid:13)( ˆR − Vθ(s))+
+(cid:13)
+
+1
+2
+policy and Llb
+policy = Lsil
+
+(cid:17)
+
++
+
+(cid:16) ˆR − Vθ(s)
+(cid:13)
+2
+(cid:13)
+(cid:13)
+
+.
+
+Thus, Llb
+value as α → 0
+(see Eq. 2-3). This shows that the proposed self-imitation
+
+value = Lsil
+
+(17)
+
+(18)
+
+(19)
+
+(20)
+
+(21)
+
+(22)
+
+(23)
+
+(24)
+
+(25)
+
+(26)
+
+(27)
+
+(28)
+
+(29)
+
+Self-Imitation Learning
+
+• Is self-imitation learning useful for exploration?
+
+• Is self-imitation learning complementary to count-based
+
+exploration methods?
+
+• Does self-imitation learning improve the overall perfor-
+
+mance across a variety of tasks?
+
+• When does self-imitation learning help and when does it
+
+not?
+
+• Can other off-policy actor-critic methods also exploit
+good experiences (e.g., ACER (Wang et al., 2017))?
+
+• Is self-imitation learning useful for continuous con-
+trol and compatible with other learning algorithms like
+PPO (Schulman et al., 2017b)?
+
+5.1. Implementation Details
+
+For Atari experiments, we used a 3-layer convolutional neu-
+ral network used in DQN (Mnih et al., 2015) with last 4
+stacked frames as input. We performed 4 self-imitation
+learning updates per on-policy actor-critic update (M = 4
+in Algorithm 1). Instead of treating losing a life as episode
+termination as typically done in the previous work, we ter-
+minated episodes when the game ends, as it is the true
+deﬁnition of episode termination. For MuJoCo experiments,
+we used an MLP which consists of 2 hidden layers with 64
+units as in Schulman et al. (2017b). We performed 10 self-
+imitation learning updates per each iteration (batch). More
+details of the network architectures and hyperparameters are
+described in the Appendix. Our implementation is based on
+OpenAI’s baseline implementation (Dhariwal et al., 2017).1
+
+5.2. Key-Door-Treasure Domain
+
+To investigate how self-imitation learning is useful for explo-
+ration and whether it is complementary to count-based ex-
+ploration method, we compared different methods on a grid-
+world domain, as illustrated in Figure 2. More speciﬁcally,
+we implemented a count-based exploration method (Strehl
+& Littman, 2008) that gives an exploration bonus reward:
+rexp = β/(cid:112)N (s), where N (s) is the visit count of state s
+and β is a hyperparameter. We also implemented a combina-
+tion with self-imitation learning shown as ‘A2C+SIL+EXP’
+in Figure 2.
+
+In the ﬁrst domain (Key-Door-Treasure), the chance of pick-
+ing up the key followed by opening the door and obtaining
+the treasure is low due to the sequential dependency be-
+tween them. We found that the baseline A2C tends to get
+stuck at a sub-optimal policy that only opens the door for
+a long time. A2C+EXP learns faster than A2C because ex-
+ploration bonus encourages the agent to collect the treasure
+more often. Interestingly, A2C+SIL and A2C+SIL+EXP
+learn most quickly. We observed that once the agent opens
+
+1The code is available on https://github.com/
+
+junhyukoh/self-imitation-learning.
+
+Figure 2. Key-Door-Treasure domain. The agent should pick up
+the key (K) in order to open the door (D) and collect the treasure
+(T) to maximize the reward. In the Apple-Key-Door-Treasure
+domain (bottom), there are two apples (A) that give small rewards
+(+1). ‘SIL’ and ‘EXP’ represent our self-imitation learning and a
+count-based exploration method respectively.
+
+learning objective Lsil (Eq. 1) can be viewed as a form
+of lower-bound-soft-Q-learning (Eq. 13), but without ex-
+plicitly optimizing for entropy bonus reward as α → 0.
+Since the lower-bound-soft-Q-learning directly updates the
+Q-value towards the lower bound of the optimal Q-value,
+self-imitation learning can be viewed as an algorithm that
+updates the policy (πθ) and the value (Vθ) directly towards
+the optimal policy and the optimal value respectively.
+
+4.4. Relationship between A2C and SIL
+
+Intuitively, A2C updates the policy in the direction of in-
+creasing the expected return of the learner policy and en-
+forces consistency between the value and the policy from
+on-policy trajectories. On the other hand, SIL updates each
+of them directly towards optimal policies and values re-
+spectively from off-policy trajectories. In fact, Nachum
+et al. (2017); Haarnoja et al. (2017); Schulman et al. (2017a)
+have recently shown that entropy-regularized A2C can be
+viewed as n-step online soft Q-learning (or path consis-
+tency learning). Therefore, both A2C and SIL objectives
+are designed to learn the optimal soft Q-function in the
+entropy-regularized RL framework. Thus, we claim that
+both objectives can be complementary to each other in
+that they share the same optimal solution as discussed in
+PGQL (O’Donoghue et al., 2017).
+
+5. Experiment
+The experiments are designed to answer the following:
+
+Self-Imitation Learning
+
+Figure 3. Learning curves on hard exploration Atari games. X-axis and y-axis represent steps and average reward respectively.
+
+the door with the key by chance, our SIL helps exploit such
+good experiences and quickly learns to open the door with
+the key. This increases the chance of getting the next reward
+(i.e., treasure) and helps learn the optimal policy. This is an
+example showing that self-imitation learning can drive deep
+exploration.
+
+In the second domain (Apple-Key-Door-Treasure), collect-
+ing apples near the agent’s initial location makes it even
+more challenging for the agent to learn the optimal policy,
+which collects all of the objects within the time limit (50
+steps). In this domain, many agents learned a sub-optimal
+policy that only collects two apples as shown in Figure 2. On
+the other hand, only A2C+SIL+EXP consistently learned the
+optimal policy because count-based exploration increases
+the chance of collecting the treasure, while self-imitation
+learning can quickly exploit such a good experience as soon
+as the agent collects it. This result shows that self-imitation
+learning and count-based exploration methods can be com-
+plementary to each other. This result also suggests that while
+exploration is important for increasing the chance/frequency
+of getting a reward, it is also important to exploit such rare
+experiences to learn a policy to consistently achieve it espe-
+cially when the reward is sparse.
+
+5.3. Hard Exploration Atari Games
+
+We investigated how useful our self-imitation learning is for
+several hard exploration Atari games on which recent ad-
+vanced exploration methods mainly focused. Figure 3 shows
+that A2C with our self-imitation learning (A2C+SIL) out-
+performs A2C on six hard exploration games. A2C failed to
+learn a better-than-random policy, except for Hero, whereas
+our method learned better policies and achieved human-
+level performances on Hero and Freeway. We observed that
+
+Table 1. Comparison to count-based exploration actor-critic agents
+on hard exploration Atari games. A3C+ and Reactor+ correspond
+to A3C-CTS (Bellemare et al., 2016) and Reactor-PixelCNN re-
+spectively (Ostrovski et al., 2017). SimHash represents TRPO-AE-
+SimHash (Tang et al., 2017). †Numbers are taken from plots.
+
+A2C+SIL A3C+ REACTOR+† SIMHASH
+
+MONTEZUMA
+FREEWAY
+HERO
+PRIVATEEYE
+GRAVITAR
+FROSTBITE
+VENTURE
+
+2500
+34
+33069
+8684
+2722
+6439
+0
+
+273
+30
+15210
+99
+239
+352
+0
+
+100
+32
+28000
+200
+1600
+4800
+1400
+
+75
+33
+N/A
+N/A
+482
+5214
+445
+
+even a random exploration occasionally leads to a positive
+reward on these games, and self-imitation learning helps
+exploit such an experience to learn a good policy from it.
+This can drive deep exploration when the improved policy
+gets closer to the next source of reward. This result supports
+our claim that exploiting past experiences can often help
+exploration.
+
+We further compared our method against the state-of-
+the-art count-based exploration actor-critic agents (A3C-
+CTS (Bellemare et al., 2016), Reactor-PixelCNN (Ostrovski
+et al., 2017), and SimHash (Tang et al., 2017)). These
+methods learn a density model of the observation or a hash
+function and use it to compute pseudo visit count, which is
+used to compute an exploration bonus reward. Even though
+our method does not have an explicit exploration bonus that
+encourages exploration, we were curious how well our self-
+imitation learning approach performs compared to these
+exploration approaches.
+
+Self-Imitation Learning
+
+Table 2. Performance of agents on 49 Atari games after 50M steps
+(200M frames) of training. ‘ACPER’ represents A2C with prior-
+itized replay using ACER objective. ‘Median’ shows median of
+human-normalized scores. ‘>Human’ shows the number of games
+where the agent outperforms human experts.
+
+MEDIAN >HUMAN
+
+AGENT
+
+A2C
+ACPER
+
+96.1%
+46.8%
+
+A2C+SIL
+
+138.7%
+
+23
+18
+
+29
+
+ing method on 49 Atari games. It turns out that our method
+(A2C+SIL) signiﬁcantly outperforms A2C in terms of me-
+dian human-normalized score as shown in Table 2. Figure 4
+shows the relative performance of A2C+SIL compared to
+A2C using the measure proposed by Wang et al. (2016). It is
+shown that our method (A2C+SIL) improves A2C on 35 out
+of 49 games in total and 11 out of 14 hard exploration games
+deﬁned by Bellemare et al. (2016). It is also shown that
+A2C+SIL performs signiﬁcantly better on many easy explo-
+ration games such as Time Pilot as well as hard exploration
+games. We observed that there is a certain learning stage
+where the agent suddenly achieves a high score by chance
+on such games, and our self-imitation learning exploits such
+experiences as soon as the agent experiences them.
+
+On the other hand, we observed that our method often learns
+faster at the early stage of learning, but sometimes gets stuck
+at a sub-optimal policy on a few games, such as James Bond
+and Star Gunner. This suggests that excessive exploitation
+at the early stage of learning can hurt the performance. We
+found that reducing the number of SIL updates per iteration
+or using a small weight for the SIL objective in a later learn-
+ing stage indeed resolves this issue and even improve the
+performance on such games, though the reported numbers
+are based on the single best hyperparameter. Thus, auto-
+matically controlling the degree of self-imitation learning
+would be an interesting future work.
+
+5.5. Effect of Lower Bound Soft Q-Learning
+
+A natural question is whether existing off-policy actor-critic
+methods can also beneﬁt from past good experiences by ex-
+ploiting them. To answer this question, we trained ACPER
+(A2C with prioritized experience replay) which performs
+off-policy actor-critic update proposed by ACER (Wang
+et al., 2017) by using the same prioritized experience replay
+as ours, which uses (R−Vθ)+ as sampling priority. ACPER
+can also be viewed as the original ACER with our proposed
+prioritized experience replay.
+
+Table 2 shows that ACPER performs much worse than our
+A2C+SIL and is even worse than A2C. We observed that
+ACPER also beneﬁts from good episodes on a few hard
+exploration games (e.g., Freeway) but was very unstable on
+many other games.
+
+Figure 4. Relative performance of A2C+SIL over A2C.
+
+Interestingly, Table 1 shows that A2C with our self-imitation
+learning (A2C+SIL) achieves better results on 6 out of 7
+hard exploration games without any technique that explicitly
+encourages exploration. This result suggests that it is impor-
+tant to exploit past good experiences as well as efﬁciently
+explore the environment to drive deep exploration.
+
+On the other hand, we found that A2C+SIL never receives
+a positive reward on Venture during training. This makes
+it impossible for our method to learn a good policy be-
+cause there is no good experience to exploit, whereas one of
+the count-based exploration methods (Reactor-PixelCNN)
+achieves a better performance, because the agent is encour-
+aged to explore different states even in the absence of reward
+signal from the environment. This result suggests that an
+advanced exploration method is essential in such environ-
+ments where a random exploration never generates a good
+experience within a reasonable amount of time. Combin-
+ing self-imitation learning with state-of-the-art exploration
+methods would be an interesting future work.
+
+5.4. Overall Performance on Atari Games
+
+To see how useful self-imitation learning is across various
+types of environments, we evaluated our self-imitation learn-
+
+Self-Imitation Learning
+
+Figure 5. Performance on OpenAI Gym MuJoCo tasks (top row) and delayed-reward versions of them (bottom row). The learning curves
+are averaged over 10 random seeds.
+
+We conjecture that this is due to the fact that the ACER
+objective has an importance weight term (π(a|s)/µ(a|s)).
+This approach may not beneﬁt much from the good expe-
+riences in the past if the current policy deviates too much
+from the decisions made in the past. On the other hand, the
+proposed self-imitation learning objective (Eq. 1) does not
+have an importance weight and can learn from any behav-
+ior, as long as the behavior policy performs better than the
+learner. This is because our gradient estimator can be inter-
+preted as lower-bound-soft-Q-learning, which updates the
+parameter directly towards the optimal Q-value regardless
+of the similarity between the behavior policy and the learner
+as discussed in Section 4.2. This result shows that our self-
+imitation learning objective is suitable for exploiting past
+good experiences.
+
+5.6. Performance on MuJoCo
+
+This section investigates whether self-imitation learning
+is beneﬁcial for continuous control tasks and whether it
+can be applied to other types of policy optimization algo-
+rithms, such as proximal policy optimization (PPO) (Schul-
+man et al., 2017b). Note that unlike A2C, PPO does not
+have a strong theoretical connection to our SIL objective.
+However, we claim that they can still be complementary to
+each other in that both PPO and SIL try to update the policy
+and the value towards the optimal policy and value. To
+empirically verify this, we implemented PPO+SIL, which
+updates the parameter using both the PPO algorithm and
+our SIL algorithm and evaluated it on 6 MuJoCo tasks in
+OpenAI Gym (Brockman et al., 2016).
+
+The result in Figure 5 shows that our self-imitation learn-
+ing improves PPO on Swimmer, Walker2d, and Ant tasks.
+Unlike Atari games, the reward structure in this benchmark
+is smooth and dense in that the agent always receives a
+reasonable amount of reward according to its continuous
+progress. We conjecture that the agent has a relatively low
+chance to occasionally perform well and learn much faster
+
+by exploiting such an experience in this type of domain.
+Nevertheless, the overall improvement suggests that self-
+imitation learning can be generally applicable to actor-critic
+architectures and a variety of tasks.
+
+To verify our conjecture, we further conducted experiments
+by delaying reward the agent gets from the environment.
+More speciﬁcally, the modiﬁed tasks give an accumulated
+reward after every 20 steps (or when the episode terminates).
+This makes it more difﬁcult to learn a good policy because
+the agent does not receive a reward signal for every step.
+The result is shown in the bottom row in Figure 5. Not sur-
+prisingly, we observed that both PPO and PPO+SIL perform
+worse on the delayed-reward tasks than themselves on the
+standard OpenAI Gym tasks. However, it is clearly shown
+that the gap between PPO+SIL and PPO is larger on delayed-
+reward tasks compared to standard tasks. Unlike the stan-
+dard OpenAI Gym tasks where reward is well-designed and
+dense, we conjecture that the chance of achieving high over-
+all rewards is much low in the delayed-reward tasks. Thus,
+the agent can beneﬁt more from self-imitation learning be-
+cause self-imitation learning captures such rare experiences
+and learn from them.
+
+6. Conclusion
+In this paper, we proposed self-imitation learning, which
+learns to reproduce the agent’s past good experiences, and
+showed that self-imitation learning is very helpful on hard
+exploration tasks as well as a variety of other tasks including
+continuous control tasks. We also showed that a proper level
+of exploitation of past experiences during learning can drive
+deep exploration, and that self-imitation learning and explo-
+ration methods can be complementary. Our results suggest
+that there can be a certain learning stage where exploitation
+is more important than exploration or vice versa. Thus, we
+believe that developing methods for balancing between ex-
+ploration and exploitation in terms of collecting and learning
+from experiences is an important future research direction.
+
+Self-Imitation Learning
+
+Acknowledgement
+
+This work was supported by NSF grant IIS-1526059. Any
+opinions, ﬁndings, conclusions, or recommendations ex-
+pressed here are those of the authors and do not necessarily
+reﬂect the views of the sponsor.
+
+References
+
+Abolaﬁa, D. A., Norouzi, M., and Le, Q. V. Neural program
+synthesis with priority queue training. arXiv preprint
+arXiv:1801.03526, 2018.
+
+Bellemare, M., Srinivasan, S., Ostrovski, G., Schaul, T., Sax-
+ton, D., and Munos, R. Unifying count-based exploration
+and intrinsic motivation. In NIPS, 2016.
+
+Bellemare, M. G., Naddaf, Y., Veness, J., and Bowling, M.
+The arcade learning environment: An evaluation plat-
+form for general agents. Journal of Artiﬁcial Intelligence
+Research, 47:253–279, jun 2013.
+
+Blundell, C., Uria, B., Pritzel, A., Li, Y., Ruderman,
+A., Leibo, J. Z., Rae, J., Wierstra, D., and Hass-
+abis, D. Model-free episodic control. arXiv preprint
+arXiv:1606.04460, 2016.
+
+Brockman, G., Cheung, V., Pettersson, L., Schneider, J.,
+Schulman, J., Tang, J., and Zaremba, W. OpenAI gym.
+arXiv preprint arXiv:1606.01540, 2016.
+
+Dhariwal, P., Hesse, C., Klimov, O., Nichol, A., Plappert,
+M., Radford, A., Schulman, J., Sidor, S., and Wu, Y. Ope-
+nAI Baselines. https://github.com/openai/
+baselines, 2017.
+
+Gruslys, A., Azar, M. G., Bellemare, M. G., and Munos, R.
+The reactor: A sample-efﬁcient actor-critic architecture.
+In ICLR, 2018.
+
+Haarnoja, T., Tang, H., Abbeel, P., and Levine, S. Rein-
+forcement learning with deep energy-based policies. In
+ICML, 2017.
+
+He, F. S., Liu, Y., Schwing, A. G., and Peng, J. Learning
+to play in a day: Faster deep reinforcement learning by
+optimality tightening. In ICLR, 2017.
+
+Hester, T., Vecerik, M., Pietquin, O., Lanctot, M., Schaul,
+T., Piot, B., Sendonaris, A., Dulac-Arnold, G., Osband, I.,
+Agapiou, J., et al. Deep q-learning from demonstrations.
+In AAAI, 2018.
+
+Liang, C., Berant, J., Le, Q., Forbus, K. D., and Lao, N.
+Neural symbolic machines: Learning semantic parsers on
+freebase with weak supervision. In ACL, 2016.
+
+Lillicrap, T. P., Hunt, J. J., Pritzel, A., Heess, N., Erez, T.,
+Tassa, Y., Silver, D., and Wierstra, D. Continuous control
+with deep reinforcement learning. In ICLR, 2016.
+
+Lin, L. J. Self-improving reactive agents based on reinforce-
+ment learning, planning and teaching. Machine Learning,
+8:293–321, 1992.
+
+Mnih, V., Kavukcuoglu, K., Silver, D., Rusu, A. A., Ve-
+ness, J., Bellemare, M. G., Graves, A., Riedmiller, M.,
+Fidjeland, A. K., Ostrovski, G., Petersen, S., Beattie, C.,
+Sadik, A., Antonoglou, I., King, H., Kumaran, D., Wier-
+stra, D., Legg, S., and Hassabis, D. Human-level control
+through deep reinforcement learning. Nature, 518(7540):
+529–533, 2015.
+
+Mnih, V., Badia, A. P., Mirza, M., Graves, A., Lillicrap,
+T. P., Harley, T., Silver, D., and Kavukcuoglu, K. Asyn-
+chronous methods for deep reinforcement learning. In
+ICML, 2016.
+
+Moore, A. W. and Atkeson, C. G. Memory-based reinforce-
+ment learning: Efﬁcient computation with prioritized
+sweeping. In NIPS, 1992.
+
+Munos, R., Stepleton, T., Harutyunyan, A., and Bellemare,
+M. G. Safe and efﬁcient off-policy reinforcement learning.
+In NIPS, 2016.
+
+Nachum, O., Norouzi, M., Xu, K., and Schuurmans, D.
+Bridging the gap between value and policy based rein-
+forcement learning. In NIPS, 2017.
+
+Nair, A., McGrew, B., Andrychowicz, M., Zaremba, W.,
+and Abbeel, P. Overcoming exploration in reinforce-
+arXiv preprint
+ment learning with demonstrations.
+arXiv:1709.10089, 2017.
+
+O’Donoghue, B., Munos, R., Kavukcuoglu, K., and Mnih,
+V. Combining policy gradient and q-learning. In ICLR,
+2017.
+
+Osband, I., Blundell, C., Pritzel, A., and Van Roy, B. Deep
+
+exploration via bootstrapped dqn. In NIPS, 2016.
+
+Ostrovski, G., Bellemare, M. G., Oord, A. v. d., and Munos,
+R. Count-based exploration with neural density models.
+In ICML, 2017.
+
+Precup, D., Sutton, R. S., and Singh, S. P. Eligibility traces
+
+Konda, V. R. and Tsitsiklis, J. N. Actor-critic algorithms.
+
+for off-policy policy evaluation. In ICML, 2000.
+
+In NIPS, 2000.
+
+Lengyel, M. and Dayan, P. Hippocampal contributions to
+
+control: the third way. In NIPS, 2008.
+
+Precup, D., Sutton, R. S., and Dasgupta, S. Off-policy
+temporal difference learning with function approximation.
+In ICML, 2001.
+
+Self-Imitation Learning
+
+Pritzel, A., Uria, B., Srinivasan, S., Puigdom`enech, A.,
+Vinyals, O., Hassabis, D., Wierstra, D., and Blundell, C.
+Neural episodic control. In ICML, 2017.
+
+Ziebart, B. D. Modeling Purposeful Adaptive Behavior with
+the Principle of Maximum Causal Entropy. PhD thesis,
+Carnegie Mellon University, 2010.
+
+Ziebart, B. D., Maas, A. L., Bagnell, J. A., and Dey, A. K.
+Maximum entropy inverse reinforcement learning. In
+AAAI, 2008.
+
+Schaul, T., Quan, J., Antonoglou, I., and Silver, D. Priori-
+
+tized experience replay. In ICLR, 2016.
+
+Schmidhuber, J. Adaptive conﬁdence and adaptive curios-
+In Institut fur Informatik, Technische Universitat
+
+ity.
+Munchen, 1991.
+
+Schulman, J., Chen, X., and Abbeel, P. Equivalence be-
+tween policy gradients and soft q-learning. arXiv preprint
+arXiv:1704.06440, 2017a.
+
+Schulman, J., Wolski, F., Dhariwal, P., Radford, A., and
+Klimov, O. Proximal policy optimization algorithms.
+arXiv preprint arXiv:1707.06347, 2017b.
+
+Silver, D., Lever, G., Heess, N., Degris, T., Wierstra, D., and
+Riedmiller, M. Deterministic policy gradient algorithms.
+In ICML, 2014.
+
+Stadie, B. C., Levine, S., and Abbeel, P. Incentivizing ex-
+ploration in reinforcement learning with deep predictive
+models. arXiv preprint arXiv:1507.00814, 2015.
+
+Strehl, A. L. and Littman, M. L. An analysis of model-
+based interval estimation for markov decision processes.
+Journal of Computer and System Sciences, 74(8):1309–
+1331, 2008.
+
+Sutton, R. S., McAllester, D. A., Singh, S. P., and Mansour,
+Y. Policy gradient methods for reinforcement learning
+with function approximation. In NIPS, 1999.
+
+Tang, H., Houthooft, R., Foote, D., Stooke, A., Chen, O. X.,
+Duan, Y., Schulman, J., DeTurck, F., and Abbeel, P. #ex-
+ploration: A study of count-based exploration for deep
+reinforcement learning. In NIPS, 2017.
+
+Thrun, S. B. The role of exploration in learning control.
+Handbook of Intelligent Control: Neural, Fuzzy and
+Adaptive Approaches, 1992.
+
+Todorov, E., Erez, T., and Tassa, Y. Mujoco: A physics
+
+engine for model-based control. IROS, 2012.
+
+Wang, Z., Schaul, T., Hessel, M., van Hasselt, H., Lanctot,
+M., and de Freitas, N. Dueling network architectures for
+deep reinforcement learning. In ICML, 2016.
+
+Wang, Z., Bapst, V., Heess, N., Mnih, V., Munos, R.,
+Kavukcuoglu, K., and de Freitas, N. Sample efﬁcient
+actor-critic with experience replay. In ICML, 2017.
+
+Xu, H., Gao, Y., Lin, J., Yu, F., Levine, S., and Darrell, T.
+Reinforcement learning from imperfect demonstrations.
+In ICML, 2018.
+
+A. Hyperparameters
+
+Self-Imitation Learning
+
+Table 3. A2C+SIL hyperparameters on Atari games.
+
+Value
+
+Conv(32-8x8-4)
+-Conv(64-4x4-2)
+-Conv(64-3x3-1)
+-FC(512)
+0.0007
+16
+5
+0.01
+
+Hyperparameters
+
+Architecture
+
+Learning rate
+Number of environments
+Number of steps per iteration
+Entropy regularization (α)
+
+SIL update per iteration (M )
+SIL batch size
+SIL loss weight
+SIL value loss weight (βsil)
+Replay buffer size
+Exponent for prioritization
+Bias correction for prioritized replay
+
+4
+512
+1
+0.01
+105
+0.6
+0.1 for hard exploration experiment (Section 5.3)
+0.4 for overall evaluation (Section 5.4)
+
+Hyperparameters
+
+Value
+
+Table 4. PPO+SIL hyperparameters on MuJoCo.
+
+Architecture
+Learning rate
+Horizon
+Number of epochs
+Minibatch size
+Discount factor (γ)
+GAE parameter (λ)
+Entropy regularization (α)
+
+FC(64)-FC(64)
+Best chosen from {0.0003, 0.0001, 0.00005, 0.00003}
+2048
+10
+64
+0.99
+0.95
+0
+
+SIL update per batch
+SIL batch size
+SIL loss weight
+SIL value loss weight (β)
+Replay buffer size
+Exponent for prioritization
+Bias correction for prioritized replay
+
+10
+512
+0.1
+Best chosen from {0.01, 0.05}
+50000
+Best chosen from {0.6, 1.0}
+0.1
+
+B. Performance on Atari Games
+
+Self-Imitation Learning
+
+Table 5. Performances on 49 Atari games with 30 random no-op after 50M steps of training (200M frames).
+
+A2C ACPER
+
+A2C+SIL
+
+Alien
+Amidar
+Assault
+Asterix
+Asteroids
+Atlantis
+BankHeist
+BattleZone
+BeamRider
+Bowling
+Boxing
+Breakout
+Centipede
+ChopperCommand
+CrazyClimber
+DemonAttack
+DoubleDunk
+Enduro
+FishingDerby
+Freeway
+Frostbite
+Gopher
+Gravitar
+Hero
+IceHockey
+Jamesbond
+Kangaroo
+Krull
+KungFuMaster
+MontezumaRevenge
+MsPacman
+NameThisGame
+Pong
+PrivateEye
+Qbert
+Riverraid
+RoadRunner
+Robotank
+Seaquest
+SpaceInvaders
+StarGunner
+Tennis
+TimePilot
+Tutankham
+UpNDown
+Venture
+VideoPinball
+WizardOfWor
+Zaxxon
+
+1859.2
+739.9
+1981.4
+16083.3
+2056.0
+3032444.2
+1333.7
+10683.3
+3931.7
+31.2
+99.7
+501.6
+3857.8
+3464.2
+129715.8
+18331.4
+-0.5
+0.0
+39.1
+0.0
+339.5
+9358.5
+329.2
+28008.1
+-4.3
+399.2
+1563.3
+8883.9
+32507.5
+5.8
+2843.4
+11174.2
+20.8
+210.8
+17605.2
+13036.0
+39874.2
+3.2
+1795.2
+2466.1
+57371.7
+-10.3
+5346.7
+305.6
+48131.8
+0.0
+391241.6
+4196.7
+124.2
+
+390.2
+424.8
+818.2
+3533.1
+1780.1
+58012.5
+1203.2
+15025.0
+2602.4
+59.3
+100.0
+118.5
+7790.1
+1307.5
+19918.8
+4777.5
+-9.8
+3113.3
+59.8
+31.4
+2342.5
+3919.5
+627.5
+13299.1
+0.0
+598.1
+5875.0
+11323.2
+20485.0
+0.0
+1016.0
+2888.0
+20.9
+100.0
+657.2
+2224.5
+8925.0
+7.7
+804.5
+729.5
+1107.5
+-17.0
+3952.5
+270.7
+9562.5
+0.0
+21797.7
+1550.0
+4278.8
+
+2242.2
+1362.0
+1812.0
+17984.2
+2259.4
+3084781.7
+1137.8
+25075.0
+2366.2
+31.1
+99.6
+452.0
+7559.5
+6710.0
+130185.8
+10140.5
+21.5
+1205.1
+55.8
+32.2
+6289.8
+23304.2
+1874.2
+33156.7
+-2.4
+310.8
+2888.3
+10614.6
+34449.2
+1100.0
+4025.1
+14958.2
+20.9
+661.2
+104975.6
+14306.1
+57071.7
+10.5
+2456.5
+2951.7
+31309.2
+-17.3
+10811.7
+340.5
+53314.6
+0.0
+461522.4
+7088.3
+9164.2
+
+Self-Imitation Learning
+
+Figure 6. Learning curves on 49 Atari games.
+

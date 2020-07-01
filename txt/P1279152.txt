@@ -5656,3 +5656,5661 @@ for s = 3 and by 0.38% for s = 9 compared to s = 1.
 
 23
 
+9
+1
+0
+2
+ 
+n
+a
+J
+ 
+0
+2
+ 
+ 
+]
+
+G
+L
+.
+s
+c
+[
+ 
+ 
+5
+v
+6
+1
+5
+9
+0
+.
+6
+0
+7
+1
+:
+v
+i
+X
+r
+a
+
+CatBoost: unbiased boosting with categorical features
+
+Liudmila Prokhorenkova1,2, Gleb Gusev1,2, Aleksandr Vorobev1,
+Anna Veronika Dorogush1, Andrey Gulin1
+1Yandex, Moscow, Russia
+2Moscow Institute of Physics and Technology, Dolgoprudny, Russia
+{ostroumova-la, gleb57, alvor88, annaveronika, gulin}@yandex-team.ru
+
+Abstract
+
+This paper presents the key algorithmic techniques behind CatBoost, a new gradient
+boosting toolkit. Their combination leads to CatBoost outperforming other publicly
+available boosting implementations in terms of quality on a variety of datasets.
+Two critical algorithmic advances introduced in CatBoost are the implementation
+of ordered boosting, a permutation-driven alternative to the classic algorithm, and
+an innovative algorithm for processing categorical features. Both techniques were
+created to ﬁght a prediction shift caused by a special kind of target leakage present
+in all currently existing implementations of gradient boosting algorithms. In this
+paper, we provide a detailed analysis of this problem and demonstrate that proposed
+algorithms solve it effectively, leading to excellent empirical results.
+
+1
+
+Introduction
+
+Gradient boosting is a powerful machine-learning technique that achieves state-of-the-art results in a
+variety of practical tasks. For many years, it has remained the primary method for learning problems
+with heterogeneous features, noisy data, and complex dependencies: web search, recommendation
+systems, weather forecasting, and many others [5, 26, 29, 32]. Gradient boosting is essentially a
+process of constructing an ensemble predictor by performing gradient descent in a functional space.
+It is backed by solid theoretical results that explain how strong predictors can be built by iteratively
+combining weaker models (base predictors) in a greedy manner [17].
+
+We show in this paper that all existing implementations of gradient boosting face the following
+statistical issue. A prediction model F obtained after several steps of boosting relies on the targets
+of all training examples. We demonstrate that this actually leads to a shift of the distribution of
+F (xk) | xk for a training example xk from the distribution of F (x) | x for a test example x. This
+ﬁnally leads to a prediction shift of the learned model. We identify this problem as a special kind of
+target leakage in Section 4. Further, there is a similar issue in standard algorithms of preprocessing
+categorical features. One of the most effective ways [6, 25] to use them in gradient boosting is
+converting categories to their target statistics. A target statistic is a simple statistical model itself, and
+it can also cause target leakage and a prediction shift. We analyze this in Section 3.
+
+In this paper, we propose ordering principle to solve both problems. Relying on it, we derive
+ordered boosting, a modiﬁcation of standard gradient boosting algorithm, which avoids target
+leakage (Section 4), and a new algorithm for processing categorical features (Section 3). Their
+combination is implemented as an open-source library1 called CatBoost (for “Categorical Boosting”),
+which outperforms the existing state-of-the-art implementations of gradient boosted decision trees —
+XGBoost [8] and LightGBM [16] — on a diverse set of popular machine learning tasks (see Section 6).
+
+1https://github.com/catboost/catboost
+
+Preprint. Work in progress.
+
+2 Background
+
+Assume we observe a dataset of examples D = {(xk, yk)}k=1..n, where xk = (x1
+k ) is a
+random vector of m features and yk ∈ R is a target, which can be either binary or a numerical
+response. Examples (xk, yk) are independent and identically distributed according to some unknown
+distribution P (·, ·). The goal of a learning task is to train a function F : Rm → R which minimizes
+the expected loss L(F ) := EL(y, F (x)). Here L(·, ·) is a smooth loss function and (x, y) is a test
+example sampled from P independently of the training set D.
+A gradient boosting procedure [12] builds iteratively a sequence of approximations F t : Rm → R,
+t = 0, 1, . . . in a greedy fashion. Namely, F t is obtained from the previous approximation F t−1 in
+an additive manner: F t = F t−1 + αht, where α is a step size and function ht : Rm → R (a base
+predictor) is chosen from a family of functions H in order to minimize the expected loss:
+
+k, . . . , xm
+
+ht = arg min
+
+L(F t−1 + h) = arg min
+
+EL(y, F t−1(x) + h(x)).
+
+(1)
+
+h∈H
+
+h∈H
+
+The minimization problem is usually approached by the Newton method using a second–order
+approximation of L(F t−1 + ht) at F t−1 or by taking a (negative) gradient step. Both methods
+are kinds of functional gradient descent [10, 24]. In particular, the gradient step ht is chosen in
+(cid:12)
+such a way that ht(x) approximates −gt(x, y), where gt(x, y) := ∂L(y,s)
+(cid:12)s=F t−1(x). Usually, the
+least-squares approximation is used:
+
+∂s
+
+ht = arg min
+
+E (cid:0)−gt(x, y) − h(x)(cid:1)2
+
+.
+
+h∈H
+
+CatBoost is an implementation of gradient boosting, which uses binary decision trees as base
+predictors. A decision tree [4, 10, 27] is a model built by a recursive partition of the feature space
+Rm into several disjoint regions (tree nodes) according to the values of some splitting attributes a.
+Attributes are usually binary variables that identify that some feature xk exceeds some threshold t,
+that is, a = 1{xk>t}, where xk is either numerical or binary feature, in the latter case t = 0.5.2 Each
+ﬁnal region (leaf of the tree) is assigned to a value, which is an estimate of the response y in the
+region for the regression task or the predicted class label in the case of classiﬁcation problem.3 In
+this way, a decision tree h can be written as
+
+(2)
+
+(3)
+
+h(x) =
+
+bj1{x∈Rj },
+
+J
+(cid:88)
+
+j=1
+
+where Rj are the disjoint regions corresponding to the leaves of the tree.
+
+3 Categorical features
+
+3.1 Related work on categorical features
+
+A categorical feature is one with a discrete set of values called categories that are not comparable to
+each other. One popular technique for dealing with categorical features in boosted trees is one-hot
+encoding [7, 25], i.e., for each category, adding a new binary feature indicating it. However, in the
+case of high cardinality features (like, e.g., “user ID” feature), such technique leads to infeasibly
+large number of new features. To address this issue, one can group categories into a limited number
+of clusters and then apply one-hot encoding. A popular method is to group categories by target
+statistics (TS) that estimate expected target value in each category. Micci-Barreca [25] proposed
+to consider TS as a new numerical feature instead. Importantly, among all possible partitions of
+
+2Alternatively, non-binary splits can be used, e.g., a region can be split according to all values of a categorical
+feature. However, such splits, compared to binary ones, would lead to either shallow trees (unable to capture
+complex dependencies) or to very complex trees with exponential number of terminal nodes (having weaker
+target statistics in each of them). According to [4], the tree complexity has a crucial effect on the accuracy of the
+model and less complex trees are less prone to overﬁtting.
+
+3In a regression task, splitting attributes and leaf values are usually chosen by the least–squares criterion.
+Note that, in gradient boosting, a tree is constructed to approximate the negative gradient (see Equation (2)), so
+it solves a regression problem.
+
+2
+
+categories into two sets, an optimal split on the training data in terms of logloss, Gini index, MSE
+can be found among thresholds for the numerical TS feature [4, Section 4.2.2] [11, Section 9.2.4].
+In LightGBM [20], categorical features are converted to gradient statistics at each step of gradient
+boosting. Though providing important information for building a tree, this approach can dramatically
+increase (i) computation time, since it calculates statistics for each categorical value at each step, and
+(ii) memory consumption to store which category belongs to which node for each split based on a
+categorical feature. To overcome this issue, LightGBM groups tail categories into one cluster [21] and
+thus looses part of information. Besides, the authors claim that it is still better to convert categorical
+features with high cardinality to numerical features [19]. Note that TS features require calculating
+and storing only one number per one category.
+
+Thus, using TS as new numerical features seems to be the most efﬁcient method of handling
+categorical features with minimum information loss. TS are widely-used, e.g., in the click prediction
+task (click-through rates) [1, 15, 18, 22], where such categorical features as user, region, ad, publisher
+play a crucial role. We further focus on ways to calculate TS and leave one-hot encoding and gradient
+statistics out of the scope of the current paper. At the same time, we believe that the ordering principle
+proposed in this paper is also effective for gradient statistics.
+
+3.2 Target statistics
+
+As discussed in Section 3.1, an effective and efﬁcient way to deal with a categorical feature i is
+to substitute the category xi
+k of k-th training example with one numeric feature equal to some
+target statistic (TS) ˆxi
+k. Commonly, it estimates the expected target y conditioned by the category:
+k ≈ E(y | xi = xi
+ˆxi
+k).
+
+Greedy TS A straightforward approach is to estimate E(y | xi = xi
+over the training examples with the same category xi
+categories, and one usually smoothes it by some prior p:
+
+k) as the average value of y
+k [25]. This estimate is noisy for low-frequency
+
+ˆxi
+k =
+
+(cid:80)n
+
+1
+
+j=1
+(cid:80)n
+
+j=1
+
+{xi
+j =xi
+1
+
+{xi
+
+k} · yj + a p
+k} + a
+j =xi
+
+,
+
+where a > 0 is a parameter. A common setting for p is the average target value in the dataset [25].
+The problem of such greedy approach is target leakage: feature ˆxi
+k is computed using yk, the target of
+xk. This leads to a conditional shift [30]: the distribution of ˆxi|y differs for training and test examples.
+The following extreme example illustrates how dramatically this may affect the generalization error
+of the learned model. Assume i-th feature is categorical, all its values are unique, and for each
+category A, we have P(y = 1 | xi = A) = 0.5 for a classiﬁcation task. Then, in the training dataset,
+k = yk+ap
+ˆxi
+to perfectly classify
+all training examples. However, for all test examples, the value of the greedy TS is p, and the obtained
+model predicts 0 for all of them if p < t and predicts 1 otherwise, thus having accuracy 0.5 in both
+cases. To this end, we formulate the following desired property for TS:
+
+1+a , so it is sufﬁcient to make only one split with threshold t = 0.5+ap
+
+1+a
+
+P1 E(ˆxi | y = v) = E(ˆxi
+
+In our example above, E(ˆxi
+
+k | yk = v), where (xk, yk) is the k-th training example.
+1+a and E(ˆxi | y) = p are different.
+
+k | yk) = yk+ap
+
+There are several ways to avoid this conditional shift. Their general idea is to compute the TS for xk
+on a subset of examples Dk ⊂ D \ {xk} excluding xk:
+
+ˆxi
+k =
+
+(cid:80)
+
+1
+
+xj ∈Dk
+(cid:80)
+
+xj ∈Dk
+
+{xi
+j =xi
+1
+
+{xi
+
+k} · yj + a p
+k} + a
+j =xi
+
+.
+
+Holdout TS One way is to partition the training dataset into two parts D = ˆD0 (cid:116) ˆD1 and use
+Dk = ˆD0 for calculating the TS according to (5) and ˆD1 for training (e.g., applied in [8] for Criteo
+dataset). Though such holdout TS satisﬁes P1, this approach signiﬁcantly reduces the amount of data
+used both for training the model and calculating the TS. So, it violates the following desired property:
+
+P2 Effective usage of all training data for calculating TS features and for learning a model.
+
+(4)
+
+(5)
+
+3
+
+Leave-one-out TS At ﬁrst glance, a leave-one-out technique might work well: take Dk = D \ xk
+for training examples xk and Dk = D for test ones [31]. Surprisingly, it does not prevent target
+k = A for all examples. Let n+ be the
+leakage. Indeed, consider a constant categorical feature: xi
+k = n+−yk+a p
+number of examples with y = 1, then ˆxi
+and one can perfectly classify the training
+dataset by making a split with threshold t = n+−0.5+a p
+
+n−1+a
+
+.
+
+n−1+a
+
+Ordered TS CatBoost uses a more effective strategy. It relies on the ordering principle, the
+central idea of the paper, and is inspired by online learning algorithms which get training examples
+sequentially in time [1, 15, 18, 22]). Clearly, the values of TS for each example rely only on the
+observed history. To adapt this idea to standard ofﬂine setting, we introduce an artiﬁcial “time”, i.e.,
+a random permutation σ of the training examples. Then, for each example, we use all the available
+“history” to compute its TS, i.e., take Dk = {xj : σ(j) < σ(k)} in Equation (5) for a training
+example and Dk = D for a test one. The obtained ordered TS satisﬁes the requirement P1 and allows
+to use all training data for learning the model (P2). Note that, if we use only one random permutation,
+then preceding examples have TS with much higher variance than subsequent ones. To this end,
+CatBoost uses different permutations for different steps of gradient boosting, see details in Section 5.
+
+4 Prediction shift and ordered boosting
+
+4.1 Prediction shift
+
+In this section, we reveal the problem of prediction shift in gradient boosting, which was neither
+recognized nor previously addressed. Like in case of TS, prediction shift is caused by a special kind
+of target leakage. Our solution is called ordered boosting and resembles the ordered TS method.
+
+Let us go back to the gradient boosting procedure described in Section 2. In practice, the expectation
+in (2) is unknown and is usually approximated using the same dataset D:
+
+ht = arg min
+
+h∈H
+
+1
+n
+
+n
+(cid:88)
+
+k=1
+
+(cid:0)−gt(xk, yk) − h(xk)(cid:1)2
+
+.
+
+(6)
+
+Now we describe and analyze the following chain of shifts:
+
+1. the conditional distribution of the gradient gt(xk, yk) | xk (accounting for randomness of
+
+D \ {xk}) is shifted from that distribution on a test example gt(x, y) | x;
+
+2. in turn, base predictor ht deﬁned by Equation (6) is biased from the solution of Equation (2);
+3. this, ﬁnally, affects the generalization ability of the trained model F t.
+
+As in the case of TS, these problems are caused by the target leakage. Indeed, gradients used at each
+step are estimated using the target values of the same data points the current model F t−1 was built on.
+However, the conditional distribution F t−1(xk) | xk for a training example xk is shifted, in general,
+from the distribution F t−1(x) | x for a test example x. We call this a prediction shift.
+
+Related work on prediction shift The shift of gradient conditional distribution gt(xk, yk) | xk
+was previously mentioned in papers on boosting [3, 13] but was not formally deﬁned. Moreover, even
+the existence of non-zero shift was not proved theoretically. Based on the out-of-bag estimation [2],
+Breiman proposed iterated bagging [3] which constructs a bagged weak learner at each iteration on
+the basis of “out-of-bag” residual estimates. However, as we formally show in Appendix E, such
+residual estimates are still shifted. Besides, the bagging scheme increases learning time by factor of
+the number of data buckets. Subsampling of the dataset at each iteration proposed by Friedman [13]
+addresses the problem much more heuristically and also only alleviates it.
+
+Analysis of prediction shift We formally analyze the problem of prediction shift in a simple case
+of a regression task with the quadratic loss function L(y, ˆy) = (y − ˆy)2.4 In this case, the negative
+gradient −gt(xk, yk) in Equation (6) can be substituted by the residual function rt−1(xk, yk) :=
+yk − F t−1(xk).5 Assume we have m = 2 features x1, x2 that are i.i.d. Bernoulli random variables
+
+4We restrict the rest of Section 4 to this case, but the approaches of Section 4.2 are applicable to other tasks.
+5Here we removed the multiplier 2, what does not matter for further analysis.
+
+4
+
+with p = 1/2 and y = f ∗(x) = c1x1 + c2x2. Assume we make N = 2 steps of gradient boosting
+with decision stumps (trees of depth 1) and step size α = 1. We obtain a model F = F 2 = h1 + h2.
+W.l.o.g., we assume that h1 is based on x1 and h2 is based on x2, what is typical for |c1| > |c2| (here
+we set some asymmetry between x1 and x2).
+
+Theorem 1 1. If two independent samples D1 and D2 of size n are used to estimate h1 and h2,
+respectively, using Equation (6), then ED1,D2 F 2(x) = f ∗(x) + O(1/2n) for any x ∈ {0, 1}2.
+2. If the same dataset D = D1 = D2 is used in Equation (6) for both h1 and h2, then EDF 2(x) =
+f ∗(x) − 1
+
+n−1 c2(x2 − 1
+
+2 ) + O(1/2n).
+
+This theorem means that the trained model is an unbiased estimate of the true dependence y = f ∗(x),
+when we use independent datasets at each gradient step.6 On the other hand, if we use the same
+dataset at each step, we suffer from a bias − 1
+2 ), which is inversely proportional to
+the data size n. Also, the value of the bias can depend on the relation f ∗: in our example, it is
+proportional to c2. We track the chain of shifts for the second part of Theorem 1 in a sketch of the
+proof below, while the full proof of Theorem 1 is available in Appendix A.
+
+n−1 c2(x2 − 1
+
+Sketch of the proof . Denote by ξst, s, t ∈ {0, 1}, the number of examples (xk, yk) ∈ D with
+xk = (s, t). We have h1(s, t) = c1s + c2ξs1
+. Its expectation E(h1(x)) on a test example x equals
+ξs0+ξs1
+2 . At the same time, the expectation E(h1(xk)) on a training example xk is different and
+c1x1 + c2
+equals (c1x1 + c2
+) + O(2−n). That is, we experience a prediction shift of h1. As a
+consequence, the expected value of h2(x) is E(h2(x)) = c2(x2 − 1
+n−1 ) + O(2−n) on a test
+example x and E(h1(x) + h2(x)) = f ∗(x) − 1
+
+2 ) − c2( 2x2−1
+
+2 )(1 − 1
+
+2 ) + O(1/2n). (cid:3)
+
+n−1 c2(x2 − 1
+
+n
+
+Finally, recall that greedy TS ˆxi can be considered as a simple statistical model predicting the target
+y and it suffers from a similar problem, conditional shift of ˆxi
+k | yk, caused by the target leakage, i.e.,
+using yk to compute ˆxi
+k.
+
+4.2 Ordered boosting
+
+Here we propose a boosting algorithm which does not suffer from the prediction shift problem
+described in Section 4.1. Assuming access to an unlimited amount of training data, we can easily
+construct such an algorithm. At each step of boosting, we sample a new dataset Dt independently
+and obtain unshifted residuals by applying the current model to new training examples. In practice,
+however, labeled data is limited. Assume that we learn a model with I trees. To make the residual
+rI−1(xk, yk) unshifted, we need to have F I−1 trained without the example xk. Since we need
+unbiased residuals for all training examples, no examples may be used for training F I−1, which at
+ﬁrst glance makes the training process impossible. However, it is possible to maintain a set of models
+differing by examples used for their training. Then, for calculating the residual on an example, we use
+a model trained without it. In order to construct such a set of models, we can use the ordering principle
+previously applied to TS in Section 3.2. To illustrate the idea, assume that we take one random
+permutation σ of the training examples and maintain n different supporting models M1, . . . , Mn
+such that the model Mi is learned using only the ﬁrst i examples in the permutation. At each step, in
+order to obtain the residual for j-th sample, we use the model Mj−1 (see Figure 1). The resulting
+Algorithm 1 is called ordered boosting below. Unfortunately, this algorithm is not feasible in most
+practical tasks due to the need of training n different models, what increase the complexity and
+memory requirements by n times. In CatBoost, we implemented a modiﬁcation of this algorithm on
+the basis of the gradient boosting algorithm with decision trees as base predictors (GBDT) described
+in Section 5.
+
+Ordered boosting with categorical features
+In Sections 3.2 and 4.2 we proposed to use random
+permutations σcat and σboost of training examples for the TS calculation and for ordered boosting,
+respectively. Combining them in one algorithm, we should take σcat = σboost to avoid prediction
+shift. This guarantees that target yi is not used for training Mi (neither for the TS calculation, nor for
+the gradient estimation). See Appendix F for theoretical guarantees. Empirical results conﬁrming the
+importance of having σcat = σboost are presented in Appendix G.
+
+6Up to an exponentially small term, which occurs for a technical reason.
+
+5
+
+5 Practical implementation of ordered boosting
+
+CatBoost has two boosting modes, Ordered and Plain. The latter mode is the standard GBDT
+algorithm with inbuilt ordered TS. The former mode presents an efﬁcient modiﬁcation of Algorithm 1.
+A formal description of the algorithm is included in Appendix B. In this section, we overview the
+most important implementation details.
+
+i=1, M ode
+
+Algorithm 2: Building a tree in CatBoost
+input
+
+i=1, α, L, {σi}s
+
+: M , {(xi, yi)}n
+grad ← CalcGradient(L, M, y);
+r ← random(1, s);
+if M ode = P lain then
+
+G ← (gradr(i) for i = 1..n);
+
+if M ode = Ordered then
+
+G ← (gradr,σr(i)−1(i) for i = 1..n);
+
+T ← empty tree;
+foreach step of top-down procedure do
+
+foreach candidate split c do
+Tc ← add split c to T ;
+if M ode = P lain then
+
+∆(i) ← avg(gradr(p) for
+
+p : leafr(p) = leafr(i)) for i = 1..n;
+
+if M ode = Ordered then
+
+∆(i) ← avg(gradr,σr(i)−1(p) for
+p : leafr(p) = leafr(i), σr(p) < σr(i))
+for i = 1..n;
+loss(Tc) ← cos(∆, G)
+T ← arg minTc(loss(Tc))
+
+if M ode = P lain then
+
+Mr(cid:48)(i) ← Mr(cid:48)(i) − α avg(gradr(cid:48)(p) for
+p : leafr(cid:48)(p) = leafr(cid:48)(i)) for r(cid:48) = 1..s, i = 1..n;
+
+if M ode = Ordered then
+
+Mr(cid:48),j(i) ← Mr(cid:48),j(i) − α avg(gradr(cid:48),j(p) for
+p : leafr(cid:48)(p) = leafr(cid:48)(i), σr(cid:48)(p) ≤ j) for r(cid:48) = 1..s,
+i = 1..n, j ≥ σr(cid:48)(i) − 1;
+
+return T, M
+
+Figure 1: Ordered boosting principle,
+examples are ordered according to σ.
+
+Algorithm 1: Ordered boosting
+: {(xk, yk)}n
+input
+
+k=1, I;
+
+σ ← random permutation of [1, n] ;
+Mi ← 0 for i = 1..n;
+for t ← 1 to I do
+
+for i ← 1 to n do
+
+ri ← yi − Mσ(i)−1(xi);
+
+for i ← 1 to n do
+
+∆M ←
+
+LearnM odel((xj, rj) :
+σ(j) ≤ i);
+Mi ← Mi + ∆M ;
+
+return Mn
+
+At the start, CatBoost generates s + 1 independent random permutations of the training dataset. The
+permutations σ1, . . . , σs are used for evaluation of splits that deﬁne tree structures (i.e., the internal
+nodes), while σ0 serves for choosing the leaf values bj of the obtained trees (see Equation (3)). For
+examples with short history in a given permutation, both TS and predictions used by ordered boosting
+(Mσ(i)−1(xi) in Algorithm 1) have a high variance. Therefore, using only one permutation may
+increase the variance of the ﬁnal model predictions, while several permutations allow us to reduce
+this effect in a way we further describe. The advantage of several permutations is conﬁrmed by our
+experiments in Section 6.
+
+Building a tree
+In CatBoost, base predictors are oblivious decision trees [9, 14] also called decision
+tables [23]. Term oblivious means that the same splitting criterion is used across an entire level of the
+tree. Such trees are balanced, less prone to overﬁtting, and allow speeding up execution at testing
+time signiﬁcantly. The procedure of building a tree in CatBoost is described in Algorithm 2.
+
+In the Ordered boosting mode, during the learning process, we maintain the supporting models Mr,j,
+where Mr,j(i) is the current prediction for the i-th example based on the ﬁrst j examples in the
+permutation σr. At each iteration t of the algorithm, we sample a random permutation σr from
+{σ1, . . . , σs} and construct a tree Tt on the basis of it. First, for categorical features, all TS are
+computed according to this permutation. Second, the permutation affects the tree learning procedure.
+
+6
+
+Procedure
+
+Table 1: Computational complexity.
+Build T
+
+Calc all bt
+
+CalcGradient
+
+Complexity for iteration t
+
+O(s · n)
+
+O(|C| · n)
+
+O(n)
+
+j Update M Calc ordered TS
+O(NT S,t · n)
+
+O(s · n)
+
+∂s
+
+(cid:12)
+Namely, based on Mr,j(i), we compute the corresponding gradients gradr,j(i) = ∂L(yi,s)
+(cid:12)s=Mr,j (i).
+Then, while constructing a tree, we approximate the gradient G in terms of the cosine similarity
+cos(·, ·), where, for each example i, we take the gradient gradr,σ(i)−1(i) (it is based only on the
+previous examples in σr). At the candidate splits evaluation step, the leaf value ∆(i) for example i is
+obtained individually by averaging the gradients gradr,σr(i)−1 of the preceding examples p lying
+in the same leaf leafr(i) the example i belongs to. Note that leafr(i) depends on the chosen
+permutation σr, because σr can inﬂuence the values of ordered TS for example i. When the tree
+structure Tt (i.e., the sequence of splitting attributes) is built, we use it to boost all the models Mr(cid:48),j.
+Let us stress that one common tree structure Tt is used for all the models, but this tree is added to
+different Mr(cid:48),j with different sets of leaf values depending on r(cid:48) and j, as described in Algorithm 2.
+The Plain boosting mode works similarly to a standard GBDT procedure, but, if categorical features
+are present, it maintains s supporting models Mr corresponding to TS based on σ1, . . . , σs.
+
+Choosing leaf values Given all the trees constructed, the leaf values of the ﬁnal model F are
+calculated by the standard gradient boosting procedure equally for both modes. Training examples i
+are matched to leaves leaf0(i), i.e., we use permutation σ0 to calculate TS here. When the ﬁnal
+model F is applied to a new example at testing time, we use TS calculated on the whole training data
+according to Section 3.2.
+
+Complexity In our practical implementation, we use one important trick, which signiﬁcantly
+reduces the computational complexity of the algorithm. Namely, in the Ordered mode, instead
+of O(s n2) values Mr,j(i), we store and update only the values M (cid:48)
+r,j(i) := Mr,2j (i) for j =
+1, . . . , (cid:100)log2 n(cid:101) and all i with σr(i) ≤ 2j+1, what reduces the number of maintained supporting
+predictions to O(s n). See Appendix B for the pseudocode of this modiﬁcation of Algorithm 2.
+
+In Table 1, we present the computational complexity of different components of both CatBoost modes
+per one iteration (see Appendix C.1 for the proof). Here NT S,t is the number of TS to be calculated at
+the iteration t and C is the set of candidate splits to be considered at the given iteration. It follows that
+our implementation of ordered boosting with decision trees has the same asymptotic complexity as the
+standard GBDT with ordered TS. In comparison with other types of TS (Section 3.2), ordered TS slow
+down by s times the procedures CalcGradient, updating supporting models M , and computation
+of TS.
+
+Feature combinations Another important detail of CatBoost is using combinations of categorical
+features as additional categorical features which capture high-order dependencies like joint informa-
+tion of user ID and ad topic in the task of ad click prediction. The number of possible combinations
+grows exponentially with the number of categorical features in the dataset, and it is infeasible to
+process all of them. CatBoost constructs combinations in a greedy way. Namely, for each split of a
+tree, CatBoost combines (concatenates) all categorical features (and their combinations) already used
+for previous splits in the current tree with all categorical features in the dataset. Combinations are
+converted to TS on the ﬂy.
+
+Other important details Finally, let us discuss two options of the CatBoost algorithm not covered
+above. The ﬁrst one is subsampling of the dataset at each iteration of boosting procedure, as proposed
+by Friedman [13]. We claimed earlier in Section 4.1 that this approach alone cannot fully avoid
+the problem of prediction shift. However, since it has proved effective, we implemented it in both
+modes of CatBoost as a Bayesian bootstrap procedure. Speciﬁcally, before training a tree according
+to Algorithm 2, we assign a weight wi = at
+i are generated according
+to the Bayesian bootstrap procedure (see [28, Section 2]). These weights are used as multipliers for
+gradients gradr(i) and gradr,j(i), when we calculate ∆(i) and the components of the vector ∆ − G
+to deﬁne loss(Tc).
+
+i to each example i, where at
+
+7
+
+The second option deals with ﬁrst several examples in a permutation. For examples i with small
+values σr(i), the variance of gradr,σr(i)−1(i) can be high. Therefore, we discard ∆(i) from the
+beginning of the permutation, when we calculate loss(Tc) in Algorithm 2. Particularly, we eliminate
+the corresponding components of vectors G and ∆ when calculating the cosine similarity between
+them.
+
+6 Experiments
+
+Comparison with baselines We compare our algorithm with the most popular open-source li-
+braries — XGBoost and LightGBM — on several well-known machine learning tasks. The detailed
+description of the experimental setup together with dataset descriptions is available in Appendix D.
+The source code of the experiment is available, and the results can be reproduced.7 For all learning
+algorithms, we preprocess categorical features using the ordered TS method described in Section 3.2.
+The parameter tuning and training were performed on 4/5 of the data and the testing was performed
+on the remaining 1/5.8 The results measured by logloss and zero-one loss are presented in Table 2 (the
+absolute values for the baselines are in Appendix G). For CatBoost, we used Ordered boosting mode
+in this experiment.9 One can see that CatBoost outperforms other algorithms on all the considered
+datasets. We also measured statistical signiﬁcance of improvements presented in Table 2: except
+three datasets (Appetency, Churn and Upselling) the improvements are statistically signiﬁcant with
+p-value (cid:28) 0.01 measured by the paired one-tailed t-test.
+
+To demonstrate that our implementation of plain boosting is an appropriate baseline for our research,
+we show that a raw setting of CatBoost provides state-of-the-art quality. Particularly, we take a
+setting of CatBoost, which is close to classical GBDT [12], and compare it with the baseline boosting
+implementations in Appendix G. Experiments show that this raw setting differs from the baselines
+insigniﬁcantly.
+
+Table 2: Comparison with baselines: logloss /
+zero-one loss (relative increase for baselines).
+
+Table 3: Plain boosting mode: logloss, zero-
+one loss and their change relative to Ordered
+boosting mode.
+
+CatBoost
+
+LightGBM
+
+XGBoost
+
+Logloss
+
+Zero-one loss
+
+Adult
+Amazon
+Click
+Epsilon
+Appetency
+Churn
+Internet
+Upselling
+Kick
+
+0.270 / 0.127
+0.139 / 0.044
+0.392 / 0.156
+0.265 / 0.109
+0.072 / 0.018
+0.232 / 0.072
+0.209 / 0.094
+0.166 / 0.049
+0.286 / 0.095
+
++2.4% / +1.9%
++17% / +21%
++1.2% / +1.2%
++1.5% / +4.1%
++0.4% / +0.2%
++0.1% / +0.6%
++6.8% / +8.6%
++0.3% / +0.1%
++3.5% / +4.4%
+
++2.2% / +1.0%
++17% / +21%
++1.2% / +1.2%
++11% / +12%
++0.4% / +0.7%
++0.5% / +1.6%
++7.9% / +8.0%
++0.04% / +0.3%
++3.2% / +4.1%
+
+Adult
+Amazon
+Click
+Epsilon
+Appetency
+Churn
+Internet
+Upselling
+Kick
+
+0.272 (+1.1%)
+0.139 (-0.6%)
+0.392 (-0.05%)
+0.266 (+0.6%)
+0.072 (+0.5%)
+0.232 (-0.06%)
+0.217 (+3.9%)
+0.166 (+0.1%)
+0.285 (-0.2%)
+
+0.127 (-0.1%)
+0.044 (-1.5%)
+0.156 (+0.19%)
+0.110 (+0.9%)
+0.018 (+1.5%)
+0.072 (-0.17%)
+0.099 (+5.4%)
+0.049 (+0.4%)
+0.095 (-0.1%)
+
+We also empirically analyzed the running times of the algorithms on Epsilon dataset. The details of
+the comparison can be found in Appendix C.2. To summarize, we obtained that CatBoost Plain and
+LightGBM are the fastest ones followed by Ordered mode, which is about 1.7 times slower.
+
+Ordered and Plain modes
+In this section, we compare two essential boosting modes of CatBoost:
+Plain and Ordered. First, we compared their performance on all the considered datasets, the results
+are presented in Table 3. It can be clearly seen that Ordered mode is particularly useful on small
+datasets. Indeed, the largest beneﬁt from Ordered is observed on Adult and Internet datasets, which
+are relatively small (less than 40K training examples), which supports our hypothesis that a higher
+bias negatively affects the performance. Indeed, according to Theorem 1 and our reasoning in
+Section 4.1, bias is expected to be larger for smaller datasets (however, it can also depend on other
+properties of the dataset, e.g., on the dependency between features and target). In order to further
+validate this hypothesis, we make the following experiment: we train CatBoost in Ordered and Plain
+modes on randomly ﬁltered datasets and compare the obtained losses, see Figure 2. As we expected,
+
+7https://github.com/catboost/benchmarks/tree/master/quality_benchmarks
+8For Epsilon, we use default parameters instead of parameter tuning due to large running time for all
+
+algorithms. We tune only the number of trees to avoid overﬁtting.
+
+9The numbers for CatBoost in Table 2 may slightly differ from the corresponding numbers in our GitHub
+
+repository, since we use another version of CatBoost with all the discussed features implemented.
+
+8
+
+for smaller datasets the relative performance of Plain mode becomes worse. To save space, here we
+present the results only for logloss; the ﬁgure for zero-one loss is similar.
+
+We also compare Ordered and Plain modes in the above-mentioned raw setting of CatBoost in
+Appendix G and conclude that the advantage of Ordered mode is not caused by interaction with
+speciﬁc CatBoost options.
+
+Table 4: Comparison of target statistics, relative
+change in logloss / zero-one loss compared to or-
+dered TS.
+
+Greedy
+
+Holdout
+
+Leave-one-out
+
+Adult
+Amazon
+Click
+Appetency
+Churn
+Internet
+Upselling
+Kick
+
++1.1% / +0.8%
++40% / +32%
++13% / +6.7%
++24% / +0.7%
++12% / +2.1%
++33% / +22%
++57% / +50%
++22% / +28%
+
++2.1% / +2.0%
++8.3% / +8.3%
++1.5% / +0.5%
++1.6% / -0.5%
++0.9% / +1.3%
++2.6% / +1.8%
++1.6% / +0.9%
++1.3% / +0.32%
+
++5.5% / +3.7%
++4.5% / +5.6%
++2.7% / +0.9%
++8.5% / +0.7%
++1.6% / +1.8%
++27% / +19%
++3.9% / +2.9%
++3.7% / +3.3%
+
+Figure 2: Relative error of Plain boosting mode
+compared to Ordered boosting mode depending
+on the fraction of the dataset.
+
+Analysis of target statistics We compare different TSs introduced in Section 3.2 as options of
+CatBoost in Ordered boosting mode keeping all other algorithmic details the same; the results can
+be found in Table 4. Here, to save space, we present only relative increase in loss functions for
+each algorithm compared to CatBoost with ordered TS. Note that the ordered TS used in CatBoost
+signiﬁcantly outperform all other approaches. Also, among the baselines, the holdout TS is the best
+for most of the datasets since it does not suffer from conditional shift discussed in Section 3.2 (P1);
+still, it is worse than CatBoost due to less effective usage of training data (P2). Leave-one-out is
+usually better than the greedy TS, but it can be much worse on some datasets, e.g., on Adult. The
+reason is that the greedy TS suffer from low-frequency categories, while the leave-one-out TS suffer
+also from high-frequency ones, and on Adult all the features have high frequency.
+
+Finally, let us note that in Table 4 we combine Ordered mode of CatBoost with different TSs. To
+generalize these results, we also made a similar experiment by combining different TS with Plain
+mode, used in standard gradient boosting. The obtained results and conclusions turned out to be very
+similar to the ones discussed above.
+
+Feature combinations The effect of feature combinations discussed in Section 5 is demonstrated
+in Figure 3 in Appendix G. In average, changing the number cmax of features allowed to be com-
+bined from 1 to 2 provides an outstanding improvement of logloss by 1.86% (reaching 11.3%),
+changing from 1 to 3 yields 2.04%, and further increase of cmax does not inﬂuence the performance
+signiﬁcantly.
+
+Number of permutations The effect of the number s of permutations on the performance of
+CatBoost is presented in Figure 4 in Appendix G. In average, increasing s slightly decreases logloss,
+e.g., by 0.19% for s = 3 and by 0.38% for s = 9 compared to s = 1.
+
+7 Conclusion
+
+Acknowledgments
+
+In this paper, we identify and analyze the problem of prediction shifts present in all existing imple-
+mentations of gradient boosting. We propose a general solution, ordered boosting with ordered TS,
+which solves the problem. This idea is implemented in CatBoost, which is a new gradient boosting
+library. Empirical results demonstrate that CatBoost outperforms leading GBDT packages and leads
+to new state-of-the-art results on common benchmarks.
+
+We are very grateful to Mikhail Bilenko for important references and advices that lead to theoretical
+analysis of this paper, as well as suggestions on the presentation. We also thank Pavel Serdyukov for
+
+9
+
+many helpful discussions and valuable links, Nikita Kazeev, Nikita Dmitriev, Stanislav Kirillov and
+Victor Omelyanenko for help with experiments.
+
+[1] L. Bottou and Y. L. Cun. Large scale online learning. In Advances in neural information
+
+References
+
+processing systems, pages 217–224, 2004.
+
+[2] L. Breiman. Out-of-bag estimation, 1996.
+
+[3] L. Breiman. Using iterated bagging to debias regressions. Machine Learning, 45(3):261–277,
+
+[4] L. Breiman, J. Friedman, C. J. Stone, and R. A. Olshen. Classiﬁcation and regression trees.
+
+2001.
+
+CRC press, 1984.
+
+[5] R. Caruana and A. Niculescu-Mizil. An empirical comparison of supervised learning algorithms.
+In Proceedings of the 23rd international conference on Machine learning, pages 161–168. ACM,
+2006.
+
+[6] B. Cestnik et al. Estimating probabilities: a crucial task in machine learning. In ECAI, volume 90,
+
+pages 147–149, 1990.
+
+[7] O. Chapelle, E. Manavoglu, and R. Rosales. Simple and scalable response prediction for display
+advertising. ACM Transactions on Intelligent Systems and Technology (TIST), 5(4):61, 2015.
+
+[8] T. Chen and C. Guestrin. Xgboost: A scalable tree boosting system. In Proceedings of the 22Nd
+ACM SIGKDD International Conference on Knowledge Discovery and Data Mining, pages
+785–794. ACM, 2016.
+
+[9] M. Ferov and M. Modr`y. Enhancing lambdamart using oblivious trees. arXiv preprint
+
+arXiv:1609.05610, 2016.
+
+[10] J. Friedman, T. Hastie, and R. Tibshirani. Additive logistic regression: a statistical view of
+
+boosting. The annals of statistics, 28(2):337–407, 2000.
+
+[11] J. Friedman, T. Hastie, and R. Tibshirani. The elements of statistical learning, volume 1.
+
+Springer series in statistics New York, 2001.
+
+[12] J. H. Friedman. Greedy function approximation: a gradient boosting machine. Annals of
+
+statistics, pages 1189–1232, 2001.
+
+[13] J. H. Friedman. Stochastic gradient boosting. Computational Statistics & Data Analysis,
+
+38(4):367–378, 2002.
+
+[14] A. Gulin, I. Kuralenok, and D. Pavlov. Winning the transfer learning track of yahoo!’s learning
+
+to rank challenge with yetirank. In Yahoo! Learning to Rank Challenge, pages 63–76, 2011.
+
+[15] X. He, J. Pan, O. Jin, T. Xu, B. Liu, T. Xu, Y. Shi, A. Atallah, R. Herbrich, S. Bowers, et al.
+Practical lessons from predicting clicks on ads at facebook. In Proceedings of the Eighth
+International Workshop on Data Mining for Online Advertising, pages 1–9. ACM, 2014.
+
+[16] G. Ke, Q. Meng, T. Finley, T. Wang, W. Chen, W. Ma, Q. Ye, and T.-Y. Liu. Lightgbm: A
+highly efﬁcient gradient boosting decision tree. In Advances in Neural Information Processing
+Systems, pages 3149–3157, 2017.
+
+[17] M. Kearns and L. Valiant. Cryptographic limitations on learning boolean formulae and ﬁnite
+
+automata. Journal of the ACM (JACM), 41(1):67–95, 1994.
+
+[18] J. Langford, L. Li, and T. Zhang. Sparse online learning via truncated gradient. Journal of
+
+Machine Learning Research, 10(Mar):777–801, 2009.
+
+[19] LightGBM. Categorical feature support. http://lightgbm.readthedocs.io/en/latest/
+
+Advanced-Topics.html#categorical-feature-support, 2017.
+
+10
+
+[20] LightGBM. Optimal split for categorical features. http://lightgbm.readthedocs.io/en/
+
+latest/Features.html#optimal-split-for-categorical-features, 2017.
+
+[21] LightGBM. feature_histogram.cpp. https://github.com/Microsoft/LightGBM/blob/
+
+master/src/treelearner/feature_histogram.hpp, 2018.
+
+[22] X. Ling, W. Deng, C. Gu, H. Zhou, C. Li, and F. Sun. Model ensemble for click prediction
+in bing search ads. In Proceedings of the 26th International Conference on World Wide Web
+Companion, pages 689–698. International World Wide Web Conferences Steering Committee,
+2017.
+
+[23] Y. Lou and M. Obukhov. Bdt: Gradient boosted decision tables for high accuracy and scoring
+efﬁciency. In Proceedings of the 23rd ACM SIGKDD International Conference on Knowledge
+Discovery and Data Mining, pages 1893–1901. ACM, 2017.
+
+[24] L. Mason, J. Baxter, P. L. Bartlett, and M. R. Frean. Boosting algorithms as gradient descent.
+
+In Advances in neural information processing systems, pages 512–518, 2000.
+
+[25] D. Micci-Barreca. A preprocessing scheme for high-cardinality categorical attributes in classiﬁ-
+
+cation and prediction problems. ACM SIGKDD Explorations Newsletter, 3(1):27–32, 2001.
+
+[26] B. P. Roe, H.-J. Yang, J. Zhu, Y. Liu, I. Stancu, and G. McGregor. Boosted decision trees as
+an alternative to artiﬁcial neural networks for particle identiﬁcation. Nuclear Instruments and
+Methods in Physics Research Section A: Accelerators, Spectrometers, Detectors and Associated
+Equipment, 543(2):577–584, 2005.
+
+[27] L. Rokach and O. Maimon. Top–down induction of decision trees classiﬁers — a survey.
+IEEE Transactions on Systems, Man, and Cybernetics, Part C (Applications and Reviews),
+35(4):476–487, 2005.
+
+[28] D. B. Rubin. The bayesian bootstrap. The annals of statistics, pages 130–134, 1981.
+
+[29] Q. Wu, C. J. Burges, K. M. Svore, and J. Gao. Adapting boosting for information retrieval
+
+measures. Information Retrieval, 13(3):254–270, 2010.
+
+[30] K. Zhang, B. Schölkopf, K. Muandet, and Z. Wang. Domain adaptation under target and
+
+conditional shift. In International Conference on Machine Learning, pages 819–827, 2013.
+
+[31] O. Zhang. Winning data science competitions.
+
+https://www.slideshare.net/
+
+ShangxuanZhang/winning-data-science-competitions-presented-by-owen-zhang,
+2015.
+
+[32] Y. Zhang and A. Haghani. A gradient boosting method to improve travel time prediction.
+
+Transportation Research Part C: Emerging Technologies, 58:308–324, 2015.
+
+Appendices
+
+A Proof of Theorem 1
+
+A.1 Proof for the case D1 = D2
+
+Let us denote by A the event that each leaf in both stumps h1 and h2 contains at least one example,
+i.e., there exists at least one x ∈ D with xi = s for all i ∈ {1, 2}, s ∈ {0, 1}. All further reasonings
+are given conditioning on A. Note that the probability of A is 1 − O (2−n), therefore we can assign
+an arbitrary value to any empty leaf during the learning process, and the choice of the value will
+affect all expectations we calculate below by O (2−n).
+
+11
+
+Denote by ξst, s, t ∈ {0, 1}, the number of examples xk ∈ D with xk = (s, t). The value of the ﬁrst
+stump h1 in the region {x1 = s} is the average value of yk over examples from D belonging to this
+region. That is,
+
+h1(0, t) =
+
+(cid:80)n
+
+j=1 c11
+
+(cid:80)n
+
+=
+
+j=1
+
+j=1 c21{xj =(0,1)}
+(cid:80)n
+1
+{x1
+j =0}
+j =1} + c21{xj =(1,1)}
+j =1}
+
+j=1
+
+{x1
+
+1
+
+{x1
+(cid:80)n
+
+c2ξ01
+ξ00 + ξ01
+
+,
+
+= c1 +
+
+c2ξ11
+ξ10 + ξ11
+
+.
+
+h1(1, t) =
+
+Summarizing, we obtain
+
+h1(s, t) = c1s +
+
+c2ξs1
+ξs0 + ξs1
+
+.
+
+(7)
+
+Note that, by conditioning on A, we guarantee that the denominator ξs0 + ξs1 is not equal to zero.
+Now we derive the expectation E(h1(x)) of prediction h1 for a test example x = (s, t).
+(cid:17)
+
+| A
+
+= 1
+2 .
+
+Indeed, due to the symmetry we have
+
+It
+
+E
+
+is easy to show that E
+(cid:16) ξs0
+(cid:17)
+(cid:16) ξs1
+
+| A
+
+= E
+
+ξs0+ξs1
+
+ξs0+ξs1
+
+(cid:16) ξs1
+
+ξs0+ξs1
+(cid:17)
+
+| A
+
+and the sum of these expectations is E
+
+(cid:16) ξs0+ξs1
+ξs0+ξs1
+
+(cid:17)
+
+| A
+
+= 1.
+
+So, by taking the expectation of (7), we obtain the following proposition.
+
+Proposition 1 We have E(h1(s, t) | A) = c1s + c2
+2 .
+
+It means that the conditional expectation E(h1(x) | x = (s, t), A) on a test example x equals
+c1s + c2
+
+2 , since x and h1 are independent.
+
+In this paragraph, we show that the conditional expectation E(h1(xl) | xl =
+Prediction shift of h1
+(s, t), A) on a training example xl is shifted for any l = 1, . . . , n, because the model h1 is ﬁtted to
+xl. This is an auxiliary result, which is not used directly for proving the theorem, but helps to track
+the chain of obtained shifts.
+
+Proposition 2 The conditional expectation is
+
+E(h1(xl) | xl = (s, t), A) = c1s +
+
+− c2
+
++ O(2−n) .
+
+c2
+2
+
+(cid:19)
+
+(cid:18) 2t − 1
+n
+
+Proof . Let us introduce the following notation
+
+Then, we can rewrite the conditional expectation as
+
+αsk =
+
+1{xk=(s,1)}
+ξs0 + ξs1
+
+.
+
+c1s + c2
+
+E(αsk | xl = (s, t), A) .
+
+n
+(cid:88)
+
+k=1
+
+Lemma 1 below implies that E(αsl | xl = (s, t), A) = 2t
+
+n . For k (cid:54)= l, we have
+
+E(αsk | xl = (s, t), A) =
+
+| xl = (s, t), xk = (s, 1), A
+
+(cid:19)
+
+(cid:18)
+
+E
+
+1
+4
+
+1
+ξs0 + ξs1
+
+due to Lemma 2 below. Finally, we obtain
+(cid:18) 2t
+n
+
+E(h1(xl) | xl = (s, t)) = c1s + c2
+
+(cid:3)
+
+(cid:18)
+
+1 −
+
+=
+
+1
+2n
+
+1
+n − 1
+
++
+
+n − 2
+(2n−1 − 2) (n − 1)
+
+(cid:19)
+
+(cid:19)(cid:19)
+
+(cid:18)
+
+1 −
+
++ (n − 1)
+
+1
+2n
++ O (cid:0)2−n(cid:1) = c1s +
+
+1
+n − 1
+c2
+2
+
+− c2
+
+(cid:19)
+
+(cid:18) 2t − 1
+n
+
++ O(2−n).
+
+12
+
+Lemma 1 E
+
+(cid:16)
+
+1
+ξs0+ξs1
+
+| x1 = (s, t), A
+
+(cid:17)
+
+= 2
+n .
+
+Proof . Note that given x1 = (s, t), A corresponds to the event that there is an example with
+x1 = 1 − s and (possibly another) example with x2 = 1 − t among x2, . . . , xn.
+Note that ξs0 + ξs1 = (cid:80)n
+
+j =s}. For k = 1, . . . , n − 1, we have
+
+j=1
+
+{x1
+
+1
+
+P(ξs0 + ξs1 = k | x1 = (s, t), A) =
+
+P(ξs0 + ξs1 = k, A | x1 = (s, t))
+P(A | x1 = (s, t))
+1=s} = 1 when x1 = (s, t) with probability 1, (cid:80)n
+
+j=2
+
+{x1
+
+since 1
+j =s} is a binomial variable
+independent of x1, and an example with x1 = 1 − s exists whenever ξs0 + ξs1 = k < n and
+x1 = (s, t) (while the existence of one with x2 = 1 − t is an independent event). Therefore, we have
+
+{x1
+
+1
+
+(cid:0)n−1
+(cid:1)
+k−1
+2n−1 (cid:0)1 − 2−(n−1)(cid:1) ,
+
+=
+
+(cid:18)
+
+E
+
+1
+ξs0 + ξs1
+
+| x1 = (s, t), A
+
+=
+
+(cid:19)
+
+(cid:1)
+
+(cid:0)n−1
+k−1
+2n−1 − 1
+
+1
+k
+
+n−1
+(cid:88)
+
+k=1
+
+=
+
+1
+n (2n−1 − 1)
+
+n−1
+(cid:88)
+
+k=1
+
+(cid:19)
+
+(cid:18)n
+k
+
+=
+
+2
+n
+
+.
+
+| x1 = (s, t1), x2 = (s, t2), A
+
+=
+
+1 −
+
+(cid:19)
+
+(cid:18)
+
+2
+n
+
+1
+n − 1
+
++
+
+n − 2
+(2n−1 − 2) (n − 1)
+
+(cid:19)
+
+.
+
+Proof . Similarly to the previous proof, for k = 2, . . . , n − 1, we have
+
+P (ξs0 + ξs1 = k | x1 = (s, t1), x2 = (s, t2), A) =
+
+(cid:0)n−2
+(cid:1)
+k−2
+2n−2 (cid:0)1 − 2−(n−2)(cid:1) .
+
+| x1 = (s, t1), x2 = (s, t2), A
+
+=
+
+(cid:19)
+
+1
+2n−2 (cid:0)1 − 2−(n−1)(cid:1)
+
+=
+
+1
+2n−2 − 1
+
+n−1
+(cid:88)
+
+(cid:18)n − 2
+k − 2
+
+(cid:19) (cid:18) 1
+
+−
+
+1
+(k − 1)k
+
+k − 1
+
+k=2
+(cid:18) 1
+
+n−1
+(cid:88)
+
+(cid:19)
+
+(cid:18)n − 1
+k − 1
+
+−
+
+1
+n(n − 1)
+
+(cid:18)n
+k
+
+(cid:19)(cid:19)
+
+n − 1
+
+(cid:1)
+(cid:0)n−2
+k−2
+k
+
+n−1
+(cid:88)
+
+k=2
+(cid:19)
+
+=
+
+(cid:19)
+
+=
+
+1
+2n−2 − 1
+
+=
+
+1
+2n−2 − 1
+
+k=2
+(cid:18) 1
+
+n − 1
+
+(2n−1 − 2) −
+
+(2n − n − 2)
+
+=
+
+1
+n(n − 1)
+(cid:18)
+2
+n
+
+1 −
+
+=
+
+1
+n − 1
+
++
+
+n − 2
+(2n−1 − 2) (n − 1)
+
+(cid:19)
+
+.
+
+(cid:3)
+
+Lemma 2 We have
+
+(cid:18)
+
+E
+
+1
+ξs0 + ξs1
+
+Therefore,
+
+(cid:18)
+
+E
+
+1
+ξs0 + ξs1
+
+(cid:3)
+
+Bias of the model h1 +h2 Proposition 2 shows that the values of the model h1 on training examples
+are shifted with respect to the ones on test examples. The next step is to show how this can lead to a
+bias of the trained model, if we use the same dataset for building both h1 and h2. Namely, we derive
+the expected value of h1(s, t) + h2(s, t) and obtain a bias according to the following result.
+
+Proposition 3 If both h1 and h2 are built using the same dataset D, then
+
+E (cid:0)h1(s, t) + h2(s, t) | A(cid:1) = f ∗(s, t) −
+
+1
+n − 1
+
+(cid:18)
+
+c2
+
+t −
+
+(cid:19)
+
+1
+2
+
++ O(1/2n) .
+
+13
+
+Proof . The residual after the ﬁrst step is
+
+f ∗(s, t) − h1(s, t) = c2
+
+t −
+
+(cid:18)
+
+ξs1
+ξs0 + ξs1
+
+(cid:19)
+
+.
+
+Therefore, we get
+
+h2(s, t) =
+
+c2
+ξ0t + ξ1t
+
+(cid:18)(cid:18)
+
+t −
+
+ξ01
+ξ00 + ξ01
+
+(cid:19)
+
+(cid:18)
+
+ξ0t +
+
+t −
+
+ξ11
+ξ10 + ξ11
+
+(cid:19)
+
+(cid:19)
+
+ξ1t
+
+,
+
+which is equal to
+
+for t = 0 and to
+
+(cid:18)
+
+−c2
+
+(cid:18)
+
+c2
+
+ξ00ξ01
+(ξ00 + ξ01)(ξ00 + ξ10)
+
++
+
+ξ10ξ11
+(ξ10 + ξ11)(ξ00 + ξ10)
+
+ξ00ξ01
+(ξ00 + ξ01)(ξ01 + ξ11)
+
++
+
+ξ10ξ11
+(ξ10 + ξ11)(ξ01 + ξ11)
+
+(cid:19)
+
+(cid:19)
+
+for t = 1. The expected values of all four ratios are equal due to symmetries, and they are equal to
+1
+4
+
++ O(2−n) according to Lemma 3 below. So, we obtain
+
+1 − 1
+n−1
+
+(cid:16)
+
+(cid:17)
+
+E(h2(s, t) | A) = (2t − 1)
+
+c2
+2
+
+(cid:18)
+
+1 −
+
+(cid:19)
+
+1
+n − 1
+
++ O(2−n)
+
+E(h1(s, t) + h2(s, t) | A) = f ∗(s, t) − c2
+
+1
+n − 1
+
+(cid:18)
+
+t −
+
+(cid:19)
+
+1
+2
+
++ O(2−n) .
+
+and
+
+(cid:3)
+
+Lemma 3 We have
+
+(cid:18)
+
+E
+
+ξ00ξ01
+(ξ00 + ξ01)(ξ01 + ξ11)
+
+(cid:19)
+
+| A
+
+=
+
+1 −
+
+(cid:18)
+
+1
+4
+
+(cid:19)
+
+1
+n − 1
+
++ O(2−n) .
+
+Proof . First, linearity implies
+(cid:18)
+
+E
+
+ξ00ξ01
+(ξ00 + ξ01)(ξ01 + ξ11)
+
+(cid:19)
+
+| A
+
+=
+
+(cid:88)
+
+E
+
+(cid:18) 1xi=(0,0),xj =(0,1)
+
+(ξ00 + ξ01)(ξ01 + ξ11)
+
+(cid:19)
+
+| A
+
+.
+
+i,j
+
+Taking into account that all terms are equal, the expectation can be written as n(n−1)
+
+a, where
+
+(cid:18)
+
+a = E
+
+1
+(ξ00 + ξ01)(ξ01 + ξ11)
+
+| x1 = (0, 0), x2 = (0, 1), A
+
+.
+
+42
+
+(cid:19)
+
+A key observation is that ξ00 + ξ01 and ξ01 + ξ11 are two independent binomial variables: the
+former one is the number of k such that x1
+k = 0 and the latter one is the number of k such that
+x2
+k = 1. Moreover, they (and also their inverses) are also conditionally independent given that ﬁrst
+two observations of the Bernoulli scheme are known (x1 = (0, 0), x2 = (0, 1)) and given A. This
+(cid:17)
+conditional independence implies that a is the product of E
+
+| x1 = (0, 0), x2 = (0, 1), A
+
+(cid:16)
+
+1
+ξ00+ξ01
+
+(cid:16)
+
+and E
+
+1
+ξ01+ξ11
+
+| x1 = (0, 0), x2 = (0, 1), A
+
+. The ﬁrst factor equals 2
+n
+
+(cid:16)
+
+1 − 1
+
+(cid:17)
+n−1 + O(2−n)
+(cid:17)
+
+ac-
+
+cording to Lemma 2. The second one is equal to E
+not bring any new information about the number of k with x2
+2
+So, according to Lemma 4 below, the second factor equals
+
+1
+ξ01+ξ11
+
+| x1 = (0, 0), x2 = (0, 1)
+
+since A does
+k = 1 given x1 = (0, 0), x2 = (0, 1).
+
+n−1 (1 + O(2−n)). Finally, we obtain
+
+(cid:17)
+
+(cid:16)
+
+(cid:18)
+
+E
+
+(cid:19)
+
+ξ00ξ01
+(ξ00 + ξ01)(ξ01 + ξ11)
+n(n − 1)
+42
+
+=
+
+(cid:3)
+
+4
+n(n − 1)
+
+(cid:18)
+
+1 −
+
+(cid:19)
+
+1
+n − 1
+
++ O(2−n) =
+
+1 −
+
++ O(2−n).
+
+(cid:18)
+
+1
+4
+
+(cid:19)
+
+1
+n − 1
+
+14
+
+Lemma 4 E
+
+(cid:16)
+
+1
+ξ01+ξ11
+
+| x1 = (0, 0), x2 = (0, 1)
+
+= 2
+
+n−1 −
+
+1
+2n−2(n−1) .
+
+(cid:17)
+
+Proof . Similarly to the proof of Lemma 2, we have
+
+P(ξ01 + ξ11 = k | x1 = (0, 0), x2 = (0, 1)) =
+
+(cid:19)
+
+(cid:18)n − 2
+k − 1
+
+2−(n−2) .
+
+Therefore, we get
+
+(cid:18)
+
+E
+
+1
+ξ01 + ξ11
+
+(cid:3)
+
+| x1 = (0, 0), x2 = (0, 1)
+
+=
+
+(cid:19)
+
+n−1
+(cid:88)
+
+k=1
+
+(cid:19)
+
+(cid:18)n − 2
+k − 1
+
+1
+k
+
+2−(n−2)
+
+=
+
+2−(n−2)
+n − 1
+
+n−1
+(cid:88)
+
+k=1
+
+(cid:19)
+
+(cid:18)n − 1
+k
+
+=
+
+2
+n − 1
+
+−
+
+1
+2n−2(n − 1)
+
+.
+
+A.2 Proof for independently sampled D1 and D2
+
+Assume that we have an additional sample D2 = {xn+k}k=1..n for building h2. Now A denotes the
+event that each leaf in h1 contains at least one example from D1 and each leaf in h2 contains at least
+one example from D2.
+
+Proposition 4 If h2 is built using dataset D2, then
+
+E(h1(s, t) + h2(s, t) | A) = f ∗(s, t) .
+
+Proof .
+Let us denote by ξ(cid:48)
+First, we need to derive the expectation E(h2(s, t)) of h2 on a test example x = (s, t). Similarly to
+the proof of Proposition 3, we get
+
+st the number of examples xn+k that are equal to (s, t), k = 1, . . . , n.
+
+h2(s, 0) = −c2
+
+(cid:18)
+
+ξ(cid:48)
+00ξ01
+(ξ00 + ξ01)(ξ(cid:48)
+
+00 + ξ(cid:48)
+
+10)
+
++
+
+ξ(cid:48)
+10ξ11
+(ξ10 + ξ11)(ξ(cid:48)
+
+(cid:19)
+
+,
+
+00 + ξ(cid:48)
+
+10)
+(cid:19)
+
+(cid:18)
+
+h2(s, 1) = c2
+
+ξ00ξ(cid:48)
+01
+(ξ00 + ξ01)(ξ(cid:48)
+01 + ξ(cid:48)
+Due to the symmetries, the expected values of all four fractions above are equal. Also, due to the
+independence of ξij and ξ(cid:48)
+ξ(cid:48)
+00ξ01
+(ξ00 + ξ01)(ξ(cid:48)
+
+ξ10ξ(cid:48)
+11
+(ξ10 + ξ11)(ξ(cid:48)
+01 + ξ(cid:48)
+
+(cid:18) ξ(cid:48)
+00
+00 + ξ(cid:48)
+ξ(cid:48)
+10
+
+kl, we have
+
+(cid:18) ξ01
+
+ξ00 + ξ01
+
+= E
+
+11)
+
+11)
+
+| A
+
+| A
+
+| A
+
+1
+4
+
+=
+
++
+
+(cid:18)
+
+(cid:19)
+
+(cid:19)
+
+(cid:19)
+
+E
+
+E
+
+.
+
+.
+
+00 + ξ(cid:48)
+10)
+2 and E(h2(s, 1) | A) = c2
+Therefore, E(h2(s, 0) | A) = − c2
+2 .
+Summing up, E(h2(s, t) | A) = c2t − c2
+
+2 and E(h1(s, t) + h2(s, t) | A) = c1s + c2t. (cid:3)
+
+B Formal description of CatBoost algorithm
+
+In this section, we formally describe the CatBoost algorithm introduced in Section 5. In Algorithm 3,
+we provide more information on particular details including the speeding up trick introduced in
+paragraph “Complexity”. The key step of the CatBoost algorithm is the procedure of building a
+tree described in detail in Function BuildT ree. To obtain the formal description of the CatBoost
+algorithm without the speeding up trick, one should replace (cid:100)log2 n(cid:101) by n in line 6 of Algorithm 3
+and use Algorithm 2 instead of Function BuildT ree.
+
+We use Function GetLeaf (x, T, σr) to describe how examples are matched to leaves leafr(i). Given
+an example with features x, we calculate ordered TS on the basis of the permutation σr and then
+choose the leaf of tree T corresponding to features x enriched by the obtained ordered TS. Using
+ApplyM ode instead of a permutation in function GetLeaf in line 15 of Algorithm 3 means that we
+use TS calculated on the whole training data to apply the trained model on a new example.
+
+15
+
+Algorithm 3: CatBoost
+input
+
+: {(xi, yi)}n
+
+i=1, I, α, L, s, M ode
+
+1 σr ← random permutation of [1, n] for r = 0..s;
+2 M0(i) ← 0 for i = 1..n;
+3 if M ode = P lain then
+4
+
+Mr(i) ← 0 for r = 1..s, i : σr(i) ≤ 2j+1;
+
+5 if M ode = Ordered then
+6
+
+for j ← 1 to (cid:100)log2 n(cid:101) do
+
+Mr,j(i) ← 0 for r = 1..s, i = 1..2j+1;
+
+8 for t ← 1 to I do
+9
+
+Tt, {Mr}s
+r=1 ← BuildT ree({Mr}s
+leaf0(i) ← GetLeaf (xi, Tt, σ0) for i = 1..n;
+grad0 ← CalcGradient(L, M0, y);
+foreach leaf j in Tt do
+
+bt
+j ← −avg(grad0(i) for i : leaf0(i) = j);
+
+M0(i) ← M0(i) + αbt
+
+14
+15 return F (x) = (cid:80)I
+
+(cid:80)
+
+leaf0(i) for i = 1..n;
+j α bt
+j
+
+t=1
+
+1{GetLeaf (x,Tt,ApplyM ode)=j};
+
+r=1, {(xi, yi)}n
+
+i=1, α, L, {σi}s
+
+i=1, M ode);
+
+i=1, α, L, {σi}s
+
+i=1, M ode
+
+Function BuildT ree
+input
+
+: M ,{(xi, yi)}n
+1 grad ← CalcGradient(L, M, y);
+2 r ← random(1, s);
+3 if M ode = P lain then
+4
+
+G ← (gradr(i) for i = 1..n);
+
+5 if M ode = Ordered then
+6
+
+G ← (gradr,(cid:98)log2(σr(i)−1)(cid:99)(i) for i = 1..n);
+
+7 T ← empty tree;
+8 foreach step of top-down procedure do
+foreach candidate split c do
+9
+Tc ← add split c to T ;
+leafr(i) ← GetLeaf (xi, Tc, σr) for i = 1..n;
+if M ode = P lain then
+
+10
+
+11
+
+12
+
+∆(i) ← avg(gradr(p) for p : leafr(p) = leafr(i)) for i = 1..n;
+
+if M ode = Ordered then
+
+∆(i) ← avg(gradr,(cid:98)log2(σr(i)−1)(cid:99)(p) for p : leafr(p) = leafr(i), σr(p) < σr(i)) for
+i = 1..n;
+
+loss(Tc) ← cos(∆, G)
+T ← arg minTc (loss(Tc))
+
+17
+18 leafr(cid:48)(i) ← GetLeaf (xi, T, σr(cid:48)) for r(cid:48) = 1..s, i = 1..n;
+19 if M ode = P lain then
+20
+
+21 if M ode = Ordered then
+22
+
+for j ← 1 to (cid:100)log2 n(cid:101) do
+
+Mr(cid:48)(i) ← Mr(cid:48)(i) − α avg(gradr(cid:48)(p) for p : leafr(cid:48)(p) = leafr(cid:48)(i)) for r(cid:48) = 1..s, i = 1..n;
+
+Mr(cid:48),j(i) ← Mr(cid:48),j(i) − α avg(gradr(cid:48),j(p) for p : leafr(cid:48)(p) = leafr(cid:48)(i), σr(cid:48)(p) ≤ 2j) for
+r(cid:48) = 1..s, i : σr(cid:48)(i) ≤ 2j+1;
+
+24 return T, M
+
+16
+
+7
+
+10
+
+11
+
+12
+
+13
+
+13
+
+14
+
+15
+
+16
+
+23
+
+C Time complexity analysis
+
+C.1 Theoretical analysis
+
+We present the computational complexity of different components of any of the two modes of
+CatBoost per one iteration in Table 5.
+
+Table 5: Computational complexity.
+
+Procedure
+
+CalcGradient
+
+Build T
+
+Calc values bt
+
+j Update M Calc ordered TS
+
+Complexity
+for iteration t
+
+O(s · n)
+
+O(|C| · n)
+
+O(n)
+
+O(s · n)
+
+O(NT S,t · n)
+
+We ﬁrst prove these asymptotics for the Ordered mode. For this purpose, we estimate the number
+Npred of predictions Mr,j(i) to be maintained:
+
+Npred = (s + 1) ·
+
+2j+1 < (s + 1) · 2log2 n+3 = 8(s + 1)n .
+
+(cid:100)log2 n(cid:101)
+(cid:88)
+
+j=1
+
+Then, obviously, the complexity of CalcGradient is O(Npred) = O(s · n). The complexity of leaf
+values calculation is O(n), since each example i is included only in averaging operation in leaf
+leaf0(i).
+
+Calculation of the ordered TS for one categorical feature can be performed sequentially in the order of
+the permutation by n additive operations for calculation of n partial sums and n division operations.
+Thus, the overall complexity of the procedure is O(NT S,t · n), where NT S,t is the number of TS
+which were not calculated on the previous iterations. Since the leaf values ∆(i) calculated in line 15
+of Function BuildT ree can be considered as ordered TS, where gradients play the role of targets, the
+complexity of building a tree T is O(|C| · n), where C is the set of candidate splits to be considered at
+the given iteration. Finally, for updating the supporting models (lines 22-23 in Function BuildT ree),
+we need to perform one averaging operation for each j = 1, . . . , (cid:100)log2 n(cid:101), and each maintained
+gradient gradr(cid:48),j(p) is included in one averaging operation. Thus, the number of operations is
+bounded by the number of the maintained gradients gradr(cid:48),j(p), which is equal to Npred = O(s · n).
+
+To ﬁnish the proof, note that any component of the Plain mode is not less efﬁcient than the same one
+of the Ordered mode but, at the same time, cannot be more efﬁcient than corresponding asymptotics
+from Table 5.
+
+C.2 Empirical analysis
+
+It is quite hard to compare different boosting libraries in terms of training speed. Every algorithm has
+a vast number of parameters which affect training speed, quality and model size in a non-obvious way.
+Different libraries have their unique quality/training speed trade-off’s and they cannot be compared
+without domain knowledge (e.g., is 0.5% of quality metric worth it to train a model 3-4 times slower?).
+Plus for each library it is possible to obtain almost the same quality with different ensemble sizes
+and parameters. As a result, one cannot compare libraries by time needed to obtain a certain level of
+quality. As a result, we could give only some insights of how fast our implementation could train
+a model of a ﬁxed size. We use Epsilon dataset and we measure mean tree construction time one
+can achieve without using feature subsampling and/or bagging by CatBoost (both Ordered and Plain
+modes), XGBoost (we use histogram-based version, which is faster) and LightGBM. For XGBoost
+and CatBoost we use the default tree depth equal to 6, for LightGBM we set leaves count to 64 to
+have comparable results. We run all experiments on the same machine with Intel Xeon E3-12xx
+2.6GHz, 16 cores, 64GB RAM and run all algorithms with 16 threads.
+
+We set such learning rate that algorithms start to overﬁt approximately after constructing about 7000
+trees and measure the average time to train ensembles of 8000 trees. Mean tree construction time
+is presented in Table 6. Note that CatBoost Plain and LightGBM are the fastest ones followed by
+Ordered mode, which is about 1.7 times slower, which is expected.
+
+17
+
+Table 6: Comparison of running times on Epsilon
+
+time per tree
+
+CatBoost Plain
+CatBoost Ordered
+XGBoost
+LightGBM
+
+1.1 s
+1.9 s
+3.9 s
+1.1 s
+
+Dataset name
+Adult11
+
+Instances
+48842
+
+Table 7: Description of the datasets.
+
+Features Description
+
+15
+
+10
+
+12
+
+Prediction task is to determine whether a person
+makes over 50K a year. Extraction was done by
+Barry Becker from the 1994 Census database. A
+set of reasonably clean records was extracted us-
+ing the following conditions: (AAGE>16) and
+(AGI>100) and (AFNLWGT>1) and (HRSWK>0)
+Data from the Kaggle Amazon Employee chal-
+lenge.
+This data is derived from the 2012 KDD Cup. The
+data is subsampled to 1% of the original num-
+ber of instances, downsampling the majority class
+(click=0) so that the target feature is reasonably
+balanced (5 to 1). The data is about advertisements
+shown alongside search results in a search engine,
+and whether or not people clicked on these ads.
+The task is to build the best possible model to pre-
+dict whether a user will click on a given ad.
+PASCAL Challenge 2008.
+Small version of KDD 2009 Cup data.
+Small version of KDD 2009 Cup data.
+Binarized version of the original dataset. The multi-
+class target feature is converted to a two-class nom-
+inal target feature by re-labeling the majority class
+as positive (‘P’) and all others as negative (‘N’).
+Originally converted by Quan Sun.
+Small version of KDD 2009 Cup data.
+Data from “Don’t Get Kicked!” Kaggle challenge.
+
+Amazon12
+
+32769
+
+Click Prediction13
+
+399482
+
+Epsilon14
+KDD appetency15
+KDD churn16
+KDD Internet17
+
+400000
+50000
+50000
+10108
+
+2000
+231
+231
+69
+
+KDD upselling18
+Kick prediction19
+
+50000
+72983
+
+231
+36
+
+Finally, let us note that CatBoost has a highly efﬁcient GPU implementation. The detailed description
+and comparison of the running times are beyond the scope of the current article, but these experiments
+can be found on the corresponding GitHub page.10
+
+D Experimental setup
+
+D.1 Description of the datasets
+
+The datasets used in our experiments are described in Table 7.
+
+10https://github.com/catboost/benchmarks/tree/master/gpu_training
+
+18
+
+D.2 Experimental settings
+
+In our experiments, we evaluate different modiﬁcations of CatBoost and two popular gradient boosting
+libraries: LightGBM and XGBoost. All the code needed for reproducing our experiments is published
+on our GitHub20.
+
+Train-test splits Each dataset was randomly split into training set (80%) and test set (20%). We
+denote them as Df ull_train and Dtest.
+
+We use 5-fold cross-validation to tune parameters of each model on the training set. Accordingly,
+Df ull_train is randomly split into 5 equally sized parts D1, . . . , D5 (sampling is stratiﬁed by classes).
+These parts are used to construct 5 training and validation sets: Dtrain
+i = Di
+for 1 ≤ i ≤ 5.
+
+= ∪j(cid:54)=iDj and Dval
+
+i
+
+Preprocessing We applied the following steps to datasets with missing values:
+
+• For categorical variables, missing values are replaced with a special value, i.e., we treat
+
+missing values as a special category;
+
+for each imputed feature is added.
+
+• For numerical variables, missing values are replaced with zeros, and a binary dummy feature
+
+For XGBoost, LightGBM and the raw setting of CatBoost (see Appendix G), we perform the following
+preprocessing of categorical features. For each pair of datasets (Dtrain
+), i = 1, . . . , 5, and
+(Df ull_train, Dtest), we preprocess the categorical features by calculating ordered TS (described in
+Section 3.2) on the basis of a random permutation of the examples of the ﬁrst (training) dataset. All
+the permutations are generated independently. The resulting values of TS are considered as numerical
+features by any algorithm to be evaluated.
+
+, Dval
+i
+
+i
+
+Parameter Tuning We tune all the key parameters of each algorithm by 50 steps of the se-
+quential optimization algorithm Tree Parzen Estimator implemented in Hyperopt library21 (mode
+algo=tpe.suggest) by minimizing logloss. Below is the list of the tuned parameters and their distribu-
+tions the optimization algorithm started from:
+
+XGBoost:
+
+• ‘eta’: Log-uniform distribution [e−7, 1]
+• ‘max_depth’: Discrete uniform distribution [2, 10]
+
+• ‘subsample’: Uniform [0.5, 1]
+
+• ‘colsample_bytree’: Uniform [0.5, 1]
+
+• ‘colsample_bylevel’: Uniform [0.5, 1]
+• ‘min_child_weight’: Log-uniform distribution [e−16, e5]
+• ‘alpha’: Mixed: 0.5 · Degenerate at 0 + 0.5 · Log-uniform distribution [e−16, e2]
+• ‘lambda’: Mixed: 0.5 · Degenerate at 0 + 0.5 · Log-uniform distribution [e−16, e2]
+• ‘gamma’: Mixed: 0.5 · Degenerate at 0 + 0.5 · Log-uniform distribution [e−16, e2]
+
+11https://archive.ics.uci.edu/ml/datasets/Adult
+12https://www.kaggle.com/c/amazon-employee-access-challenge
+13http://www.kdd.org/kdd-cup/view/kdd-cup-2012-track-2
+14https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/binary.html
+15http://www.kdd.org/kdd-cup/view/kdd-cup-2009/Data
+16http://www.kdd.org/kdd-cup/view/kdd-cup-2009/Data
+17https://kdd.ics.uci.edu/databases/internet_usage/internet_usage.html
+18http://www.kdd.org/kdd-cup/view/kdd-cup-2009/Data
+19https://www.kaggle.com/c/DontGetKicked
+20https://github.com/catboost/benchmarks/tree/master/quality_benchmarks
+21https://github.com/hyperopt/hyperopt
+
+19
+
+LightGBM:
+
+CatBoost:
+
+• ‘learning_rate’: Log-uniform distribution [e−7, 1]
+• ‘num_leaves’ : Discrete log-uniform distribution [1, e7]
+• ‘feature_fraction’: Uniform [0.5, 1]
+• ‘bagging_fraction’: Uniform [0.5, 1]
+• ‘min_sum_hessian_in_leaf’: Log-uniform distribution [e−16, e5]
+• ‘min_data_in_leaf’: Discrete log-uniform distribution [1, e6]
+• ‘lambda_l1’: Mixed: 0.5 · Degenerate at 0 + 0.5 · Log-uniform distribution [e−16, e2]
+• ‘lambda_l2’: Mixed: 0.5 · Degenerate at 0 + 0.5 · Log-uniform distribution [e−16, e2]
+
+• ‘learning_rate’: Log-uniform distribution [e−7, 1]
+• ‘random_strength’: Discrete uniform distribution over a set {1, 20}
+• ‘one_hot_max_size’: Discrete uniform distribution over a set {0, 25}
+• ‘l2_leaf_reg’: Log-uniform distribution [1, 10]
+• ‘bagging_temperature’: Uniform [0, 1]
+• ‘gradient_iterations’ : Discrete uniform distribution over a set {1, 10}
+
+Next, having ﬁxed all other parameters, we perform exhaustive search for the number of trees in the
+interval [1, 5000]. We collect logloss value for each training iteration from 1 to 5000 for each of the 5
+folds. Then we choose the iteration with minimum logloss averaged over 5 folds.
+
+For evaluation, each algorithm was run on the preprocessed training data Df ull_train with the tuned
+parameters. The resulting model was evaluated on the preprocessed test set Dtest.
+
+Versions of the libraries
+
+• catboost (0.3)
+• xgboost (0.6)
+• scikit-learn (0.18.1)
+• scipy (0.19.0)
+• pandas (0.19.2)
+• numpy (1.12.1)
+• lightgbm (0.1)
+• hyperopt (0.0.2)
+• h2o (3.10.4.6)
+• R (3.3.3)
+
+E Analysis of iterated bagging
+
+Based on the out-of-bag estimation [2], Breiman proposed iterated bagging [3] which simultaneously
+constructs K models Fi, i = 1, . . . , K, associated with K independently bootstrapped subsamples Di.
+At t-th step of the process, models F t
+as follows. The
+current estimate M t
+such
+that j /∈ Dk. The term ht
+j (targets minus current
+estimates) on Di. Finally, the models are updated: F t
+i. Unfortunately, the residuals rt
+j
+used in this procedure are not unshifted (in terms of Section 4.1), or unbiased (in terms of iterated
+bagging), because each model F t
+i depends on each observation (xj, yj) by construction. Indeed,
+
+j at example j is obtained as the average of the outputs of all models F t−1
+
+i are grown from their predecessors F t−1
+
+i is built as a predictor of the residuals rt
+
+j := yj − M t
+
+i := F t−1
+
+i + ht
+
+k
+
+i
+
+20
+
+although ht
+depend on (xj, yj).
+
+k does not use yj directly, if j /∈ Dk, it still uses M t−1
+
+j(cid:48)
+
+for j(cid:48) ∈ Dk, which, in turn, can
+
+Also note that computational complexity of this algorithm exceeds one of classic GBDT by factor
+of K.
+
+F Ordered boosting with categorical features
+
+In Sections 3.2 and 4.2, we proposed to use some random permutations σcat and σboost of training
+examples for the TS calculation and for ordered boosting, respectively. Now, being combined in one
+algorithm, should these two permutations be somehow dependent? We argue that they should coincide.
+Otherwise, there exist examples xi and xj such that σboost(i) < σboost(j) and σcat(i) > σcat(j).
+Then, the model Mσboost(j) is trained using TS features of, in particular, example xi, which are
+calculated using yj. In general, it may shift the prediction Mσboost(j)(xj). To avoid such a shift,
+we set σcat = σboost in CatBoost. In the case of the ordered boosting (Algorithm 1) with sliding
+window TS22 it guarantees that the prediction Mσ(i)−1(xi) is not shifted for i = 1, . . . , n, since, ﬁrst,
+the target yi was not used for training Mσ(i)−1 (neither for the TS calculation, nor for the gradient
+estimation) and, second, the distribution of TS ˆxi conditioned by the target value is the same for a
+training example and a test example with the same value of feature xi.
+
+G Experimental results
+
+Comparison with baselines
+In Section 6 we demonstrated that the strong setting of CatBoost,
+including ordered TS, Ordered mode and feature combinations, outperforms the baselines. Detailed
+experimental results of that comparison are presented in Table 8.
+
+Table 8: Comparison with baselines: logloss / zero-one loss, relative increase is presented in the
+brackets.
+
+Adult
+Amazon
+Click
+Epsilon
+Appetency
+Churn
+Internet
+Upselling
+Kick
+
+CatBoost
+
+0.2695 / 0.1267
+0.1394 / 0.0442
+0.3917 / 0.1561
+0.2647 / 0.1086
+0.0715 / 0.01768
+0.2319 / 0.0719
+0.2089 / 0.0937
+0.1662 / 0.0490
+0.2855 / 0.0949
+
+LightGBM
+
+XGBoost
+
+0.2760 (+2.4%) / 0.1291 (+1.9%)
+0.1636 (+17%) / 0.0533 (+21%)
+0.3963 (+1.2%) / 0.1580 (+1.2%)
+0.2703 (+1.5%) / 0.114 (+4.1%)
+0.0718 (+0.4%) / 0.01772 (+0.2%)
+0.2320 (+0.1%) / 0.0723 (+0.6%)
+0.2231 (+6.8%) / 0.1017 (+8.6%)
+0.1668 (+0.3%) / 0.0491 (+0.1%)
+0.2957 (+3.5%) / 0.0991 (+4.4%)
+
+0.2754 (+2.2%) / 0.1280 (+1.0%)
+0.1633 (+17%) / 0.0532 (+21%)
+0.3962 (+1.2%) / 0.1581 (+1.2%)
+0.2993 (+11%) / 0.1276 (+12%)
+0.0718 (+0.4%) / 0.01780 (+0.7%)
+0.2331 (+0.5%) / 0.0730 (+1.6%)
+0.2253 (+7.9%) / 0.1012 (+8.0%)
+0.1663 (+0.04%) / 0.0492 (+0.3%)
+0.2946 (+3.2%) / 0.0988 (+4.1%)
+
+In this section, we empirically show that our implementation of GBDT provides state-of-the-art quality
+and thus is an appropriate basis for building CatBoost by adding different improving options including
+the above-mentioned ones. For this purpose, we compare with baselines a raw setting of CatBoost
+which is as close to classical GBDT [12] as possible. Namely, we use CatBoost in GPU mode with
+the following parameters: – – boosting–type Plain – – border–count 255 – – dev–bootstrap–type
+DiscreteUniform – – gradient–iterations 1 – – random–strength 0 – – depth 6. Besides, we tune
+the parameters dev–sample–rate, learning–rate, l2–leaf–reg instead of the parameters described in
+paragraph “Parameter tuning” of Appendix D.2 by 50 steps of the optimization algorithm. Further,
+for all the algorithms, all categorical features are transformed to ordered TS on the basis of a random
+permutation (the same for all algorithms) of training examples at the preprocessing step. The resulting
+TS are used as numerical features in the training process. Thus, no CatBoost options dealing with
+categorical features are used. As a result, the main difference of the raw setting of CatBoost compared
+with XGBoost and LightGBM is using oblivious trees as base predictors.
+
+For the baselines, we take the same results as in Table 8. As we can see from Table 9, in average, the
+difference between all the algorithms is rather small: the raw setting of CatBoost outperforms the
+
+22Ordered TS calculated on the basis of a ﬁxed number of preceding examples (both for training and test
+
+examples).
+
+21
+
+Table 9: Comparison with baselines: logloss / zero-one loss (relative increase for baselines).
+
+Raw setting of CatBoost
+
+LightGBM
+
+XGBoost
+
+Adult
+Amazon
+Click
+Appetency
+Churn
+Internet
+Upselling
+Kick
+Average
+
+0.2800 / 0.1288
+0.1631 / 0.0533
+0.3961 / 0.1581
+0.0724 / 0.0179
+0.2316 / 0.0718
+0.2223 / 0.0993
+0.1679 / 0.0493
+0.2955 / 0.0993
+
+-1.4% / +0.2% -1.7% / -0.6%
++0.1% / -0.2%
+0% / 0%
+
++0.3% / 0%
++0.1% / -0.1%
+-0.8% / -1.0% -0.8% / -0.4%
++0.2% / +0.7% +0.6% / +1.6%
++0.4% / +2.4% +1.4% / +1.9%
+-0.7% / -0.4% -1.0% / -0.2%
++0.1% / -0.4% -0.3% / -0.2%
+-0.2% / +0.2% -0.2% / +0.2%
+
+baselines in terms of zero-one loss by 0.2% while they are better in terms of logloss by 0.2%. Thus,
+taking into account that a GBDT model with oblivious trees can signiﬁcantly speed up execution at
+testing time [23], our implementation of GBDT is very reasonable choice to build CatBoost on.
+
+Ordered and Plain modes
+In Section 6 we showed experimentally that Ordered mode of CatBoost
+signiﬁcantly outperforms Plain mode in the strong setting of CatBoost, including ordered TS and
+feature combinations. In this section, we verify that this advantage is not caused by interaction with
+these and other speciﬁc CatBoost options. For this purpose, we compare Ordered and Plain modes in
+the raw setting of CatBoost described in the previous paragraph.
+
+In Table 10, we present relative results w.r.t. Plain mode for two modiﬁcations of Ordered mode. The
+ﬁrst one uses one random permutation σboost for Ordered mode generated independently from the
+permutation σcat used for ordered TS. Clearly, discrepancy between the two permutations provides
+target leakage, which should be avoided. However, even in this setting Ordered mode considerably
+outperforms Plain one by 0.5% in terms of logloss and by 0.2% in terms of zero-one loss in average.
+Thus, advantage of Ordered mode remains strong in the raw setting of CatBoost.
+
+Table 10: Ordered vs Plain modes in raw setting: change of logloss / zero-one loss relative to Plain
+mode.
+
+Ordered, σboost independent of σcat Ordered, σboost = σcat
+
+Adult
+Amazon
+Click
+Appetency
+Churn
+Internet
+Upselling
+Kick
+Average
+
+-1.1% / +0.2%
++0.9% / +0.9%
+0% / 0%
+-0.2% / 0.2%
++0.2% / -0.1%
+-3.5% / -3.2%
+-0.4% / +0.3%
+-0.2% / -0.1%
+-0.5% / -0.2%
+
+-2.1% / -1.2%
++0.8% / -2.2%
+0.1% / 0%
+-0.5% / -0.3%
++0.3% / +0.4%
+-2.8% / -3.5%
+-0.3% / -0.1%
+-0.2% / -0.3%
+-0.6% / -0.9%
+
+In the second modiﬁcation, we set σboost = σcat, which remarkably improves both metrics: the
+relative difference with Plain becomes (in average) 0.6% for logloss and 0.9% for zero-one loss. This
+result empirically conﬁrms the importance of the correspondence between permutations σboost and
+σcat, which was theoretically motivated in Appendix F.
+
+Feature combinations To demonstrate the effect of feature combinations, in Figure 3 we present the
+relative change in logloss for different numbers cmax of features allowed to be combined (compared
+to cmax = 1, where combinations are absent). In average, changing cmax from 1 to 2 provides an
+outstanding improvement of 1.86% (reaching 11.3%), changing from 1 to 3 yields 2.04%, and further
+increase of cmax does not inﬂuences the performance signiﬁcantly.
+
+22
+
+Figure 3: Relative change in logloss for a given allowed complexity compared to the absence of
+feature combinations.
+
+Figure 4: Relative change in logloss for a given number of permutations s compared to s = 1,
+
+Number of permutations The effect of the number s of permutations on the performance of
+CatBoost is presented in Figure 4. In average, increasing s slightly decreases logloss, e.g., by 0.19%
+for s = 3 and by 0.38% for s = 9 compared to s = 1.
+
+23
+
+9
+1
+0
+2
+ 
+n
+a
+J
+ 
+0
+2
+ 
+ 
+]
+
+G
+L
+.
+s
+c
+[
+ 
+ 
+5
+v
+6
+1
+5
+9
+0
+.
+6
+0
+7
+1
+:
+v
+i
+X
+r
+a
+
+CatBoost: unbiased boosting with categorical features
+
+Liudmila Prokhorenkova1,2, Gleb Gusev1,2, Aleksandr Vorobev1,
+Anna Veronika Dorogush1, Andrey Gulin1
+1Yandex, Moscow, Russia
+2Moscow Institute of Physics and Technology, Dolgoprudny, Russia
+{ostroumova-la, gleb57, alvor88, annaveronika, gulin}@yandex-team.ru
+
+Abstract
+
+This paper presents the key algorithmic techniques behind CatBoost, a new gradient
+boosting toolkit. Their combination leads to CatBoost outperforming other publicly
+available boosting implementations in terms of quality on a variety of datasets.
+Two critical algorithmic advances introduced in CatBoost are the implementation
+of ordered boosting, a permutation-driven alternative to the classic algorithm, and
+an innovative algorithm for processing categorical features. Both techniques were
+created to ﬁght a prediction shift caused by a special kind of target leakage present
+in all currently existing implementations of gradient boosting algorithms. In this
+paper, we provide a detailed analysis of this problem and demonstrate that proposed
+algorithms solve it effectively, leading to excellent empirical results.
+
+1
+
+Introduction
+
+Gradient boosting is a powerful machine-learning technique that achieves state-of-the-art results in a
+variety of practical tasks. For many years, it has remained the primary method for learning problems
+with heterogeneous features, noisy data, and complex dependencies: web search, recommendation
+systems, weather forecasting, and many others [5, 26, 29, 32]. Gradient boosting is essentially a
+process of constructing an ensemble predictor by performing gradient descent in a functional space.
+It is backed by solid theoretical results that explain how strong predictors can be built by iteratively
+combining weaker models (base predictors) in a greedy manner [17].
+
+We show in this paper that all existing implementations of gradient boosting face the following
+statistical issue. A prediction model F obtained after several steps of boosting relies on the targets
+of all training examples. We demonstrate that this actually leads to a shift of the distribution of
+F (xk) | xk for a training example xk from the distribution of F (x) | x for a test example x. This
+ﬁnally leads to a prediction shift of the learned model. We identify this problem as a special kind of
+target leakage in Section 4. Further, there is a similar issue in standard algorithms of preprocessing
+categorical features. One of the most effective ways [6, 25] to use them in gradient boosting is
+converting categories to their target statistics. A target statistic is a simple statistical model itself, and
+it can also cause target leakage and a prediction shift. We analyze this in Section 3.
+
+In this paper, we propose ordering principle to solve both problems. Relying on it, we derive
+ordered boosting, a modiﬁcation of standard gradient boosting algorithm, which avoids target
+leakage (Section 4), and a new algorithm for processing categorical features (Section 3). Their
+combination is implemented as an open-source library1 called CatBoost (for “Categorical Boosting”),
+which outperforms the existing state-of-the-art implementations of gradient boosted decision trees —
+XGBoost [8] and LightGBM [16] — on a diverse set of popular machine learning tasks (see Section 6).
+
+1https://github.com/catboost/catboost
+
+Preprint. Work in progress.
+
+2 Background
+
+Assume we observe a dataset of examples D = {(xk, yk)}k=1..n, where xk = (x1
+k ) is a
+random vector of m features and yk ∈ R is a target, which can be either binary or a numerical
+response. Examples (xk, yk) are independent and identically distributed according to some unknown
+distribution P (·, ·). The goal of a learning task is to train a function F : Rm → R which minimizes
+the expected loss L(F ) := EL(y, F (x)). Here L(·, ·) is a smooth loss function and (x, y) is a test
+example sampled from P independently of the training set D.
+A gradient boosting procedure [12] builds iteratively a sequence of approximations F t : Rm → R,
+t = 0, 1, . . . in a greedy fashion. Namely, F t is obtained from the previous approximation F t−1 in
+an additive manner: F t = F t−1 + αht, where α is a step size and function ht : Rm → R (a base
+predictor) is chosen from a family of functions H in order to minimize the expected loss:
+
+k, . . . , xm
+
+ht = arg min
+
+L(F t−1 + h) = arg min
+
+EL(y, F t−1(x) + h(x)).
+
+(1)
+
+h∈H
+
+h∈H
+
+The minimization problem is usually approached by the Newton method using a second–order
+approximation of L(F t−1 + ht) at F t−1 or by taking a (negative) gradient step. Both methods
+are kinds of functional gradient descent [10, 24]. In particular, the gradient step ht is chosen in
+(cid:12)
+such a way that ht(x) approximates −gt(x, y), where gt(x, y) := ∂L(y,s)
+(cid:12)s=F t−1(x). Usually, the
+least-squares approximation is used:
+
+∂s
+
+ht = arg min
+
+E (cid:0)−gt(x, y) − h(x)(cid:1)2
+
+.
+
+h∈H
+
+CatBoost is an implementation of gradient boosting, which uses binary decision trees as base
+predictors. A decision tree [4, 10, 27] is a model built by a recursive partition of the feature space
+Rm into several disjoint regions (tree nodes) according to the values of some splitting attributes a.
+Attributes are usually binary variables that identify that some feature xk exceeds some threshold t,
+that is, a = 1{xk>t}, where xk is either numerical or binary feature, in the latter case t = 0.5.2 Each
+ﬁnal region (leaf of the tree) is assigned to a value, which is an estimate of the response y in the
+region for the regression task or the predicted class label in the case of classiﬁcation problem.3 In
+this way, a decision tree h can be written as
+
+(2)
+
+(3)
+
+h(x) =
+
+bj1{x∈Rj },
+
+J
+(cid:88)
+
+j=1
+
+where Rj are the disjoint regions corresponding to the leaves of the tree.
+
+3 Categorical features
+
+3.1 Related work on categorical features
+
+A categorical feature is one with a discrete set of values called categories that are not comparable to
+each other. One popular technique for dealing with categorical features in boosted trees is one-hot
+encoding [7, 25], i.e., for each category, adding a new binary feature indicating it. However, in the
+case of high cardinality features (like, e.g., “user ID” feature), such technique leads to infeasibly
+large number of new features. To address this issue, one can group categories into a limited number
+of clusters and then apply one-hot encoding. A popular method is to group categories by target
+statistics (TS) that estimate expected target value in each category. Micci-Barreca [25] proposed
+to consider TS as a new numerical feature instead. Importantly, among all possible partitions of
+
+2Alternatively, non-binary splits can be used, e.g., a region can be split according to all values of a categorical
+feature. However, such splits, compared to binary ones, would lead to either shallow trees (unable to capture
+complex dependencies) or to very complex trees with exponential number of terminal nodes (having weaker
+target statistics in each of them). According to [4], the tree complexity has a crucial effect on the accuracy of the
+model and less complex trees are less prone to overﬁtting.
+
+3In a regression task, splitting attributes and leaf values are usually chosen by the least–squares criterion.
+Note that, in gradient boosting, a tree is constructed to approximate the negative gradient (see Equation (2)), so
+it solves a regression problem.
+
+2
+
+categories into two sets, an optimal split on the training data in terms of logloss, Gini index, MSE
+can be found among thresholds for the numerical TS feature [4, Section 4.2.2] [11, Section 9.2.4].
+In LightGBM [20], categorical features are converted to gradient statistics at each step of gradient
+boosting. Though providing important information for building a tree, this approach can dramatically
+increase (i) computation time, since it calculates statistics for each categorical value at each step, and
+(ii) memory consumption to store which category belongs to which node for each split based on a
+categorical feature. To overcome this issue, LightGBM groups tail categories into one cluster [21] and
+thus looses part of information. Besides, the authors claim that it is still better to convert categorical
+features with high cardinality to numerical features [19]. Note that TS features require calculating
+and storing only one number per one category.
+
+Thus, using TS as new numerical features seems to be the most efﬁcient method of handling
+categorical features with minimum information loss. TS are widely-used, e.g., in the click prediction
+task (click-through rates) [1, 15, 18, 22], where such categorical features as user, region, ad, publisher
+play a crucial role. We further focus on ways to calculate TS and leave one-hot encoding and gradient
+statistics out of the scope of the current paper. At the same time, we believe that the ordering principle
+proposed in this paper is also effective for gradient statistics.
+
+3.2 Target statistics
+
+As discussed in Section 3.1, an effective and efﬁcient way to deal with a categorical feature i is
+to substitute the category xi
+k of k-th training example with one numeric feature equal to some
+target statistic (TS) ˆxi
+k. Commonly, it estimates the expected target y conditioned by the category:
+k ≈ E(y | xi = xi
+ˆxi
+k).
+
+Greedy TS A straightforward approach is to estimate E(y | xi = xi
+over the training examples with the same category xi
+categories, and one usually smoothes it by some prior p:
+
+k) as the average value of y
+k [25]. This estimate is noisy for low-frequency
+
+ˆxi
+k =
+
+(cid:80)n
+
+1
+
+j=1
+(cid:80)n
+
+j=1
+
+{xi
+j =xi
+1
+
+{xi
+
+k} · yj + a p
+k} + a
+j =xi
+
+,
+
+where a > 0 is a parameter. A common setting for p is the average target value in the dataset [25].
+The problem of such greedy approach is target leakage: feature ˆxi
+k is computed using yk, the target of
+xk. This leads to a conditional shift [30]: the distribution of ˆxi|y differs for training and test examples.
+The following extreme example illustrates how dramatically this may affect the generalization error
+of the learned model. Assume i-th feature is categorical, all its values are unique, and for each
+category A, we have P(y = 1 | xi = A) = 0.5 for a classiﬁcation task. Then, in the training dataset,
+k = yk+ap
+ˆxi
+to perfectly classify
+all training examples. However, for all test examples, the value of the greedy TS is p, and the obtained
+model predicts 0 for all of them if p < t and predicts 1 otherwise, thus having accuracy 0.5 in both
+cases. To this end, we formulate the following desired property for TS:
+
+1+a , so it is sufﬁcient to make only one split with threshold t = 0.5+ap
+
+1+a
+
+P1 E(ˆxi | y = v) = E(ˆxi
+
+In our example above, E(ˆxi
+
+k | yk = v), where (xk, yk) is the k-th training example.
+1+a and E(ˆxi | y) = p are different.
+
+k | yk) = yk+ap
+
+There are several ways to avoid this conditional shift. Their general idea is to compute the TS for xk
+on a subset of examples Dk ⊂ D \ {xk} excluding xk:
+
+ˆxi
+k =
+
+(cid:80)
+
+1
+
+xj ∈Dk
+(cid:80)
+
+xj ∈Dk
+
+{xi
+j =xi
+1
+
+{xi
+
+k} · yj + a p
+k} + a
+j =xi
+
+.
+
+Holdout TS One way is to partition the training dataset into two parts D = ˆD0 (cid:116) ˆD1 and use
+Dk = ˆD0 for calculating the TS according to (5) and ˆD1 for training (e.g., applied in [8] for Criteo
+dataset). Though such holdout TS satisﬁes P1, this approach signiﬁcantly reduces the amount of data
+used both for training the model and calculating the TS. So, it violates the following desired property:
+
+P2 Effective usage of all training data for calculating TS features and for learning a model.
+
+(4)
+
+(5)
+
+3
+
+Leave-one-out TS At ﬁrst glance, a leave-one-out technique might work well: take Dk = D \ xk
+for training examples xk and Dk = D for test ones [31]. Surprisingly, it does not prevent target
+k = A for all examples. Let n+ be the
+leakage. Indeed, consider a constant categorical feature: xi
+k = n+−yk+a p
+number of examples with y = 1, then ˆxi
+and one can perfectly classify the training
+dataset by making a split with threshold t = n+−0.5+a p
+
+n−1+a
+
+.
+
+n−1+a
+
+Ordered TS CatBoost uses a more effective strategy. It relies on the ordering principle, the
+central idea of the paper, and is inspired by online learning algorithms which get training examples
+sequentially in time [1, 15, 18, 22]). Clearly, the values of TS for each example rely only on the
+observed history. To adapt this idea to standard ofﬂine setting, we introduce an artiﬁcial “time”, i.e.,
+a random permutation σ of the training examples. Then, for each example, we use all the available
+“history” to compute its TS, i.e., take Dk = {xj : σ(j) < σ(k)} in Equation (5) for a training
+example and Dk = D for a test one. The obtained ordered TS satisﬁes the requirement P1 and allows
+to use all training data for learning the model (P2). Note that, if we use only one random permutation,
+then preceding examples have TS with much higher variance than subsequent ones. To this end,
+CatBoost uses different permutations for different steps of gradient boosting, see details in Section 5.
+
+4 Prediction shift and ordered boosting
+
+4.1 Prediction shift
+
+In this section, we reveal the problem of prediction shift in gradient boosting, which was neither
+recognized nor previously addressed. Like in case of TS, prediction shift is caused by a special kind
+of target leakage. Our solution is called ordered boosting and resembles the ordered TS method.
+
+Let us go back to the gradient boosting procedure described in Section 2. In practice, the expectation
+in (2) is unknown and is usually approximated using the same dataset D:
+
+ht = arg min
+
+h∈H
+
+1
+n
+
+n
+(cid:88)
+
+k=1
+
+(cid:0)−gt(xk, yk) − h(xk)(cid:1)2
+
+.
+
+(6)
+
+Now we describe and analyze the following chain of shifts:
+
+1. the conditional distribution of the gradient gt(xk, yk) | xk (accounting for randomness of
+
+D \ {xk}) is shifted from that distribution on a test example gt(x, y) | x;
+
+2. in turn, base predictor ht deﬁned by Equation (6) is biased from the solution of Equation (2);
+3. this, ﬁnally, affects the generalization ability of the trained model F t.
+
+As in the case of TS, these problems are caused by the target leakage. Indeed, gradients used at each
+step are estimated using the target values of the same data points the current model F t−1 was built on.
+However, the conditional distribution F t−1(xk) | xk for a training example xk is shifted, in general,
+from the distribution F t−1(x) | x for a test example x. We call this a prediction shift.
+
+Related work on prediction shift The shift of gradient conditional distribution gt(xk, yk) | xk
+was previously mentioned in papers on boosting [3, 13] but was not formally deﬁned. Moreover, even
+the existence of non-zero shift was not proved theoretically. Based on the out-of-bag estimation [2],
+Breiman proposed iterated bagging [3] which constructs a bagged weak learner at each iteration on
+the basis of “out-of-bag” residual estimates. However, as we formally show in Appendix E, such
+residual estimates are still shifted. Besides, the bagging scheme increases learning time by factor of
+the number of data buckets. Subsampling of the dataset at each iteration proposed by Friedman [13]
+addresses the problem much more heuristically and also only alleviates it.
+
+Analysis of prediction shift We formally analyze the problem of prediction shift in a simple case
+of a regression task with the quadratic loss function L(y, ˆy) = (y − ˆy)2.4 In this case, the negative
+gradient −gt(xk, yk) in Equation (6) can be substituted by the residual function rt−1(xk, yk) :=
+yk − F t−1(xk).5 Assume we have m = 2 features x1, x2 that are i.i.d. Bernoulli random variables
+
+4We restrict the rest of Section 4 to this case, but the approaches of Section 4.2 are applicable to other tasks.
+5Here we removed the multiplier 2, what does not matter for further analysis.
+
+4
+
+with p = 1/2 and y = f ∗(x) = c1x1 + c2x2. Assume we make N = 2 steps of gradient boosting
+with decision stumps (trees of depth 1) and step size α = 1. We obtain a model F = F 2 = h1 + h2.
+W.l.o.g., we assume that h1 is based on x1 and h2 is based on x2, what is typical for |c1| > |c2| (here
+we set some asymmetry between x1 and x2).
+
+Theorem 1 1. If two independent samples D1 and D2 of size n are used to estimate h1 and h2,
+respectively, using Equation (6), then ED1,D2 F 2(x) = f ∗(x) + O(1/2n) for any x ∈ {0, 1}2.
+2. If the same dataset D = D1 = D2 is used in Equation (6) for both h1 and h2, then EDF 2(x) =
+f ∗(x) − 1
+
+n−1 c2(x2 − 1
+
+2 ) + O(1/2n).
+
+This theorem means that the trained model is an unbiased estimate of the true dependence y = f ∗(x),
+when we use independent datasets at each gradient step.6 On the other hand, if we use the same
+dataset at each step, we suffer from a bias − 1
+2 ), which is inversely proportional to
+the data size n. Also, the value of the bias can depend on the relation f ∗: in our example, it is
+proportional to c2. We track the chain of shifts for the second part of Theorem 1 in a sketch of the
+proof below, while the full proof of Theorem 1 is available in Appendix A.
+
+n−1 c2(x2 − 1
+
+Sketch of the proof . Denote by ξst, s, t ∈ {0, 1}, the number of examples (xk, yk) ∈ D with
+xk = (s, t). We have h1(s, t) = c1s + c2ξs1
+. Its expectation E(h1(x)) on a test example x equals
+ξs0+ξs1
+2 . At the same time, the expectation E(h1(xk)) on a training example xk is different and
+c1x1 + c2
+equals (c1x1 + c2
+) + O(2−n). That is, we experience a prediction shift of h1. As a
+consequence, the expected value of h2(x) is E(h2(x)) = c2(x2 − 1
+n−1 ) + O(2−n) on a test
+example x and E(h1(x) + h2(x)) = f ∗(x) − 1
+
+2 ) − c2( 2x2−1
+
+2 )(1 − 1
+
+2 ) + O(1/2n). (cid:3)
+
+n−1 c2(x2 − 1
+
+n
+
+Finally, recall that greedy TS ˆxi can be considered as a simple statistical model predicting the target
+y and it suffers from a similar problem, conditional shift of ˆxi
+k | yk, caused by the target leakage, i.e.,
+using yk to compute ˆxi
+k.
+
+4.2 Ordered boosting
+
+Here we propose a boosting algorithm which does not suffer from the prediction shift problem
+described in Section 4.1. Assuming access to an unlimited amount of training data, we can easily
+construct such an algorithm. At each step of boosting, we sample a new dataset Dt independently
+and obtain unshifted residuals by applying the current model to new training examples. In practice,
+however, labeled data is limited. Assume that we learn a model with I trees. To make the residual
+rI−1(xk, yk) unshifted, we need to have F I−1 trained without the example xk. Since we need
+unbiased residuals for all training examples, no examples may be used for training F I−1, which at
+ﬁrst glance makes the training process impossible. However, it is possible to maintain a set of models
+differing by examples used for their training. Then, for calculating the residual on an example, we use
+a model trained without it. In order to construct such a set of models, we can use the ordering principle
+previously applied to TS in Section 3.2. To illustrate the idea, assume that we take one random
+permutation σ of the training examples and maintain n different supporting models M1, . . . , Mn
+such that the model Mi is learned using only the ﬁrst i examples in the permutation. At each step, in
+order to obtain the residual for j-th sample, we use the model Mj−1 (see Figure 1). The resulting
+Algorithm 1 is called ordered boosting below. Unfortunately, this algorithm is not feasible in most
+practical tasks due to the need of training n different models, what increase the complexity and
+memory requirements by n times. In CatBoost, we implemented a modiﬁcation of this algorithm on
+the basis of the gradient boosting algorithm with decision trees as base predictors (GBDT) described
+in Section 5.
+
+Ordered boosting with categorical features
+In Sections 3.2 and 4.2 we proposed to use random
+permutations σcat and σboost of training examples for the TS calculation and for ordered boosting,
+respectively. Combining them in one algorithm, we should take σcat = σboost to avoid prediction
+shift. This guarantees that target yi is not used for training Mi (neither for the TS calculation, nor for
+the gradient estimation). See Appendix F for theoretical guarantees. Empirical results conﬁrming the
+importance of having σcat = σboost are presented in Appendix G.
+
+6Up to an exponentially small term, which occurs for a technical reason.
+
+5
+
+5 Practical implementation of ordered boosting
+
+CatBoost has two boosting modes, Ordered and Plain. The latter mode is the standard GBDT
+algorithm with inbuilt ordered TS. The former mode presents an efﬁcient modiﬁcation of Algorithm 1.
+A formal description of the algorithm is included in Appendix B. In this section, we overview the
+most important implementation details.
+
+i=1, M ode
+
+Algorithm 2: Building a tree in CatBoost
+input
+
+i=1, α, L, {σi}s
+
+: M , {(xi, yi)}n
+grad ← CalcGradient(L, M, y);
+r ← random(1, s);
+if M ode = P lain then
+
+G ← (gradr(i) for i = 1..n);
+
+if M ode = Ordered then
+
+G ← (gradr,σr(i)−1(i) for i = 1..n);
+
+T ← empty tree;
+foreach step of top-down procedure do
+
+foreach candidate split c do
+Tc ← add split c to T ;
+if M ode = P lain then
+
+∆(i) ← avg(gradr(p) for
+
+p : leafr(p) = leafr(i)) for i = 1..n;
+
+if M ode = Ordered then
+
+∆(i) ← avg(gradr,σr(i)−1(p) for
+p : leafr(p) = leafr(i), σr(p) < σr(i))
+for i = 1..n;
+loss(Tc) ← cos(∆, G)
+T ← arg minTc(loss(Tc))
+
+if M ode = P lain then
+
+Mr(cid:48)(i) ← Mr(cid:48)(i) − α avg(gradr(cid:48)(p) for
+p : leafr(cid:48)(p) = leafr(cid:48)(i)) for r(cid:48) = 1..s, i = 1..n;
+
+if M ode = Ordered then
+
+Mr(cid:48),j(i) ← Mr(cid:48),j(i) − α avg(gradr(cid:48),j(p) for
+p : leafr(cid:48)(p) = leafr(cid:48)(i), σr(cid:48)(p) ≤ j) for r(cid:48) = 1..s,
+i = 1..n, j ≥ σr(cid:48)(i) − 1;
+
+return T, M
+
+Figure 1: Ordered boosting principle,
+examples are ordered according to σ.
+
+Algorithm 1: Ordered boosting
+: {(xk, yk)}n
+input
+
+k=1, I;
+
+σ ← random permutation of [1, n] ;
+Mi ← 0 for i = 1..n;
+for t ← 1 to I do
+
+for i ← 1 to n do
+
+ri ← yi − Mσ(i)−1(xi);
+
+for i ← 1 to n do
+
+∆M ←
+
+LearnM odel((xj, rj) :
+σ(j) ≤ i);
+Mi ← Mi + ∆M ;
+
+return Mn
+
+At the start, CatBoost generates s + 1 independent random permutations of the training dataset. The
+permutations σ1, . . . , σs are used for evaluation of splits that deﬁne tree structures (i.e., the internal
+nodes), while σ0 serves for choosing the leaf values bj of the obtained trees (see Equation (3)). For
+examples with short history in a given permutation, both TS and predictions used by ordered boosting
+(Mσ(i)−1(xi) in Algorithm 1) have a high variance. Therefore, using only one permutation may
+increase the variance of the ﬁnal model predictions, while several permutations allow us to reduce
+this effect in a way we further describe. The advantage of several permutations is conﬁrmed by our
+experiments in Section 6.
+
+Building a tree
+In CatBoost, base predictors are oblivious decision trees [9, 14] also called decision
+tables [23]. Term oblivious means that the same splitting criterion is used across an entire level of the
+tree. Such trees are balanced, less prone to overﬁtting, and allow speeding up execution at testing
+time signiﬁcantly. The procedure of building a tree in CatBoost is described in Algorithm 2.
+
+In the Ordered boosting mode, during the learning process, we maintain the supporting models Mr,j,
+where Mr,j(i) is the current prediction for the i-th example based on the ﬁrst j examples in the
+permutation σr. At each iteration t of the algorithm, we sample a random permutation σr from
+{σ1, . . . , σs} and construct a tree Tt on the basis of it. First, for categorical features, all TS are
+computed according to this permutation. Second, the permutation affects the tree learning procedure.
+
+6
+
+Procedure
+
+Table 1: Computational complexity.
+Build T
+
+Calc all bt
+
+CalcGradient
+
+Complexity for iteration t
+
+O(s · n)
+
+O(|C| · n)
+
+O(n)
+
+j Update M Calc ordered TS
+O(NT S,t · n)
+
+O(s · n)
+
+∂s
+
+(cid:12)
+Namely, based on Mr,j(i), we compute the corresponding gradients gradr,j(i) = ∂L(yi,s)
+(cid:12)s=Mr,j (i).
+Then, while constructing a tree, we approximate the gradient G in terms of the cosine similarity
+cos(·, ·), where, for each example i, we take the gradient gradr,σ(i)−1(i) (it is based only on the
+previous examples in σr). At the candidate splits evaluation step, the leaf value ∆(i) for example i is
+obtained individually by averaging the gradients gradr,σr(i)−1 of the preceding examples p lying
+in the same leaf leafr(i) the example i belongs to. Note that leafr(i) depends on the chosen
+permutation σr, because σr can inﬂuence the values of ordered TS for example i. When the tree
+structure Tt (i.e., the sequence of splitting attributes) is built, we use it to boost all the models Mr(cid:48),j.
+Let us stress that one common tree structure Tt is used for all the models, but this tree is added to
+different Mr(cid:48),j with different sets of leaf values depending on r(cid:48) and j, as described in Algorithm 2.
+The Plain boosting mode works similarly to a standard GBDT procedure, but, if categorical features
+are present, it maintains s supporting models Mr corresponding to TS based on σ1, . . . , σs.
+
+Choosing leaf values Given all the trees constructed, the leaf values of the ﬁnal model F are
+calculated by the standard gradient boosting procedure equally for both modes. Training examples i
+are matched to leaves leaf0(i), i.e., we use permutation σ0 to calculate TS here. When the ﬁnal
+model F is applied to a new example at testing time, we use TS calculated on the whole training data
+according to Section 3.2.
+
+Complexity In our practical implementation, we use one important trick, which signiﬁcantly
+reduces the computational complexity of the algorithm. Namely, in the Ordered mode, instead
+of O(s n2) values Mr,j(i), we store and update only the values M (cid:48)
+r,j(i) := Mr,2j (i) for j =
+1, . . . , (cid:100)log2 n(cid:101) and all i with σr(i) ≤ 2j+1, what reduces the number of maintained supporting
+predictions to O(s n). See Appendix B for the pseudocode of this modiﬁcation of Algorithm 2.
+
+In Table 1, we present the computational complexity of different components of both CatBoost modes
+per one iteration (see Appendix C.1 for the proof). Here NT S,t is the number of TS to be calculated at
+the iteration t and C is the set of candidate splits to be considered at the given iteration. It follows that
+our implementation of ordered boosting with decision trees has the same asymptotic complexity as the
+standard GBDT with ordered TS. In comparison with other types of TS (Section 3.2), ordered TS slow
+down by s times the procedures CalcGradient, updating supporting models M , and computation
+of TS.
+
+Feature combinations Another important detail of CatBoost is using combinations of categorical
+features as additional categorical features which capture high-order dependencies like joint informa-
+tion of user ID and ad topic in the task of ad click prediction. The number of possible combinations
+grows exponentially with the number of categorical features in the dataset, and it is infeasible to
+process all of them. CatBoost constructs combinations in a greedy way. Namely, for each split of a
+tree, CatBoost combines (concatenates) all categorical features (and their combinations) already used
+for previous splits in the current tree with all categorical features in the dataset. Combinations are
+converted to TS on the ﬂy.
+
+Other important details Finally, let us discuss two options of the CatBoost algorithm not covered
+above. The ﬁrst one is subsampling of the dataset at each iteration of boosting procedure, as proposed
+by Friedman [13]. We claimed earlier in Section 4.1 that this approach alone cannot fully avoid
+the problem of prediction shift. However, since it has proved effective, we implemented it in both
+modes of CatBoost as a Bayesian bootstrap procedure. Speciﬁcally, before training a tree according
+to Algorithm 2, we assign a weight wi = at
+i are generated according
+to the Bayesian bootstrap procedure (see [28, Section 2]). These weights are used as multipliers for
+gradients gradr(i) and gradr,j(i), when we calculate ∆(i) and the components of the vector ∆ − G
+to deﬁne loss(Tc).
+
+i to each example i, where at
+
+7
+
+The second option deals with ﬁrst several examples in a permutation. For examples i with small
+values σr(i), the variance of gradr,σr(i)−1(i) can be high. Therefore, we discard ∆(i) from the
+beginning of the permutation, when we calculate loss(Tc) in Algorithm 2. Particularly, we eliminate
+the corresponding components of vectors G and ∆ when calculating the cosine similarity between
+them.
+
+6 Experiments
+
+Comparison with baselines We compare our algorithm with the most popular open-source li-
+braries — XGBoost and LightGBM — on several well-known machine learning tasks. The detailed
+description of the experimental setup together with dataset descriptions is available in Appendix D.
+The source code of the experiment is available, and the results can be reproduced.7 For all learning
+algorithms, we preprocess categorical features using the ordered TS method described in Section 3.2.
+The parameter tuning and training were performed on 4/5 of the data and the testing was performed
+on the remaining 1/5.8 The results measured by logloss and zero-one loss are presented in Table 2 (the
+absolute values for the baselines are in Appendix G). For CatBoost, we used Ordered boosting mode
+in this experiment.9 One can see that CatBoost outperforms other algorithms on all the considered
+datasets. We also measured statistical signiﬁcance of improvements presented in Table 2: except
+three datasets (Appetency, Churn and Upselling) the improvements are statistically signiﬁcant with
+p-value (cid:28) 0.01 measured by the paired one-tailed t-test.
+
+To demonstrate that our implementation of plain boosting is an appropriate baseline for our research,
+we show that a raw setting of CatBoost provides state-of-the-art quality. Particularly, we take a
+setting of CatBoost, which is close to classical GBDT [12], and compare it with the baseline boosting
+implementations in Appendix G. Experiments show that this raw setting differs from the baselines
+insigniﬁcantly.
+
+Table 2: Comparison with baselines: logloss /
+zero-one loss (relative increase for baselines).
+
+Table 3: Plain boosting mode: logloss, zero-
+one loss and their change relative to Ordered
+boosting mode.
+
+CatBoost
+
+LightGBM
+
+XGBoost
+
+Logloss
+
+Zero-one loss
+
+Adult
+Amazon
+Click
+Epsilon
+Appetency
+Churn
+Internet
+Upselling
+Kick
+
+0.270 / 0.127
+0.139 / 0.044
+0.392 / 0.156
+0.265 / 0.109
+0.072 / 0.018
+0.232 / 0.072
+0.209 / 0.094
+0.166 / 0.049
+0.286 / 0.095
+
++2.4% / +1.9%
++17% / +21%
++1.2% / +1.2%
++1.5% / +4.1%
++0.4% / +0.2%
++0.1% / +0.6%
++6.8% / +8.6%
++0.3% / +0.1%
++3.5% / +4.4%
+
++2.2% / +1.0%
++17% / +21%
++1.2% / +1.2%
++11% / +12%
++0.4% / +0.7%
++0.5% / +1.6%
++7.9% / +8.0%
++0.04% / +0.3%
++3.2% / +4.1%
+
+Adult
+Amazon
+Click
+Epsilon
+Appetency
+Churn
+Internet
+Upselling
+Kick
+
+0.272 (+1.1%)
+0.139 (-0.6%)
+0.392 (-0.05%)
+0.266 (+0.6%)
+0.072 (+0.5%)
+0.232 (-0.06%)
+0.217 (+3.9%)
+0.166 (+0.1%)
+0.285 (-0.2%)
+
+0.127 (-0.1%)
+0.044 (-1.5%)
+0.156 (+0.19%)
+0.110 (+0.9%)
+0.018 (+1.5%)
+0.072 (-0.17%)
+0.099 (+5.4%)
+0.049 (+0.4%)
+0.095 (-0.1%)
+
+We also empirically analyzed the running times of the algorithms on Epsilon dataset. The details of
+the comparison can be found in Appendix C.2. To summarize, we obtained that CatBoost Plain and
+LightGBM are the fastest ones followed by Ordered mode, which is about 1.7 times slower.
+
+Ordered and Plain modes
+In this section, we compare two essential boosting modes of CatBoost:
+Plain and Ordered. First, we compared their performance on all the considered datasets, the results
+are presented in Table 3. It can be clearly seen that Ordered mode is particularly useful on small
+datasets. Indeed, the largest beneﬁt from Ordered is observed on Adult and Internet datasets, which
+are relatively small (less than 40K training examples), which supports our hypothesis that a higher
+bias negatively affects the performance. Indeed, according to Theorem 1 and our reasoning in
+Section 4.1, bias is expected to be larger for smaller datasets (however, it can also depend on other
+properties of the dataset, e.g., on the dependency between features and target). In order to further
+validate this hypothesis, we make the following experiment: we train CatBoost in Ordered and Plain
+modes on randomly ﬁltered datasets and compare the obtained losses, see Figure 2. As we expected,
+
+7https://github.com/catboost/benchmarks/tree/master/quality_benchmarks
+8For Epsilon, we use default parameters instead of parameter tuning due to large running time for all
+
+algorithms. We tune only the number of trees to avoid overﬁtting.
+
+9The numbers for CatBoost in Table 2 may slightly differ from the corresponding numbers in our GitHub
+
+repository, since we use another version of CatBoost with all the discussed features implemented.
+
+8
+
+for smaller datasets the relative performance of Plain mode becomes worse. To save space, here we
+present the results only for logloss; the ﬁgure for zero-one loss is similar.
+
+We also compare Ordered and Plain modes in the above-mentioned raw setting of CatBoost in
+Appendix G and conclude that the advantage of Ordered mode is not caused by interaction with
+speciﬁc CatBoost options.
+
+Table 4: Comparison of target statistics, relative
+change in logloss / zero-one loss compared to or-
+dered TS.
+
+Greedy
+
+Holdout
+
+Leave-one-out
+
+Adult
+Amazon
+Click
+Appetency
+Churn
+Internet
+Upselling
+Kick
+
++1.1% / +0.8%
++40% / +32%
++13% / +6.7%
++24% / +0.7%
++12% / +2.1%
++33% / +22%
++57% / +50%
++22% / +28%
+
++2.1% / +2.0%
++8.3% / +8.3%
++1.5% / +0.5%
++1.6% / -0.5%
++0.9% / +1.3%
++2.6% / +1.8%
++1.6% / +0.9%
++1.3% / +0.32%
+
++5.5% / +3.7%
++4.5% / +5.6%
++2.7% / +0.9%
++8.5% / +0.7%
++1.6% / +1.8%
++27% / +19%
++3.9% / +2.9%
++3.7% / +3.3%
+
+Figure 2: Relative error of Plain boosting mode
+compared to Ordered boosting mode depending
+on the fraction of the dataset.
+
+Analysis of target statistics We compare different TSs introduced in Section 3.2 as options of
+CatBoost in Ordered boosting mode keeping all other algorithmic details the same; the results can
+be found in Table 4. Here, to save space, we present only relative increase in loss functions for
+each algorithm compared to CatBoost with ordered TS. Note that the ordered TS used in CatBoost
+signiﬁcantly outperform all other approaches. Also, among the baselines, the holdout TS is the best
+for most of the datasets since it does not suffer from conditional shift discussed in Section 3.2 (P1);
+still, it is worse than CatBoost due to less effective usage of training data (P2). Leave-one-out is
+usually better than the greedy TS, but it can be much worse on some datasets, e.g., on Adult. The
+reason is that the greedy TS suffer from low-frequency categories, while the leave-one-out TS suffer
+also from high-frequency ones, and on Adult all the features have high frequency.
+
+Finally, let us note that in Table 4 we combine Ordered mode of CatBoost with different TSs. To
+generalize these results, we also made a similar experiment by combining different TS with Plain
+mode, used in standard gradient boosting. The obtained results and conclusions turned out to be very
+similar to the ones discussed above.
+
+Feature combinations The effect of feature combinations discussed in Section 5 is demonstrated
+in Figure 3 in Appendix G. In average, changing the number cmax of features allowed to be com-
+bined from 1 to 2 provides an outstanding improvement of logloss by 1.86% (reaching 11.3%),
+changing from 1 to 3 yields 2.04%, and further increase of cmax does not inﬂuence the performance
+signiﬁcantly.
+
+Number of permutations The effect of the number s of permutations on the performance of
+CatBoost is presented in Figure 4 in Appendix G. In average, increasing s slightly decreases logloss,
+e.g., by 0.19% for s = 3 and by 0.38% for s = 9 compared to s = 1.
+
+7 Conclusion
+
+Acknowledgments
+
+In this paper, we identify and analyze the problem of prediction shifts present in all existing imple-
+mentations of gradient boosting. We propose a general solution, ordered boosting with ordered TS,
+which solves the problem. This idea is implemented in CatBoost, which is a new gradient boosting
+library. Empirical results demonstrate that CatBoost outperforms leading GBDT packages and leads
+to new state-of-the-art results on common benchmarks.
+
+We are very grateful to Mikhail Bilenko for important references and advices that lead to theoretical
+analysis of this paper, as well as suggestions on the presentation. We also thank Pavel Serdyukov for
+
+9
+
+many helpful discussions and valuable links, Nikita Kazeev, Nikita Dmitriev, Stanislav Kirillov and
+Victor Omelyanenko for help with experiments.
+
+[1] L. Bottou and Y. L. Cun. Large scale online learning. In Advances in neural information
+
+References
+
+processing systems, pages 217–224, 2004.
+
+[2] L. Breiman. Out-of-bag estimation, 1996.
+
+[3] L. Breiman. Using iterated bagging to debias regressions. Machine Learning, 45(3):261–277,
+
+[4] L. Breiman, J. Friedman, C. J. Stone, and R. A. Olshen. Classiﬁcation and regression trees.
+
+2001.
+
+CRC press, 1984.
+
+[5] R. Caruana and A. Niculescu-Mizil. An empirical comparison of supervised learning algorithms.
+In Proceedings of the 23rd international conference on Machine learning, pages 161–168. ACM,
+2006.
+
+[6] B. Cestnik et al. Estimating probabilities: a crucial task in machine learning. In ECAI, volume 90,
+
+pages 147–149, 1990.
+
+[7] O. Chapelle, E. Manavoglu, and R. Rosales. Simple and scalable response prediction for display
+advertising. ACM Transactions on Intelligent Systems and Technology (TIST), 5(4):61, 2015.
+
+[8] T. Chen and C. Guestrin. Xgboost: A scalable tree boosting system. In Proceedings of the 22Nd
+ACM SIGKDD International Conference on Knowledge Discovery and Data Mining, pages
+785–794. ACM, 2016.
+
+[9] M. Ferov and M. Modr`y. Enhancing lambdamart using oblivious trees. arXiv preprint
+
+arXiv:1609.05610, 2016.
+
+[10] J. Friedman, T. Hastie, and R. Tibshirani. Additive logistic regression: a statistical view of
+
+boosting. The annals of statistics, 28(2):337–407, 2000.
+
+[11] J. Friedman, T. Hastie, and R. Tibshirani. The elements of statistical learning, volume 1.
+
+Springer series in statistics New York, 2001.
+
+[12] J. H. Friedman. Greedy function approximation: a gradient boosting machine. Annals of
+
+statistics, pages 1189–1232, 2001.
+
+[13] J. H. Friedman. Stochastic gradient boosting. Computational Statistics & Data Analysis,
+
+38(4):367–378, 2002.
+
+[14] A. Gulin, I. Kuralenok, and D. Pavlov. Winning the transfer learning track of yahoo!’s learning
+
+to rank challenge with yetirank. In Yahoo! Learning to Rank Challenge, pages 63–76, 2011.
+
+[15] X. He, J. Pan, O. Jin, T. Xu, B. Liu, T. Xu, Y. Shi, A. Atallah, R. Herbrich, S. Bowers, et al.
+Practical lessons from predicting clicks on ads at facebook. In Proceedings of the Eighth
+International Workshop on Data Mining for Online Advertising, pages 1–9. ACM, 2014.
+
+[16] G. Ke, Q. Meng, T. Finley, T. Wang, W. Chen, W. Ma, Q. Ye, and T.-Y. Liu. Lightgbm: A
+highly efﬁcient gradient boosting decision tree. In Advances in Neural Information Processing
+Systems, pages 3149–3157, 2017.
+
+[17] M. Kearns and L. Valiant. Cryptographic limitations on learning boolean formulae and ﬁnite
+
+automata. Journal of the ACM (JACM), 41(1):67–95, 1994.
+
+[18] J. Langford, L. Li, and T. Zhang. Sparse online learning via truncated gradient. Journal of
+
+Machine Learning Research, 10(Mar):777–801, 2009.
+
+[19] LightGBM. Categorical feature support. http://lightgbm.readthedocs.io/en/latest/
+
+Advanced-Topics.html#categorical-feature-support, 2017.
+
+10
+
+[20] LightGBM. Optimal split for categorical features. http://lightgbm.readthedocs.io/en/
+
+latest/Features.html#optimal-split-for-categorical-features, 2017.
+
+[21] LightGBM. feature_histogram.cpp. https://github.com/Microsoft/LightGBM/blob/
+
+master/src/treelearner/feature_histogram.hpp, 2018.
+
+[22] X. Ling, W. Deng, C. Gu, H. Zhou, C. Li, and F. Sun. Model ensemble for click prediction
+in bing search ads. In Proceedings of the 26th International Conference on World Wide Web
+Companion, pages 689–698. International World Wide Web Conferences Steering Committee,
+2017.
+
+[23] Y. Lou and M. Obukhov. Bdt: Gradient boosted decision tables for high accuracy and scoring
+efﬁciency. In Proceedings of the 23rd ACM SIGKDD International Conference on Knowledge
+Discovery and Data Mining, pages 1893–1901. ACM, 2017.
+
+[24] L. Mason, J. Baxter, P. L. Bartlett, and M. R. Frean. Boosting algorithms as gradient descent.
+
+In Advances in neural information processing systems, pages 512–518, 2000.
+
+[25] D. Micci-Barreca. A preprocessing scheme for high-cardinality categorical attributes in classiﬁ-
+
+cation and prediction problems. ACM SIGKDD Explorations Newsletter, 3(1):27–32, 2001.
+
+[26] B. P. Roe, H.-J. Yang, J. Zhu, Y. Liu, I. Stancu, and G. McGregor. Boosted decision trees as
+an alternative to artiﬁcial neural networks for particle identiﬁcation. Nuclear Instruments and
+Methods in Physics Research Section A: Accelerators, Spectrometers, Detectors and Associated
+Equipment, 543(2):577–584, 2005.
+
+[27] L. Rokach and O. Maimon. Top–down induction of decision trees classiﬁers — a survey.
+IEEE Transactions on Systems, Man, and Cybernetics, Part C (Applications and Reviews),
+35(4):476–487, 2005.
+
+[28] D. B. Rubin. The bayesian bootstrap. The annals of statistics, pages 130–134, 1981.
+
+[29] Q. Wu, C. J. Burges, K. M. Svore, and J. Gao. Adapting boosting for information retrieval
+
+measures. Information Retrieval, 13(3):254–270, 2010.
+
+[30] K. Zhang, B. Schölkopf, K. Muandet, and Z. Wang. Domain adaptation under target and
+
+conditional shift. In International Conference on Machine Learning, pages 819–827, 2013.
+
+[31] O. Zhang. Winning data science competitions.
+
+https://www.slideshare.net/
+
+ShangxuanZhang/winning-data-science-competitions-presented-by-owen-zhang,
+2015.
+
+[32] Y. Zhang and A. Haghani. A gradient boosting method to improve travel time prediction.
+
+Transportation Research Part C: Emerging Technologies, 58:308–324, 2015.
+
+Appendices
+
+A Proof of Theorem 1
+
+A.1 Proof for the case D1 = D2
+
+Let us denote by A the event that each leaf in both stumps h1 and h2 contains at least one example,
+i.e., there exists at least one x ∈ D with xi = s for all i ∈ {1, 2}, s ∈ {0, 1}. All further reasonings
+are given conditioning on A. Note that the probability of A is 1 − O (2−n), therefore we can assign
+an arbitrary value to any empty leaf during the learning process, and the choice of the value will
+affect all expectations we calculate below by O (2−n).
+
+11
+
+Denote by ξst, s, t ∈ {0, 1}, the number of examples xk ∈ D with xk = (s, t). The value of the ﬁrst
+stump h1 in the region {x1 = s} is the average value of yk over examples from D belonging to this
+region. That is,
+
+h1(0, t) =
+
+(cid:80)n
+
+j=1 c11
+
+(cid:80)n
+
+=
+
+j=1
+
+j=1 c21{xj =(0,1)}
+(cid:80)n
+1
+{x1
+j =0}
+j =1} + c21{xj =(1,1)}
+j =1}
+
+j=1
+
+{x1
+
+1
+
+{x1
+(cid:80)n
+
+c2ξ01
+ξ00 + ξ01
+
+,
+
+= c1 +
+
+c2ξ11
+ξ10 + ξ11
+
+.
+
+h1(1, t) =
+
+Summarizing, we obtain
+
+h1(s, t) = c1s +
+
+c2ξs1
+ξs0 + ξs1
+
+.
+
+(7)
+
+Note that, by conditioning on A, we guarantee that the denominator ξs0 + ξs1 is not equal to zero.
+Now we derive the expectation E(h1(x)) of prediction h1 for a test example x = (s, t).
+(cid:17)
+
+| A
+
+= 1
+2 .
+
+Indeed, due to the symmetry we have
+
+It
+
+E
+
+is easy to show that E
+(cid:16) ξs0
+(cid:17)
+(cid:16) ξs1
+
+| A
+
+= E
+
+ξs0+ξs1
+
+ξs0+ξs1
+
+(cid:16) ξs1
+
+ξs0+ξs1
+(cid:17)
+
+| A
+
+and the sum of these expectations is E
+
+(cid:16) ξs0+ξs1
+ξs0+ξs1
+
+(cid:17)
+
+| A
+
+= 1.
+
+So, by taking the expectation of (7), we obtain the following proposition.
+
+Proposition 1 We have E(h1(s, t) | A) = c1s + c2
+2 .
+
+It means that the conditional expectation E(h1(x) | x = (s, t), A) on a test example x equals
+c1s + c2
+
+2 , since x and h1 are independent.
+
+In this paragraph, we show that the conditional expectation E(h1(xl) | xl =
+Prediction shift of h1
+(s, t), A) on a training example xl is shifted for any l = 1, . . . , n, because the model h1 is ﬁtted to
+xl. This is an auxiliary result, which is not used directly for proving the theorem, but helps to track
+the chain of obtained shifts.
+
+Proposition 2 The conditional expectation is
+
+E(h1(xl) | xl = (s, t), A) = c1s +
+
+− c2
+
++ O(2−n) .
+
+c2
+2
+
+(cid:19)
+
+(cid:18) 2t − 1
+n
+
+Proof . Let us introduce the following notation
+
+Then, we can rewrite the conditional expectation as
+
+αsk =
+
+1{xk=(s,1)}
+ξs0 + ξs1
+
+.
+
+c1s + c2
+
+E(αsk | xl = (s, t), A) .
+
+n
+(cid:88)
+
+k=1
+
+Lemma 1 below implies that E(αsl | xl = (s, t), A) = 2t
+
+n . For k (cid:54)= l, we have
+
+E(αsk | xl = (s, t), A) =
+
+| xl = (s, t), xk = (s, 1), A
+
+(cid:19)
+
+(cid:18)
+
+E
+
+1
+4
+
+1
+ξs0 + ξs1
+
+due to Lemma 2 below. Finally, we obtain
+(cid:18) 2t
+n
+
+E(h1(xl) | xl = (s, t)) = c1s + c2
+
+(cid:3)
+
+(cid:18)
+
+1 −
+
+=
+
+1
+2n
+
+1
+n − 1
+
++
+
+n − 2
+(2n−1 − 2) (n − 1)
+
+(cid:19)
+
+(cid:19)(cid:19)
+
+(cid:18)
+
+1 −
+
++ (n − 1)
+
+1
+2n
++ O (cid:0)2−n(cid:1) = c1s +
+
+1
+n − 1
+c2
+2
+
+− c2
+
+(cid:19)
+
+(cid:18) 2t − 1
+n
+
++ O(2−n).
+
+12
+
+Lemma 1 E
+
+(cid:16)
+
+1
+ξs0+ξs1
+
+| x1 = (s, t), A
+
+(cid:17)
+
+= 2
+n .
+
+Proof . Note that given x1 = (s, t), A corresponds to the event that there is an example with
+x1 = 1 − s and (possibly another) example with x2 = 1 − t among x2, . . . , xn.
+Note that ξs0 + ξs1 = (cid:80)n
+
+j =s}. For k = 1, . . . , n − 1, we have
+
+j=1
+
+{x1
+
+1
+
+P(ξs0 + ξs1 = k | x1 = (s, t), A) =
+
+P(ξs0 + ξs1 = k, A | x1 = (s, t))
+P(A | x1 = (s, t))
+1=s} = 1 when x1 = (s, t) with probability 1, (cid:80)n
+
+{x1
+
+1
+
+{x1
+
+since 1
+j =s} is a binomial variable
+independent of x1, and an example with x1 = 1 − s exists whenever ξs0 + ξs1 = k < n and
+x1 = (s, t) (while the existence of one with x2 = 1 − t is an independent event). Therefore, we have
+
+j=2
+
+(cid:0)n−1
+(cid:1)
+k−1
+2n−1 (cid:0)1 − 2−(n−1)(cid:1) ,
+
+=
+
+(cid:18)
+
+E
+
+1
+ξs0 + ξs1
+
+| x1 = (s, t), A
+
+=
+
+(cid:19)
+
+(cid:1)
+
+(cid:0)n−1
+k−1
+2n−1 − 1
+
+1
+k
+
+n−1
+(cid:88)
+
+k=1
+
+=
+
+1
+n (2n−1 − 1)
+
+n−1
+(cid:88)
+
+k=1
+
+(cid:19)
+
+(cid:18)n
+k
+
+=
+
+2
+n
+
+.
+
+| x1 = (s, t1), x2 = (s, t2), A
+
+=
+
+1 −
+
+(cid:19)
+
+(cid:18)
+
+2
+n
+
+1
+n − 1
+
++
+
+n − 2
+(2n−1 − 2) (n − 1)
+
+(cid:19)
+
+.
+
+Proof . Similarly to the previous proof, for k = 2, . . . , n − 1, we have
+
+P (ξs0 + ξs1 = k | x1 = (s, t1), x2 = (s, t2), A) =
+
+(cid:0)n−2
+(cid:1)
+k−2
+2n−2 (cid:0)1 − 2−(n−2)(cid:1) .
+
+| x1 = (s, t1), x2 = (s, t2), A
+
+=
+
+(cid:19)
+
+1
+2n−2 (cid:0)1 − 2−(n−1)(cid:1)
+
+=
+
+1
+2n−2 − 1
+
+n−1
+(cid:88)
+
+(cid:18)n − 2
+k − 2
+
+(cid:19) (cid:18) 1
+
+−
+
+1
+(k − 1)k
+
+k − 1
+
+k=2
+(cid:18) 1
+
+n−1
+(cid:88)
+
+(cid:19)
+
+(cid:18)n − 1
+k − 1
+
+−
+
+1
+n(n − 1)
+
+(cid:18)n
+k
+
+(cid:19)(cid:19)
+
+n − 1
+
+(cid:1)
+(cid:0)n−2
+k−2
+k
+
+n−1
+(cid:88)
+
+k=2
+(cid:19)
+
+=
+
+(cid:19)
+
+=
+
+1
+2n−2 − 1
+
+=
+
+1
+2n−2 − 1
+
+k=2
+(cid:18) 1
+
+n − 1
+
+(2n−1 − 2) −
+
+(2n − n − 2)
+
+=
+
+1
+n(n − 1)
+(cid:18)
+2
+n
+
+1 −
+
+=
+
+1
+n − 1
+
++
+
+n − 2
+(2n−1 − 2) (n − 1)
+
+(cid:19)
+
+.
+
+(cid:3)
+
+Lemma 2 We have
+
+(cid:18)
+
+E
+
+1
+ξs0 + ξs1
+
+Therefore,
+
+(cid:18)
+
+E
+
+1
+ξs0 + ξs1
+
+(cid:3)
+
+Bias of the model h1 +h2 Proposition 2 shows that the values of the model h1 on training examples
+are shifted with respect to the ones on test examples. The next step is to show how this can lead to a
+bias of the trained model, if we use the same dataset for building both h1 and h2. Namely, we derive
+the expected value of h1(s, t) + h2(s, t) and obtain a bias according to the following result.
+
+Proposition 3 If both h1 and h2 are built using the same dataset D, then
+
+E (cid:0)h1(s, t) + h2(s, t) | A(cid:1) = f ∗(s, t) −
+
+1
+n − 1
+
+(cid:18)
+
+c2
+
+t −
+
+(cid:19)
+
+1
+2
+
++ O(1/2n) .
+
+13
+
+Proof . The residual after the ﬁrst step is
+
+f ∗(s, t) − h1(s, t) = c2
+
+t −
+
+(cid:18)
+
+ξs1
+ξs0 + ξs1
+
+(cid:19)
+
+.
+
+Therefore, we get
+
+h2(s, t) =
+
+c2
+ξ0t + ξ1t
+
+(cid:18)(cid:18)
+
+t −
+
+ξ01
+ξ00 + ξ01
+
+(cid:19)
+
+(cid:18)
+
+ξ0t +
+
+t −
+
+ξ11
+ξ10 + ξ11
+
+(cid:19)
+
+(cid:19)
+
+ξ1t
+
+,
+
+which is equal to
+
+for t = 0 and to
+
+(cid:18)
+
+−c2
+
+(cid:18)
+
+c2
+
+ξ00ξ01
+(ξ00 + ξ01)(ξ00 + ξ10)
+
++
+
+ξ10ξ11
+(ξ10 + ξ11)(ξ00 + ξ10)
+
+ξ00ξ01
+(ξ00 + ξ01)(ξ01 + ξ11)
+
++
+
+ξ10ξ11
+(ξ10 + ξ11)(ξ01 + ξ11)
+
+(cid:19)
+
+(cid:19)
+
+for t = 1. The expected values of all four ratios are equal due to symmetries, and they are equal to
+1
+4
+
++ O(2−n) according to Lemma 3 below. So, we obtain
+
+1 − 1
+n−1
+
+(cid:16)
+
+(cid:17)
+
+E(h2(s, t) | A) = (2t − 1)
+
+c2
+2
+
+(cid:18)
+
+1 −
+
+(cid:19)
+
+1
+n − 1
+
++ O(2−n)
+
+E(h1(s, t) + h2(s, t) | A) = f ∗(s, t) − c2
+
+1
+n − 1
+
+(cid:18)
+
+t −
+
+(cid:19)
+
+1
+2
+
++ O(2−n) .
+
+and
+
+(cid:3)
+
+Lemma 3 We have
+
+(cid:18)
+
+E
+
+ξ00ξ01
+(ξ00 + ξ01)(ξ01 + ξ11)
+
+(cid:19)
+
+| A
+
+=
+
+1 −
+
+(cid:18)
+
+1
+4
+
+(cid:19)
+
+1
+n − 1
+
++ O(2−n) .
+
+Proof . First, linearity implies
+(cid:18)
+
+E
+
+ξ00ξ01
+(ξ00 + ξ01)(ξ01 + ξ11)
+
+(cid:19)
+
+| A
+
+=
+
+(cid:88)
+
+E
+
+(cid:18) 1xi=(0,0),xj =(0,1)
+
+(ξ00 + ξ01)(ξ01 + ξ11)
+
+(cid:19)
+
+| A
+
+.
+
+i,j
+
+Taking into account that all terms are equal, the expectation can be written as n(n−1)
+
+a, where
+
+(cid:18)
+
+a = E
+
+1
+(ξ00 + ξ01)(ξ01 + ξ11)
+
+| x1 = (0, 0), x2 = (0, 1), A
+
+.
+
+42
+
+(cid:19)
+
+A key observation is that ξ00 + ξ01 and ξ01 + ξ11 are two independent binomial variables: the
+former one is the number of k such that x1
+k = 0 and the latter one is the number of k such that
+x2
+k = 1. Moreover, they (and also their inverses) are also conditionally independent given that ﬁrst
+two observations of the Bernoulli scheme are known (x1 = (0, 0), x2 = (0, 1)) and given A. This
+(cid:17)
+conditional independence implies that a is the product of E
+
+| x1 = (0, 0), x2 = (0, 1), A
+
+(cid:16)
+
+1
+ξ00+ξ01
+
+(cid:16)
+
+and E
+
+1
+ξ01+ξ11
+
+| x1 = (0, 0), x2 = (0, 1), A
+
+. The ﬁrst factor equals 2
+n
+
+(cid:16)
+
+1 − 1
+
+(cid:17)
+n−1 + O(2−n)
+(cid:17)
+
+ac-
+
+cording to Lemma 2. The second one is equal to E
+not bring any new information about the number of k with x2
+2
+So, according to Lemma 4 below, the second factor equals
+
+1
+ξ01+ξ11
+
+| x1 = (0, 0), x2 = (0, 1)
+
+since A does
+k = 1 given x1 = (0, 0), x2 = (0, 1).
+
+n−1 (1 + O(2−n)). Finally, we obtain
+
+(cid:17)
+
+(cid:16)
+
+(cid:18)
+
+E
+
+(cid:19)
+
+ξ00ξ01
+(ξ00 + ξ01)(ξ01 + ξ11)
+n(n − 1)
+42
+
+=
+
+(cid:3)
+
+4
+n(n − 1)
+
+(cid:18)
+
+1 −
+
+(cid:19)
+
+1
+n − 1
+
++ O(2−n) =
+
+1 −
+
++ O(2−n).
+
+(cid:18)
+
+1
+4
+
+(cid:19)
+
+1
+n − 1
+
+14
+
+Lemma 4 E
+
+(cid:16)
+
+1
+ξ01+ξ11
+
+| x1 = (0, 0), x2 = (0, 1)
+
+= 2
+
+n−1 −
+
+1
+2n−2(n−1) .
+
+(cid:17)
+
+Proof . Similarly to the proof of Lemma 2, we have
+
+P(ξ01 + ξ11 = k | x1 = (0, 0), x2 = (0, 1)) =
+
+(cid:19)
+
+(cid:18)n − 2
+k − 1
+
+2−(n−2) .
+
+Therefore, we get
+
+(cid:18)
+
+E
+
+1
+ξ01 + ξ11
+
+(cid:3)
+
+| x1 = (0, 0), x2 = (0, 1)
+
+=
+
+(cid:19)
+
+n−1
+(cid:88)
+
+k=1
+
+(cid:19)
+
+(cid:18)n − 2
+k − 1
+
+1
+k
+
+2−(n−2)
+
+=
+
+2−(n−2)
+n − 1
+
+n−1
+(cid:88)
+
+k=1
+
+(cid:19)
+
+(cid:18)n − 1
+k
+
+=
+
+2
+n − 1
+
+−
+
+1
+2n−2(n − 1)
+
+.
+
+A.2 Proof for independently sampled D1 and D2
+
+Assume that we have an additional sample D2 = {xn+k}k=1..n for building h2. Now A denotes the
+event that each leaf in h1 contains at least one example from D1 and each leaf in h2 contains at least
+one example from D2.
+
+Proposition 4 If h2 is built using dataset D2, then
+
+E(h1(s, t) + h2(s, t) | A) = f ∗(s, t) .
+
+Proof .
+Let us denote by ξ(cid:48)
+First, we need to derive the expectation E(h2(s, t)) of h2 on a test example x = (s, t). Similarly to
+the proof of Proposition 3, we get
+
+st the number of examples xn+k that are equal to (s, t), k = 1, . . . , n.
+
+h2(s, 0) = −c2
+
+(cid:18)
+
+ξ(cid:48)
+00ξ01
+(ξ00 + ξ01)(ξ(cid:48)
+
+00 + ξ(cid:48)
+
+10)
+
++
+
+ξ(cid:48)
+10ξ11
+(ξ10 + ξ11)(ξ(cid:48)
+
+(cid:19)
+
+,
+
+00 + ξ(cid:48)
+
+10)
+(cid:19)
+
+(cid:18)
+
+h2(s, 1) = c2
+
+ξ00ξ(cid:48)
+01
+(ξ00 + ξ01)(ξ(cid:48)
+01 + ξ(cid:48)
+Due to the symmetries, the expected values of all four fractions above are equal. Also, due to the
+independence of ξij and ξ(cid:48)
+ξ(cid:48)
+00ξ01
+(ξ00 + ξ01)(ξ(cid:48)
+
+ξ10ξ(cid:48)
+11
+(ξ10 + ξ11)(ξ(cid:48)
+01 + ξ(cid:48)
+
+(cid:18) ξ(cid:48)
+00
+00 + ξ(cid:48)
+ξ(cid:48)
+10
+
+kl, we have
+
+(cid:18) ξ01
+
+= E
+
+11)
+
+11)
+
+| A
+
+| A
+
+| A
+
+1
+4
+
+=
+
++
+
+(cid:18)
+
+(cid:19)
+
+(cid:19)
+
+(cid:19)
+
+E
+
+E
+
+.
+
+.
+
+00 + ξ(cid:48)
+10)
+2 and E(h2(s, 1) | A) = c2
+Therefore, E(h2(s, 0) | A) = − c2
+2 .
+Summing up, E(h2(s, t) | A) = c2t − c2
+
+ξ00 + ξ01
+
+2 and E(h1(s, t) + h2(s, t) | A) = c1s + c2t. (cid:3)
+
+B Formal description of CatBoost algorithm
+
+In this section, we formally describe the CatBoost algorithm introduced in Section 5. In Algorithm 3,
+we provide more information on particular details including the speeding up trick introduced in
+paragraph “Complexity”. The key step of the CatBoost algorithm is the procedure of building a
+tree described in detail in Function BuildT ree. To obtain the formal description of the CatBoost
+algorithm without the speeding up trick, one should replace (cid:100)log2 n(cid:101) by n in line 6 of Algorithm 3
+and use Algorithm 2 instead of Function BuildT ree.
+
+We use Function GetLeaf (x, T, σr) to describe how examples are matched to leaves leafr(i). Given
+an example with features x, we calculate ordered TS on the basis of the permutation σr and then
+choose the leaf of tree T corresponding to features x enriched by the obtained ordered TS. Using
+ApplyM ode instead of a permutation in function GetLeaf in line 15 of Algorithm 3 means that we
+use TS calculated on the whole training data to apply the trained model on a new example.
+
+15
+
+Algorithm 3: CatBoost
+input
+
+: {(xi, yi)}n
+
+i=1, I, α, L, s, M ode
+
+1 σr ← random permutation of [1, n] for r = 0..s;
+2 M0(i) ← 0 for i = 1..n;
+3 if M ode = P lain then
+4
+
+Mr(i) ← 0 for r = 1..s, i : σr(i) ≤ 2j+1;
+
+5 if M ode = Ordered then
+6
+
+for j ← 1 to (cid:100)log2 n(cid:101) do
+
+Mr,j(i) ← 0 for r = 1..s, i = 1..2j+1;
+
+8 for t ← 1 to I do
+9
+
+Tt, {Mr}s
+r=1 ← BuildT ree({Mr}s
+leaf0(i) ← GetLeaf (xi, Tt, σ0) for i = 1..n;
+grad0 ← CalcGradient(L, M0, y);
+foreach leaf j in Tt do
+
+bt
+j ← −avg(grad0(i) for i : leaf0(i) = j);
+
+M0(i) ← M0(i) + αbt
+
+14
+15 return F (x) = (cid:80)I
+
+(cid:80)
+
+leaf0(i) for i = 1..n;
+j α bt
+j
+
+t=1
+
+1{GetLeaf (x,Tt,ApplyM ode)=j};
+
+r=1, {(xi, yi)}n
+
+i=1, α, L, {σi}s
+
+i=1, M ode);
+
+i=1, α, L, {σi}s
+
+i=1, M ode
+
+Function BuildT ree
+input
+
+: M ,{(xi, yi)}n
+1 grad ← CalcGradient(L, M, y);
+2 r ← random(1, s);
+3 if M ode = P lain then
+4
+
+G ← (gradr(i) for i = 1..n);
+
+5 if M ode = Ordered then
+6
+
+G ← (gradr,(cid:98)log2(σr(i)−1)(cid:99)(i) for i = 1..n);
+
+7 T ← empty tree;
+8 foreach step of top-down procedure do
+foreach candidate split c do
+9
+Tc ← add split c to T ;
+leafr(i) ← GetLeaf (xi, Tc, σr) for i = 1..n;
+if M ode = P lain then
+
+10
+
+11
+
+12
+
+∆(i) ← avg(gradr(p) for p : leafr(p) = leafr(i)) for i = 1..n;
+
+if M ode = Ordered then
+
+∆(i) ← avg(gradr,(cid:98)log2(σr(i)−1)(cid:99)(p) for p : leafr(p) = leafr(i), σr(p) < σr(i)) for
+i = 1..n;
+
+loss(Tc) ← cos(∆, G)
+T ← arg minTc (loss(Tc))
+
+17
+18 leafr(cid:48)(i) ← GetLeaf (xi, T, σr(cid:48)) for r(cid:48) = 1..s, i = 1..n;
+19 if M ode = P lain then
+20
+
+21 if M ode = Ordered then
+22
+
+for j ← 1 to (cid:100)log2 n(cid:101) do
+
+Mr(cid:48)(i) ← Mr(cid:48)(i) − α avg(gradr(cid:48)(p) for p : leafr(cid:48)(p) = leafr(cid:48)(i)) for r(cid:48) = 1..s, i = 1..n;
+
+Mr(cid:48),j(i) ← Mr(cid:48),j(i) − α avg(gradr(cid:48),j(p) for p : leafr(cid:48)(p) = leafr(cid:48)(i), σr(cid:48)(p) ≤ 2j) for
+r(cid:48) = 1..s, i : σr(cid:48)(i) ≤ 2j+1;
+
+24 return T, M
+
+16
+
+7
+
+10
+
+11
+
+12
+
+13
+
+13
+
+14
+
+15
+
+16
+
+23
+
+C Time complexity analysis
+
+C.1 Theoretical analysis
+
+We present the computational complexity of different components of any of the two modes of
+CatBoost per one iteration in Table 5.
+
+Table 5: Computational complexity.
+
+Procedure
+
+CalcGradient
+
+Build T
+
+Calc values bt
+
+j Update M Calc ordered TS
+
+Complexity
+for iteration t
+
+O(s · n)
+
+O(|C| · n)
+
+O(n)
+
+O(s · n)
+
+O(NT S,t · n)
+
+We ﬁrst prove these asymptotics for the Ordered mode. For this purpose, we estimate the number
+Npred of predictions Mr,j(i) to be maintained:
+
+Npred = (s + 1) ·
+
+2j+1 < (s + 1) · 2log2 n+3 = 8(s + 1)n .
+
+(cid:100)log2 n(cid:101)
+(cid:88)
+
+j=1
+
+Then, obviously, the complexity of CalcGradient is O(Npred) = O(s · n). The complexity of leaf
+values calculation is O(n), since each example i is included only in averaging operation in leaf
+leaf0(i).
+
+Calculation of the ordered TS for one categorical feature can be performed sequentially in the order of
+the permutation by n additive operations for calculation of n partial sums and n division operations.
+Thus, the overall complexity of the procedure is O(NT S,t · n), where NT S,t is the number of TS
+which were not calculated on the previous iterations. Since the leaf values ∆(i) calculated in line 15
+of Function BuildT ree can be considered as ordered TS, where gradients play the role of targets, the
+complexity of building a tree T is O(|C| · n), where C is the set of candidate splits to be considered at
+the given iteration. Finally, for updating the supporting models (lines 22-23 in Function BuildT ree),
+we need to perform one averaging operation for each j = 1, . . . , (cid:100)log2 n(cid:101), and each maintained
+gradient gradr(cid:48),j(p) is included in one averaging operation. Thus, the number of operations is
+bounded by the number of the maintained gradients gradr(cid:48),j(p), which is equal to Npred = O(s · n).
+
+To ﬁnish the proof, note that any component of the Plain mode is not less efﬁcient than the same one
+of the Ordered mode but, at the same time, cannot be more efﬁcient than corresponding asymptotics
+from Table 5.
+
+C.2 Empirical analysis
+
+It is quite hard to compare different boosting libraries in terms of training speed. Every algorithm has
+a vast number of parameters which affect training speed, quality and model size in a non-obvious way.
+Different libraries have their unique quality/training speed trade-off’s and they cannot be compared
+without domain knowledge (e.g., is 0.5% of quality metric worth it to train a model 3-4 times slower?).
+Plus for each library it is possible to obtain almost the same quality with different ensemble sizes
+and parameters. As a result, one cannot compare libraries by time needed to obtain a certain level of
+quality. As a result, we could give only some insights of how fast our implementation could train
+a model of a ﬁxed size. We use Epsilon dataset and we measure mean tree construction time one
+can achieve without using feature subsampling and/or bagging by CatBoost (both Ordered and Plain
+modes), XGBoost (we use histogram-based version, which is faster) and LightGBM. For XGBoost
+and CatBoost we use the default tree depth equal to 6, for LightGBM we set leaves count to 64 to
+have comparable results. We run all experiments on the same machine with Intel Xeon E3-12xx
+2.6GHz, 16 cores, 64GB RAM and run all algorithms with 16 threads.
+
+We set such learning rate that algorithms start to overﬁt approximately after constructing about 7000
+trees and measure the average time to train ensembles of 8000 trees. Mean tree construction time
+is presented in Table 6. Note that CatBoost Plain and LightGBM are the fastest ones followed by
+Ordered mode, which is about 1.7 times slower, which is expected.
+
+17
+
+Table 6: Comparison of running times on Epsilon
+
+time per tree
+
+CatBoost Plain
+CatBoost Ordered
+XGBoost
+LightGBM
+
+1.1 s
+1.9 s
+3.9 s
+1.1 s
+
+Dataset name
+Adult11
+
+Instances
+48842
+
+Table 7: Description of the datasets.
+
+Features Description
+
+15
+
+10
+
+12
+
+Prediction task is to determine whether a person
+makes over 50K a year. Extraction was done by
+Barry Becker from the 1994 Census database. A
+set of reasonably clean records was extracted us-
+ing the following conditions: (AAGE>16) and
+(AGI>100) and (AFNLWGT>1) and (HRSWK>0)
+Data from the Kaggle Amazon Employee chal-
+lenge.
+This data is derived from the 2012 KDD Cup. The
+data is subsampled to 1% of the original num-
+ber of instances, downsampling the majority class
+(click=0) so that the target feature is reasonably
+balanced (5 to 1). The data is about advertisements
+shown alongside search results in a search engine,
+and whether or not people clicked on these ads.
+The task is to build the best possible model to pre-
+dict whether a user will click on a given ad.
+PASCAL Challenge 2008.
+Small version of KDD 2009 Cup data.
+Small version of KDD 2009 Cup data.
+Binarized version of the original dataset. The multi-
+class target feature is converted to a two-class nom-
+inal target feature by re-labeling the majority class
+as positive (‘P’) and all others as negative (‘N’).
+Originally converted by Quan Sun.
+Small version of KDD 2009 Cup data.
+Data from “Don’t Get Kicked!” Kaggle challenge.
+
+Amazon12
+
+32769
+
+Click Prediction13
+
+399482
+
+Epsilon14
+KDD appetency15
+KDD churn16
+KDD Internet17
+
+400000
+50000
+50000
+10108
+
+2000
+231
+231
+69
+
+KDD upselling18
+Kick prediction19
+
+50000
+72983
+
+231
+36
+
+Finally, let us note that CatBoost has a highly efﬁcient GPU implementation. The detailed description
+and comparison of the running times are beyond the scope of the current article, but these experiments
+can be found on the corresponding GitHub page.10
+
+D Experimental setup
+
+D.1 Description of the datasets
+
+The datasets used in our experiments are described in Table 7.
+
+10https://github.com/catboost/benchmarks/tree/master/gpu_training
+
+18
+
+D.2 Experimental settings
+
+In our experiments, we evaluate different modiﬁcations of CatBoost and two popular gradient boosting
+libraries: LightGBM and XGBoost. All the code needed for reproducing our experiments is published
+on our GitHub20.
+
+Train-test splits Each dataset was randomly split into training set (80%) and test set (20%). We
+denote them as Df ull_train and Dtest.
+
+We use 5-fold cross-validation to tune parameters of each model on the training set. Accordingly,
+Df ull_train is randomly split into 5 equally sized parts D1, . . . , D5 (sampling is stratiﬁed by classes).
+These parts are used to construct 5 training and validation sets: Dtrain
+i = Di
+for 1 ≤ i ≤ 5.
+
+= ∪j(cid:54)=iDj and Dval
+
+i
+
+Preprocessing We applied the following steps to datasets with missing values:
+
+• For categorical variables, missing values are replaced with a special value, i.e., we treat
+
+missing values as a special category;
+
+for each imputed feature is added.
+
+• For numerical variables, missing values are replaced with zeros, and a binary dummy feature
+
+For XGBoost, LightGBM and the raw setting of CatBoost (see Appendix G), we perform the following
+preprocessing of categorical features. For each pair of datasets (Dtrain
+), i = 1, . . . , 5, and
+(Df ull_train, Dtest), we preprocess the categorical features by calculating ordered TS (described in
+Section 3.2) on the basis of a random permutation of the examples of the ﬁrst (training) dataset. All
+the permutations are generated independently. The resulting values of TS are considered as numerical
+features by any algorithm to be evaluated.
+
+, Dval
+i
+
+i
+
+Parameter Tuning We tune all the key parameters of each algorithm by 50 steps of the se-
+quential optimization algorithm Tree Parzen Estimator implemented in Hyperopt library21 (mode
+algo=tpe.suggest) by minimizing logloss. Below is the list of the tuned parameters and their distribu-
+tions the optimization algorithm started from:
+
+XGBoost:
+
+• ‘eta’: Log-uniform distribution [e−7, 1]
+• ‘max_depth’: Discrete uniform distribution [2, 10]
+
+• ‘subsample’: Uniform [0.5, 1]
+
+• ‘colsample_bytree’: Uniform [0.5, 1]
+
+• ‘colsample_bylevel’: Uniform [0.5, 1]
+• ‘min_child_weight’: Log-uniform distribution [e−16, e5]
+• ‘alpha’: Mixed: 0.5 · Degenerate at 0 + 0.5 · Log-uniform distribution [e−16, e2]
+• ‘lambda’: Mixed: 0.5 · Degenerate at 0 + 0.5 · Log-uniform distribution [e−16, e2]
+• ‘gamma’: Mixed: 0.5 · Degenerate at 0 + 0.5 · Log-uniform distribution [e−16, e2]
+
+11https://archive.ics.uci.edu/ml/datasets/Adult
+12https://www.kaggle.com/c/amazon-employee-access-challenge
+13http://www.kdd.org/kdd-cup/view/kdd-cup-2012-track-2
+14https://www.csie.ntu.edu.tw/~cjlin/libsvmtools/datasets/binary.html
+15http://www.kdd.org/kdd-cup/view/kdd-cup-2009/Data
+16http://www.kdd.org/kdd-cup/view/kdd-cup-2009/Data
+17https://kdd.ics.uci.edu/databases/internet_usage/internet_usage.html
+18http://www.kdd.org/kdd-cup/view/kdd-cup-2009/Data
+19https://www.kaggle.com/c/DontGetKicked
+20https://github.com/catboost/benchmarks/tree/master/quality_benchmarks
+21https://github.com/hyperopt/hyperopt
+
+19
+
+LightGBM:
+
+CatBoost:
+
+• ‘learning_rate’: Log-uniform distribution [e−7, 1]
+• ‘num_leaves’ : Discrete log-uniform distribution [1, e7]
+• ‘feature_fraction’: Uniform [0.5, 1]
+• ‘bagging_fraction’: Uniform [0.5, 1]
+• ‘min_sum_hessian_in_leaf’: Log-uniform distribution [e−16, e5]
+• ‘min_data_in_leaf’: Discrete log-uniform distribution [1, e6]
+• ‘lambda_l1’: Mixed: 0.5 · Degenerate at 0 + 0.5 · Log-uniform distribution [e−16, e2]
+• ‘lambda_l2’: Mixed: 0.5 · Degenerate at 0 + 0.5 · Log-uniform distribution [e−16, e2]
+
+• ‘learning_rate’: Log-uniform distribution [e−7, 1]
+• ‘random_strength’: Discrete uniform distribution over a set {1, 20}
+• ‘one_hot_max_size’: Discrete uniform distribution over a set {0, 25}
+• ‘l2_leaf_reg’: Log-uniform distribution [1, 10]
+• ‘bagging_temperature’: Uniform [0, 1]
+• ‘gradient_iterations’ : Discrete uniform distribution over a set {1, 10}
+
+Next, having ﬁxed all other parameters, we perform exhaustive search for the number of trees in the
+interval [1, 5000]. We collect logloss value for each training iteration from 1 to 5000 for each of the 5
+folds. Then we choose the iteration with minimum logloss averaged over 5 folds.
+
+For evaluation, each algorithm was run on the preprocessed training data Df ull_train with the tuned
+parameters. The resulting model was evaluated on the preprocessed test set Dtest.
+
+Versions of the libraries
+
+• catboost (0.3)
+• xgboost (0.6)
+• scikit-learn (0.18.1)
+• scipy (0.19.0)
+• pandas (0.19.2)
+• numpy (1.12.1)
+• lightgbm (0.1)
+• hyperopt (0.0.2)
+• h2o (3.10.4.6)
+• R (3.3.3)
+
+E Analysis of iterated bagging
+
+Based on the out-of-bag estimation [2], Breiman proposed iterated bagging [3] which simultaneously
+constructs K models Fi, i = 1, . . . , K, associated with K independently bootstrapped subsamples Di.
+At t-th step of the process, models F t
+as follows. The
+current estimate M t
+such
+that j /∈ Dk. The term ht
+j (targets minus current
+estimates) on Di. Finally, the models are updated: F t
+i. Unfortunately, the residuals rt
+j
+used in this procedure are not unshifted (in terms of Section 4.1), or unbiased (in terms of iterated
+bagging), because each model F t
+i depends on each observation (xj, yj) by construction. Indeed,
+
+j at example j is obtained as the average of the outputs of all models F t−1
+
+i are grown from their predecessors F t−1
+
+i is built as a predictor of the residuals rt
+
+j := yj − M t
+
+i := F t−1
+
+i + ht
+
+k
+
+i
+
+20
+
+although ht
+depend on (xj, yj).
+
+k does not use yj directly, if j /∈ Dk, it still uses M t−1
+
+j(cid:48)
+
+for j(cid:48) ∈ Dk, which, in turn, can
+
+Also note that computational complexity of this algorithm exceeds one of classic GBDT by factor
+of K.
+
+F Ordered boosting with categorical features
+
+In Sections 3.2 and 4.2, we proposed to use some random permutations σcat and σboost of training
+examples for the TS calculation and for ordered boosting, respectively. Now, being combined in one
+algorithm, should these two permutations be somehow dependent? We argue that they should coincide.
+Otherwise, there exist examples xi and xj such that σboost(i) < σboost(j) and σcat(i) > σcat(j).
+Then, the model Mσboost(j) is trained using TS features of, in particular, example xi, which are
+calculated using yj. In general, it may shift the prediction Mσboost(j)(xj). To avoid such a shift,
+we set σcat = σboost in CatBoost. In the case of the ordered boosting (Algorithm 1) with sliding
+window TS22 it guarantees that the prediction Mσ(i)−1(xi) is not shifted for i = 1, . . . , n, since, ﬁrst,
+the target yi was not used for training Mσ(i)−1 (neither for the TS calculation, nor for the gradient
+estimation) and, second, the distribution of TS ˆxi conditioned by the target value is the same for a
+training example and a test example with the same value of feature xi.
+
+G Experimental results
+
+Comparison with baselines
+In Section 6 we demonstrated that the strong setting of CatBoost,
+including ordered TS, Ordered mode and feature combinations, outperforms the baselines. Detailed
+experimental results of that comparison are presented in Table 8.
+
+Table 8: Comparison with baselines: logloss / zero-one loss, relative increase is presented in the
+brackets.
+
+Adult
+Amazon
+Click
+Epsilon
+Appetency
+Churn
+Internet
+Upselling
+Kick
+
+CatBoost
+
+0.2695 / 0.1267
+0.1394 / 0.0442
+0.3917 / 0.1561
+0.2647 / 0.1086
+0.0715 / 0.01768
+0.2319 / 0.0719
+0.2089 / 0.0937
+0.1662 / 0.0490
+0.2855 / 0.0949
+
+LightGBM
+
+XGBoost
+
+0.2760 (+2.4%) / 0.1291 (+1.9%)
+0.1636 (+17%) / 0.0533 (+21%)
+0.3963 (+1.2%) / 0.1580 (+1.2%)
+0.2703 (+1.5%) / 0.114 (+4.1%)
+0.0718 (+0.4%) / 0.01772 (+0.2%)
+0.2320 (+0.1%) / 0.0723 (+0.6%)
+0.2231 (+6.8%) / 0.1017 (+8.6%)
+0.1668 (+0.3%) / 0.0491 (+0.1%)
+0.2957 (+3.5%) / 0.0991 (+4.4%)
+
+0.2754 (+2.2%) / 0.1280 (+1.0%)
+0.1633 (+17%) / 0.0532 (+21%)
+0.3962 (+1.2%) / 0.1581 (+1.2%)
+0.2993 (+11%) / 0.1276 (+12%)
+0.0718 (+0.4%) / 0.01780 (+0.7%)
+0.2331 (+0.5%) / 0.0730 (+1.6%)
+0.2253 (+7.9%) / 0.1012 (+8.0%)
+0.1663 (+0.04%) / 0.0492 (+0.3%)
+0.2946 (+3.2%) / 0.0988 (+4.1%)
+
+In this section, we empirically show that our implementation of GBDT provides state-of-the-art quality
+and thus is an appropriate basis for building CatBoost by adding different improving options including
+the above-mentioned ones. For this purpose, we compare with baselines a raw setting of CatBoost
+which is as close to classical GBDT [12] as possible. Namely, we use CatBoost in GPU mode with
+the following parameters: – – boosting–type Plain – – border–count 255 – – dev–bootstrap–type
+DiscreteUniform – – gradient–iterations 1 – – random–strength 0 – – depth 6. Besides, we tune
+the parameters dev–sample–rate, learning–rate, l2–leaf–reg instead of the parameters described in
+paragraph “Parameter tuning” of Appendix D.2 by 50 steps of the optimization algorithm. Further,
+for all the algorithms, all categorical features are transformed to ordered TS on the basis of a random
+permutation (the same for all algorithms) of training examples at the preprocessing step. The resulting
+TS are used as numerical features in the training process. Thus, no CatBoost options dealing with
+categorical features are used. As a result, the main difference of the raw setting of CatBoost compared
+with XGBoost and LightGBM is using oblivious trees as base predictors.
+
+For the baselines, we take the same results as in Table 8. As we can see from Table 9, in average, the
+difference between all the algorithms is rather small: the raw setting of CatBoost outperforms the
+
+22Ordered TS calculated on the basis of a ﬁxed number of preceding examples (both for training and test
+
+examples).
+
+21
+
+Table 9: Comparison with baselines: logloss / zero-one loss (relative increase for baselines).
+
+Raw setting of CatBoost
+
+LightGBM
+
+XGBoost
+
+Adult
+Amazon
+Click
+Appetency
+Churn
+Internet
+Upselling
+Kick
+Average
+
+0.2800 / 0.1288
+0.1631 / 0.0533
+0.3961 / 0.1581
+0.0724 / 0.0179
+0.2316 / 0.0718
+0.2223 / 0.0993
+0.1679 / 0.0493
+0.2955 / 0.0993
+
+-1.4% / +0.2% -1.7% / -0.6%
++0.1% / -0.2%
+0% / 0%
+
++0.3% / 0%
++0.1% / -0.1%
+-0.8% / -1.0% -0.8% / -0.4%
++0.2% / +0.7% +0.6% / +1.6%
++0.4% / +2.4% +1.4% / +1.9%
+-0.7% / -0.4% -1.0% / -0.2%
++0.1% / -0.4% -0.3% / -0.2%
+-0.2% / +0.2% -0.2% / +0.2%
+
+baselines in terms of zero-one loss by 0.2% while they are better in terms of logloss by 0.2%. Thus,
+taking into account that a GBDT model with oblivious trees can signiﬁcantly speed up execution at
+testing time [23], our implementation of GBDT is very reasonable choice to build CatBoost on.
+
+Ordered and Plain modes
+In Section 6 we showed experimentally that Ordered mode of CatBoost
+signiﬁcantly outperforms Plain mode in the strong setting of CatBoost, including ordered TS and
+feature combinations. In this section, we verify that this advantage is not caused by interaction with
+these and other speciﬁc CatBoost options. For this purpose, we compare Ordered and Plain modes in
+the raw setting of CatBoost described in the previous paragraph.
+
+In Table 10, we present relative results w.r.t. Plain mode for two modiﬁcations of Ordered mode. The
+ﬁrst one uses one random permutation σboost for Ordered mode generated independently from the
+permutation σcat used for ordered TS. Clearly, discrepancy between the two permutations provides
+target leakage, which should be avoided. However, even in this setting Ordered mode considerably
+outperforms Plain one by 0.5% in terms of logloss and by 0.2% in terms of zero-one loss in average.
+Thus, advantage of Ordered mode remains strong in the raw setting of CatBoost.
+
+Table 10: Ordered vs Plain modes in raw setting: change of logloss / zero-one loss relative to Plain
+mode.
+
+Ordered, σboost independent of σcat Ordered, σboost = σcat
+
+Adult
+Amazon
+Click
+Appetency
+Churn
+Internet
+Upselling
+Kick
+Average
+
+-1.1% / +0.2%
++0.9% / +0.9%
+0% / 0%
+-0.2% / 0.2%
++0.2% / -0.1%
+-3.5% / -3.2%
+-0.4% / +0.3%
+-0.2% / -0.1%
+-0.5% / -0.2%
+
+-2.1% / -1.2%
++0.8% / -2.2%
+0.1% / 0%
+-0.5% / -0.3%
++0.3% / +0.4%
+-2.8% / -3.5%
+-0.3% / -0.1%
+-0.2% / -0.3%
+-0.6% / -0.9%
+
+In the second modiﬁcation, we set σboost = σcat, which remarkably improves both metrics: the
+relative difference with Plain becomes (in average) 0.6% for logloss and 0.9% for zero-one loss. This
+result empirically conﬁrms the importance of the correspondence between permutations σboost and
+σcat, which was theoretically motivated in Appendix F.
+
+Feature combinations To demonstrate the effect of feature combinations, in Figure 3 we present the
+relative change in logloss for different numbers cmax of features allowed to be combined (compared
+to cmax = 1, where combinations are absent). In average, changing cmax from 1 to 2 provides an
+outstanding improvement of 1.86% (reaching 11.3%), changing from 1 to 3 yields 2.04%, and further
+increase of cmax does not inﬂuences the performance signiﬁcantly.
+
+22
+
+Figure 3: Relative change in logloss for a given allowed complexity compared to the absence of
+feature combinations.
+
+Figure 4: Relative change in logloss for a given number of permutations s compared to s = 1,
+
+Number of permutations The effect of the number s of permutations on the performance of
+CatBoost is presented in Figure 4. In average, increasing s slightly decreases logloss, e.g., by 0.19%
+for s = 3 and by 0.38% for s = 9 compared to s = 1.
+
+23
+

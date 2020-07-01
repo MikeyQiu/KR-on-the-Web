@@ -1,0 +1,4397 @@
+9
+1
+0
+2
+ 
+n
+a
+J
+ 
+7
+ 
+ 
+]
+
+G
+L
+.
+s
+c
+[
+ 
+ 
+1
+v
+1
+6
+7
+1
+0
+.
+1
+0
+9
+1
+:
+v
+i
+X
+r
+a
+
+CREDIT ASSIGNMENT TECHNIQUES
+IN STOCHASTIC COMPUTATION GRAPHS
+
+Th´eophane Weber∗, Nicolas Heess∗, Lars Buesing & David Silver
+DeepMind
+{theophane, heess, lbuesing, davidsilver}@google.com
+
+ABSTRACT
+
+Stochastic computation graphs (SCGs) provide a formalism to represent struc-
+tured optimization problems arising in artiﬁcial intelligence, including supervised,
+unsupervised, and reinforcement learning. Previous work has shown that an unbi-
+ased estimator of the gradient of the expected loss of SCGs can be derived from
+a single principle. However, this estimator often has high variance and requires a
+full model evaluation per data point, making this algorithm costly in large graphs.
+In this work, we address these problems by generalizing concepts from the re-
+inforcement learning literature. We introduce the concepts of value functions,
+baselines and critics for arbitrary SCGs, and show how to use them to derive
+lower-variance gradient estimates from partial model evaluations, paving the way
+towards general and efﬁcient credit assignment for gradient-based optimization.
+In doing so, we demonstrate how our results unify recent advances in the proba-
+bilistic inference and reinforcement learning literature.
+
+1
+
+INTRODUCTION
+
+The machine learning community has recently seen breakthroughs in challenging problems in clas-
+siﬁcation, density modeling, and reinforcement learning (RL). To a large extent, successful methods
+have relied on gradient-based optimization (in particular on the backpropagation algorithm (Rumel-
+hart et al., 1985)) for credit assignment, i.e. for answering the question how individual parameters
+(or units) affect the value of the objective. Recently, Schulman et al. (2015a) have shown that such
+problems can be formalized as optimization in stochastic computation graphs (SCGs). Further-
+more, they derive a general gradient estimator that remains valid even in the presence of stochas-
+tic or non-differentiable computational nodes. This uniﬁed view reveals that numerous previously
+proposed, domain-speciﬁc gradient estimators, such as the likelihood ratio estimator (Glasserman,
+1992), also known as ‘REINFORCE’ (Williams, 1992), as well as the pathwise derivative estima-
+tor, also known as the “reparameterization trick” (Glasserman, 1991; Kingma & Welling, 2014;
+Rezende et al., 2014), can be regarded as instantiations of the general SCG estimator. While the-
+oretically correct and conceptually satisfying, the resulting estimator often exhibits high variance
+in practice, and signiﬁcant effort has gone into developing techniques to mitigate this problem (Ng
+et al., 1999; Sutton et al., 2000; Schulman et al., 2015b; Arjona-Medina et al., 2018). Moreover,
+like backpropagation, the general SCG estimator requires a full forward and backward pass through
+the entire graph for each gradient evaluation, making the learning dynamics global instead of local.
+This can become prohibitive for models consisting of hundreds of layers, or recurrent model trained
+over long temporal horizons.
+
+In this paper, starting from the SCG framework, we target those limitations, by introducing a collec-
+tion of results which unify and generalize a growing body of results dealing with credit assignment.
+In combination, they lead to a spectrum of approaches that provide estimates of model parameter
+gradients for very general deterministic or stochastic models. Taking advantage of the model struc-
+ture, they allow to trade off bias and variance of these estimates in a ﬂexible manner. Furthermore,
+they provide mechanisms to derive local and asynchronous gradient estimates that relieve the need
+for a full model evaluation. Our results are borrowing from and generalizing a class of methods
+popular primarily in the reinforcement learning literature, namely that of learned approximations to
+
+∗equal contribution.
+
+1
+
+the surrogate loss or its gradients, also known as value functions, baselines and critics. As new mod-
+els with increasing structure and complexity are actively being developed by the machine learning
+community, we expect these methods to contribute powerful new training algorithms in a variety of
+ﬁelds such as hierarchical RL, multi-agent RL, and probabilistic programming.
+
+This paper is structured as follows. We review the stochastic computation graph framework and
+recall the core result of Schulman et al. (2015a) in section 2. In section 3 we discuss the notions of
+value functions, baselines, and critics in arbitrary computation graphs, and discuss how and under
+which conditions they can be used to obtain both lower variance and local estimates of the model
+gradients, as well as local learning rules for other value functions. In section 4 we provide similar
+results for gradient critics, i.e. for estimates or approximations of the downstream loss gradient. In
+section 5 we go through many examples of more structured SCGs arising from various applications
+and see how our techniques allow to derive different estimators. In section 7, we discuss how the
+techniques and concepts introduced in the previous sections can be used and combined in different
+ways to obtain a wide spectrum of different gradient estimators with different strengths and weak-
+nesses for different purposes. We conclude by investigating a simple chain graph example in detail
+in section 8.
+
+Notation for derivatives
+
+We use a ‘physics style’ notation by representing a function and its output by the same letter. For
+any two variables x and y in a computation graph, we use the partial derivative ∂y
+∂x to denote the
+direct derivative of y with respect to x, and the dy
+dx to denote the total derivative of y with respect
+to x, taking into account all paths (or effects) from x on y; we use this notation even if y is still
+effectively a function of multiple variables. For any variable x, we let (cid:101)x denote the value of x which
+we treat as a constant in the gradient formula; i.e. (cid:101)x can be thought of a the output of a ‘function’
+which behaves as the identity, but has gradient zero everywhere1. Finally, we only use the derivative
+notation for deterministic computation, the gradient of any sampling operation is assumed to be 0.
+
+All proofs are omitted from the main text and can be found in the appendix.
+
+2 GRADIENT ESTIMATION FOR EXPECTATION OF A SINGLE FUNCTION
+
+An important class of problems in machine learning can be formalized as optimizing an expected
+loss Ex1,...,xn∼p(x1,...,xn|θ)[(cid:96)(x1, x2, . . . , θ)] over parameters θ, where both the sampling distribu-
+tion p(.|θ) as well as the loss function (cid:96) can depend on θ. As we explain in greater detail in the
+appendix, concrete examples of this setup are reinforcement learning (where p is a composition of
+known policy and potentially unknown system dynamics), and variational autoencoders (where p is
+a composition of data distribution and inference network); cf. Fig. 1. Because of the dependency of
+the distribution on θ, backpropagation does not directly apply to this problem.
+
+Two well-known estimators, the score function estimator and the pathwise derivative, have been
+proposed in the literature. Both turn the gradient of an expectation into an expectation of gradients
+and hence allow for unbiased Monte Carlo estimates by simulation from known distributions, thus
+opening the door to stochastic approximations of gradient-based algorithms such as gradient descent
+(Robbins & Monro, 1985).
+
+1such an operation is often called ‘stop gradient’ in the deep learning community.
+
+2
+
+(a) Supervised learning. The loss is Ex,y [log p(y|x, θ)] where
+Figure 1: Typical models as SCGs.
+x, y ∼ pD are drawn from the data distribution. p(y|x, θ) is realized as a multi-layer neural network with
+hidden layers h1, h2, h3 and parameters θ.
+(b) Variational autoencoder. The observed data x ∼ pD
+is fed into an inference network q(z|x, φ) (with hidden units h1) to infer the latent variables z. The
+loss (cid:96) is given by the Evidence lower bound (ELBO) computed from the likelihood p(x|z, θ) (with hid-
+den units h2). We show two variants: the not-reparameterized variant (left), where the ELBO is given by
+Ex [Ez [log p(x|z, θ) + log p(z; θ)] − H[q(·|x, φ)]; and the reparameterized variant (right), where the ELBO
+is expressed as Ex [E(cid:15) [log p(x|h(x, (cid:15), φ), θ) + log p(h(x, (cid:15), φ), θ)] − H[q(·|x, φ)]]. Note that z is a determin-
+istic node in the reparametrized graph. (c) Markov decision process . The objective here is the (undiscounted)
+return Eτ [(cid:80)
+t r(st)] and trajectories τ = (. . . , st, at, . . .) are drawn from the composition of a policy πθ and
+the system dynamics: τ ∼ p(τ, θ) = p(s0) (cid:81)
+
+t π(at|st, θ)p(st+1|st, at).
+
+Likelihood ratio estimator For a random variable x parameterized by θ, i.e. x ∼ p(·|θ) the
+gradient of an expectation can be obtained using the following estimator:
+
+d
+dθ
+
+Ex[f (x)] = Ex
+
+log p(x|θ)f (x)
+
+(cid:21)
+
+(cid:20) d
+dθ
+
+This classical result from the literature is known under a variety of names, including likelihood ratio
+estimator, or “REINFORCE” and can readily be derived by noting that d
+d
+dz g(z)
+for any function g. The quantity d
+
+dz log g(z) = 1
+g(z)
+dθ log p(x|θ) is known as the score function of variable x.
+
+In many cases, a random variable x ∼ pθ can be rewritten as a
+Pathwise derivative estimator
+differentiable, deterministic function x((cid:15), θ) of a ﬁxed random variable with parameterless distribu-
+2. This leads to a new expectation for which θ now only appears inside the expectation
+tion (cid:15) ∼ p(cid:15)
+and the gradient can be straightforwardly estimated:
+
+E(cid:15)[f (x((cid:15); θ))] = E(cid:15)
+
+f (x((cid:15), θ))
+
+= E(cid:15)
+
+(cid:20) d
+dθ
+
+(cid:21)
+
+(cid:20) ∂f
+∂x
+
+∂x((cid:15), θ)
+∂θ
+
+(cid:21)
+
+Both estimators remain applicable when f is a function of θ itself.
+function estimator we obtain
+
+In particular, for the score
+
+Ex[f (x, θ)] = Ex
+
+log px(x|θ)
+
+f (x, θ) +
+
+(cid:20)(cid:18) ∂
+∂θ
+
+(cid:19)
+
+(cid:21)
+
+∂f
+∂θ
+
+d
+dθ
+
+d
+dθ
+
+and for the reparametrization approach, we obtain:
+
+d
+dθ
+
+E(cid:15)[f (x((cid:15), θ))] = E(cid:15)
+
+(cid:20) ∂f
+∂x
+
+∂x
+∂θ
+
++
+
+(cid:21)
+
+.
+
+∂f
+∂θ
+
+Other estimators have been introduced recently, relying on the implicit function theorem (Figurnov
+et al., 2018), continuous approximations to discrete sampling using Gumbel function (Maddison
+et al., 2016; Jang et al., 2016), law of large numbers applied to sums of discrete samples (Bengio
+et al., 2013), and others.
+
+2Note that reparametrization is always possible, but differentiable reparametrization is not.
+
+(1)
+
+(2)
+
+(3)
+
+(4)
+
+3
+
+2.1 STOCHASTIC COMPUTATION GRAPHS
+
+SCG framework. We quickly recall the main results from Schulman et al. (2015a).
+
+Deﬁnition 1 (Stochastic Computation Graph). A stochastic computation graph G is a directed,
+acyclic graph , with two classes of nodes (also called variables): deterministic nodes, and
+stochastic nodes.
+
+1. Stochastic nodes, (represented with circles, denoted S), which are distributed condi-
+
+tionally given their parents.
+
+functions of their parents.
+
+2. Deterministic nodes (represented with squares, denoted D), which are deterministic
+
+We further specialize our notion of deterministic nodes as follows:
+
+• Certain deterministic nodes with no parents in the graphs are referred to as input
+nodes θ ∈ Θ, which are set externally, including the parameters we differentiate with
+respect to.
+
+• Certain deterministic nodes are designated as losses or costs (represented with dia-
+monds) and denoted (cid:96) ∈ L . We aim to compute the gradient of the expected sum of
+costs with respect to some input node θ.
+
+A parent v of a node w is connected to it by a directed edge (v, w). Let L = (cid:80)
+total cost.
+
+(cid:96)∈L (cid:96) be the
+
+For a node v, we let hv denote the set of parents of v in the graph. A path between v and w is a
+sequence of nodes a0 = v, a1, . . . , aK−1, aK = w such that all (ak−1, ak) are directed edges in the
+graph; if any such path exists, we say that w descends from v and denote it v ≺ w. We say the path
+is blocked by a set of variables V if any of the ai ∈ V. By convention, v descends from itself. For
+a variable x and set V, we say x can be deterministically computed from V if there is no path from
+a stochastic variable to x which is not blocked by V (cf. Fig. 2). Algorithmically, this means that
+knowing the values of all variables in V allows to compute x without sampling any other variables;
+mathematically, it means that conditional on V, x is a constant. Finally, whenever we use the notion
+of conditional independence, we refer to the notion of conditional independence informed by the
+graph (i.e. d-separation) (Geiger et al., 1990; Koller & Friedman, 2009).
+
+Gradient estimator for SCG. Consider the expected loss J (θ) = Es∈S [L]. We present the
+general gradient estimator for the gradient of the expected loss d
+dθ J (θ) derived in (Schulman et al.,
+2015a).
+
+For any stochastic variable v, we let log p(v) denote the conditional log-probability of v given its
+parents, i. e. the value log p(v|hv)3, and let s(v, θ) denote the score function d log p(v)
+Theorem 1. [Theorem 1 from (Schulman et al., 2015a)4] Under simple regularity conditions,
+
+dθ
+
+.
+
+(cid:34)
+J (θ) = E
+
+d
+dθ
+
+(cid:88)
+
+v∈S
+θ≺v
+
+s(v, θ)L +
+
+(cid:35)
+
+d(cid:96)
+dθ
+
+(cid:88)
+
+(cid:96)∈L
+θ≺(cid:96)
+
+Here, the ﬁrst term corresponds to the inﬂuence θ has on the loss through the non-differentiable
+path mediated by stochastic nodes. Intuitively, when using this estimator for gradient descent, θ is
+changed so as to increase or ‘reinforce’ the probability of samples of v that empirically led to lower
+total cost L. The second term corresponds to the direct inﬂuence θ has on the total cost through
+differentiable paths. Note that differentiable paths include paths going through reparameterized
+random variables.
+
+3Note log p(v) is indeed the conditional distribution, not the marginal one. The parents hv of v are implicit
+
+in this notation, by analogy with deterministic layers, whose parents are typically not explicitly written out.
+
+4Since we deﬁned the gradient of sampling operations to be zero, we do not need to use the notion of of
+deterministic descendence as in the original theorem; as the gradient of non-deterministic descendents with
+respect to inputs is always zero.
+
+4
+
+Figure 2: Blocked paths and deterministic computability. a)
+X = {v1}, shown in red, blocks the path from vr to (cid:96), but
+not v0 to (cid:96). b) (cid:96) can be deterministically computed from X =
+{v1, v2} (red) because all stochastic variables have their path
+to L blocked by X (v0, blocked by v2; vr, blocked by v1;
+and v1, blocked by itself).
+
+3 VALUE BASED METHODS
+
+The gradient estimator from theorem 1 is very general and conceptually simple but it tends to have
+high variance (see for instance the analysis found in Mnih & Rezende, 2016), which affects conver-
+gence speed (see e.g. Schmidt et al., 2011). Furthermore, it requires a full evaluation of the graph.
+To address these issues, we ﬁrst discuss several variations of the basic estimator in which the total
+cost L is replaced by its deviation from the expected total cost, or conditional expectations thereof,
+with the aim of reducing the variance of the estimator. We then discuss how approximations of these
+conditional expectations can be learned locally, leading to a scheme in which gradient computations
+from partial model evaluations become possible.
+
+3.1 VALUES
+
+In this section, we use the simple concept of conditional expectations to introduce a general deﬁni-
+tion of value function in a stochastic computation graph.
+Deﬁnition 2 (Value function). Let X be an arbitrary subset of G, x an assignment of possible values
+to variables in X and S an arbitrary scalar value in the graph. The value function for set X is the
+expectation of the quantity S conditioned on X :
+
+V : x (cid:55)→ V (x; S) = EG\X |X =x [S] .
+
+Intuitively, a value function is an estimate of the cost which averages out the effect of stochastic
+variables not in X , therefore the larger the set, the fewer variables are averaged out.
+
+The deﬁnition of the value function as conditional expectation results in the following characteriza-
+tion:
+Lemma 1. For a given assignment x of X , V (x; S) is the optimal mean-squared error estimator of
+S given input X :
+
+V (x; S) = argminvx
+
+EG\X |X =x
+
+(cid:2)(S − vx)2(cid:3) .
+
+Consider an arbitrary node v ∈ G, and let L(v) = (cid:80)
+sum of costs ‘downstreams’ from v (similar notation is used for L(V ) if V is a set). The scalar
+S will often be the cost-to-go L(v) for some ﬁxed node v; furthermore, when clear from context,
+we use X to both refer to the variables and the values they take. For notational simplicity, we will
+denote the corresponding value function V (X ).
+
+(cid:96) denote the v-rooted cost-to-go, i.e. the
+
+(cid:96)∈L
+v≺(cid:96)
+
+Fig. 3 shows multiple examples of value functions for different graphs. The above deﬁnition is
+broader than the typical one used in reinforcement learning. There, due to the simple chain structure
+of the Markov Decision Processes, the resulting Markov properties of the graph, and the particular
+choice of X , the expectation is only with respect to downstream nodes. Importantly, according to
+Def. 2 the value can depend on X via ancestors of X (e.g. example in Fig. 3c). Lemma 1 remains
+valid nevertheless.
+
+3.2 BASELINES AND CRITICS
+
+In this section, we will deﬁne the notions of baselines and critics and use them to introduce a gener-
+alization of theorem 1 which can be used to compute lower variance estimator of the gradient of the
+expected cost. We will then show how to use value functions to design baselines and critics.
+
+Consider an arbitrary node v and input θ.
+
+5
+
+Deﬁnition 3 (Baseline). A baseline B for v is any function of the graph such that E[s(v, θ)B] = 0.
+A baseline set B is an arbitrary subset of the non-descendants of v.
+
+Baseline sets are of interest because of the following property:
+Property 1. Let B be an arbitrary scalar function of B. Then B is a baseline for v.
+Common choices are constant baselines, i.e. B = ∅, or baselines B(hv) only depending on the
+parents B = hv of v.
+Deﬁnition 4 (Critic). A critic Q of cost L(v) for v is any function of the graph such that
+E[s(v, θ)(L(v) − Q)] = 0.
+By linearity of expectations, linear combinations of baselines are baselines, and convex combina-
+tions of critics are critics.
+
+The use of the terms critic and baseline is motivated by their respective roles in the following theo-
+rem, which generalizes the policy gradient theorem (Sutton et al., 2000):
+Theorem 2. Consider an arbitrary baseline Bv and critic Qv for each stochastic node v. Then,
+
+(cid:34)
+J (θ) = E
+
+d
+dθ
+
+Gv +
+
+(cid:35)
+(cid:96)
+
+,
+
+d
+dθ
+
+(cid:88)
+
+(cid:96)∈L
+θ≺(cid:96)
+
+(cid:88)
+
+v∈S
+θ≺v
+
+(cid:16)
+
+Gv = s(v, θ)
+
+Qv − Bv
+
+(cid:17)
+
+.
+
+where
+
+(cid:96)∈L
+θ≺(cid:96)
+
+The difference Qv − Bv between a critic and a baseline is called an advantage function.
+Theorem 2 enables the derivation of a surrogate loss. Let Ls be deﬁned as Ls = L +
+(cid:80)
+, where we recall that the tilde notation indicates a constant from the point
+
+log p(v)
+
+(cid:16)
+
+(cid:17)
+
+(cid:101)Q − (cid:101)B
+
+of view of computing gradients. Then, the gradient of the expected cost J (θ) equals the gradient of
+Ls in expectation: d
+dθ
+
+E[L] = E (cid:2) d
+
+dθ Ls(cid:3).
+
+Before providing intuition on this theorem, we see how value functions can be used to design base-
+lines and critics:
+Deﬁnition 5 (Baseline value function and critic value function).
+For any node v and baseline set B, a special case of a baseline is to choose the value function with
+set B. Such a baseline is called a baseline value function.
+Let a critic set C be a set such that v ∈ C, and log p(v) and L(v) are conditionally independent
+given C; a special case is when C is such that log p(v) is deterministically computable given C. Then
+the value function for set C is a critic for v which we call a critic value function for v.
+
+In the standard MDP setup of the RL literature, C consists of the state s and the action a which is
+taken by a stochastic policy π in state s with probability log π(a|s), which is a deterministic function
+of (s, a). Deﬁnition 5 is more general than this conventional usage of critics since it does not require
+C to contain all stochastic ancestor nodes that are required to evaluate log p(v). For instance, assume
+that the action is conditionally sampled from the state s and some source of noise ξ, for instance due
+to dropout, with distribution π(a|ξ, s)5. The critic set may but does not need to include ξ; if it does
+not, log π(a|ξ, s) is not a deterministic function of a and s. The corresponding critic remains useful
+and valid.
+
+Figure 3 contains several examples of value functions which take the role of baselines and critics for
+different nodes.
+
+Three related ideas guide the derivation of theorem 2. To give intuition, let us analyze the term
+Gv, which replaces the score function weighted by the total cost s(v, θ)L. First, the conditional
+distribution of v only inﬂuences the costs downstream from v, hence we only have to reinforce the
+probability of v with the cost-to-go L(v) instead the total cost L. Second, the extent to which a
+particular sample v contributed to cost-to-go L(v) should be compared to the cost-to-go the graph
+typically produces in the ﬁrst place. This is the intuition behind subtracting the baseline B, also
+
+5in this example, it is important ξ is used only once; it cannot be used to compute other actions.
+
+6
+
+Figure 3: Examples of baseline value functions and critic value functions. (a-e) Different value functions for the
+same SCG with X (a) = {v0}, X (b) = {v0, v1}, X (c) = {v1}, X (d) = {v2}, X (e) = {v0, v2}. The variables
+averaged over are shaded in light gray. The value function in (c) involves a marginalization over ‘upstream’
+variables: V (v1) = Ev0,v2,v3|v1 [(cid:96)1 + (cid:96)3].
+(a,b,c) are valid baselines for v2; (d,e) cannot act as baselines for v2 since v2 belongs to those sets, but can act
+as baselines for v3.
+(a,b,e) are critics for v0, but (c,d) are not. (b) is a critic for v1. (c) is not a critic for v1 since L(v1) and log πv1
+are correlated conditionally on X (c) (through v0). Finally (d,e) are critics for v2; note however log p(v2) is not
+a deterministic function of either X (d) or X (e).
+
+known as a control variate. Third, we ideally would like to understand the precise contribution of v
+to the cost-to-go, not for a particular value of downstream random variables, but on average. This
+is the idea behind the critic Q. The advantage (difference between critic and baseline) therefore
+provides an estimate of ‘how much better than anticipated’ the cost was, as a function of the random
+choice v.
+
+Baseline value functions are often used as baselines as they approximate the optimal baseline (see
+Appendix B.1). Critic value functions are often used as they provide an expected downstream cost
+given the conditioning set. Furthermore, as we will see in the next section, value functions can be
+estimated in a recursive fashion, enabling local learning of the values, and sharing of value functions
+between baselines and critics. For these reasons, in the rest of this paper, we will only consider
+baseline value functions and critic value functions.
+
+In the remainder of this section, we consider an arbitrary value function with conditioning set X .
+
+3.3 RECURSIVE ESTIMATION AND MARKOV PROPERTIES
+
+A fundamental principle in RL is given by the Bellman equation – which details how a value function
+can be deﬁned recursively in terms of the value function at the next time step. In this section, we
+generalize the notion of recursive computation to arbitrary graphs.
+
+The main result, which follows immediately from the law of iterated expectations, characterizes the
+value function for one set, as an expectation of a value function (or critic / baseline value function)
+of a larger set:
+Lemma 2. Consider two sets X 1 ⊂ X 2, and an arbitrary quantity S.
+E[V (X 2; S)|X 1] = V (X 1; S).
+
+Then we have:
+
+This lemma is powerful, as it allows to relate value functions as average of over value function. A
+simple example in RL is the relation (here, in the inﬁnite discounted case) between the Q function
+Qπ(s, a) = E[R|s, a] of a policy and the corresponding value function V π(s) = E[R|s], which is
+given by V π(s) = (cid:80)
+a π(a|s)Qπ(s, a). Note this equation relates a critic value function to a value
+function typically used as baseline.
+
+To fully leverage the lemma above, we proceed with a Markov property for graphs6, which captures
+the following situation: given two conditioning sets X 1 ⊂ X 2, it may be the case that the additional
+information contained in X 2 does not improve the accuracy of the cost prediction compared to the
+information contained in the smaller set X 1.
+Deﬁnition 6. For conditioning set X , we say that X is Markov (for L(v)) if for any w such that
+there exists a directed path from w to L(v) not blocked by X , none of the descendants of w are in
+X .
+
+6borrowed from well known conditional independence conditions in graphical models, and adapted to our
+
+purposes.
+
+7
+
+Figure 4: Markov property for value functions. Consider node v2 and corresponding cost L(v2) = (cid:96)1 + (cid:96)2; we
+consider the Markov property for L(v2). For (a,b,c), X (a) ⊂ X (b) ⊂ X (c) = X (a)↑ and the Markov property
+holds since no ancestor of X has an unblocked path to L(v2). This implies in particular it is sufﬁcient to con-
+dition on X (a); all associated value functions compute the same value, i.e. V (X (a)) = V (X (b)) = V (X (c)).
+The same applies to (d,e); note however than V (X (d)) (cid:54)= V (X (e)), though both sets are Markov as well. This
+is because neither X (d) ⊂ X (e) ⊂ X (d)↑ nor X (e) ⊂ X (d) ⊂ X (e)↑ hold. While the set inclusion property
+holds for (e,f), i. e. X (f ) ⊂ X (e) ⊂ X (f )↑, we actually have V (X (e)) (cid:54)= V (X (f )). This is because X (f ) is
+not Markov, which leads to an implicit marginalization of v0 (p(v2|v0, v1) (cid:54)= (cid:82)
+
+p(v0|v1)p(v2|v1, v0)).
+
+v0
+
+Let X ↑ be the set of all ancestors of nodes X 7.
+Property 2. Let X be Markov, consider any X (cid:48) such that X ⊂ X (cid:48) ⊂ X ↑. For any x(cid:48) assignment of
+values to the variables in X (cid:48), let x(cid:48)
+
+|X be the restriction of x(cid:48) to the variables in X . Then:
+
+∀x(cid:48), V (X = x(cid:48)
+
+|X ) = V (X (cid:48) = x(cid:48)),
+
+which we will simply denote, with a slight abuse of notation,
+
+V (X (cid:48)) = V (X ).
+
+In other words, the information contained in X ↑ \ X is irrelevant in terms of cost prediction, given
+access to the information in X . Several examples are shown in Fig. 4. It is worth noting that Def.
+6 does not rule out changes in the expected value of L(v) after adding additional nodes to X (cf.
+Fig. 4(d,e)). Instead it rules out correlations between X and L(v) that are mediated via ancestors of
+nodes in X as in the example in Fig. 4(a,b,c)).
+
+The notion of Markov set can be used to reﬁne Lemma 2 as follows:
+Lemma 3 (Generalized Bellman equation). Consider two sets X 1 ⊂ X 2↑, and suppose X 2 is
+Markov. Then we have: E[V (X 2)|X 1] = V (X 1).
+
+The Markov assumption is critical in allowing to ‘push’ the boundary at which the expecta-
+tion is deﬁned; without it, lemma 2 only allows to relate value functions of sets which are
+subset of one another. But notice here that no such inclusion is required between X 1 and
+X 2 themselves.
+In the context of RL, this corresponds to equations of the type V (s) =
+(cid:80)
+s(cid:48) P (s(cid:48)|s, a)V (s(cid:48))) (see Fig. 5), though to get the separation between the
+reward and the value at the next time step, we need a slight reﬁnement, which we detail in the next
+section.
+
+a π(s, a) (r(s, a) + (cid:80)
+
+We next go through a few examples of applying Lemmas 2 and 3.
+
+7Recall that by convention nodes are descendants of themselves, so X ⊂ X ↑
+
+8
+
+Figure 5: Bellman equation in RL.
+The Bellman equation for Markov Decision Processes with single ter-
+minal reward rT . The Q-function is Q(st, at) = E[rT |st, at], the value
+function V (st) = E[rT |st]. From Lemma 2, V (st) = E[Q(st, at)|st].
+Since st+1 is Markov and st ⊂ s↑
+t+1 = {sj, aj−1, j ≤ t + 1}, from
+Lemma 3, we have V (st) = E[V (st+1)|st].
+
+Example 1. In Fig. 4, we have X (d) ⊂ X (a)↑
+, and X (a) is Markov, from which we obtain
+E[V (v2)|v0] = V (v0). We also have X (d) ⊂ X (f )↑
+, but because X (f ) is not Markov, E[V (v1)|v0] (cid:54)=
+V (v0). On the other hand, because X (a) and X (f ) are both subset of X (c) (this is in fact true of
+all sets in Fig. 4), so we have, regardless of Markov assumptions, V (v2) = E[V (v0, v1, v2)|v2] and
+V (v1) = E[V (v0, v1, v2)|v1].
+
+3.4 DECOMPOSED COSTS AND BOOTSTRAP
+
+In the previous sections we have considered a value function with respect to a node v which predicts
+an estimate of the cost-to-go L(v) from node v (note L(v) was implicit in most of our notation).
+In this section, we write the cost-to-go at a node as a funtion of cost-to-go from other nodes or
+collection of nodes, and leverage the linearity of expectation to turn these relations between costs
+into relation between value functions.
+
+A ﬁrst simple observation is that because of the linearity of expectations, for any two scalar quantities
+S1, S2, real value λ and set X , we have V (X , λS1 + S2) = λV (X , S1) + V (X , S2).
+Deﬁnition 7 (Decomposed costs). For a node v and a collection V = {V0, V1, . . . , VD} in the
+graph, we say that the cost L(v) can be decomposed with set V if L(v) = (cid:80)
+
+i L(Vi).
+
+This implies that cost nodes can be grouped in disjoint sets corresponding to the descendents of
+different sets Vi, without double-counting. A common special case is a tree, where each Vi is a
+singleton containing a single child {vi} of v.
+Theorem 3 (Bootstrap principle for SCGs). Suppose the cost-to-go L(v) from node v can be de-
+composed with sets V = {V0, . . . , VD}, and consider an arbitrary set Xv with associated value
+function V (Xv, L(v)). Furthermore, for each set Vi, consider a set XVi and associated value func-
+tion: V (XVi, L(Vi)). If for each i, Xv ⊂ XVi, or if for each i, XVi is Markov and Xv ⊂ X ↑
+,
+Vi
+then:
+
+V (Xv) =
+
+EG\Xv|Xv [V (XVi)] .
+
+(cid:88)
+
+i
+
+Fig. 6 highlights potential difﬁculties of deﬁning correct bootstrap equations for various graphs.
+
+From the bootstrap equation follows a special case, which we call partial averaging, often used for
+critics:
+Corollary 1 (Partial averages). Suppose that for each i, XVi is Markov and XVi ⊂ Xv ⊂ X ↑
+.
+Vi
+Without loss of generality, deﬁne V0 as the collection of all cost nodes which can be deterministically
+computed from Xv. Then,
+
+V (Xv) =
+
+(cid:96) +
+
+V (XVi).
+
+(cid:88)
+
+(cid:96)∈V0
+
+(cid:88)
+
+i≥1
+
+The term ‘partial average’ indicates that the value function is a conditional expectation (i.e. ’averag-
+ing’ variables) but that it combines averaged cost estimates (the value terms V (XVi)) and empirical
+costs ((cid:80)
+In the case of RL for instance, a k-step return is a form of partial average, since the return Rt –
+sum of all rewards downstream from state st – can be written as the sum of all rewards in V0 =
+
+(cid:96)v). Fig. 7 shows some examples for generic graphs.
+
+(cid:96)∈V0
+
+9
+
+Figure 6: Bootstrapping. The value functions in (a,b,c) and (d,e,f) illustrate, for the same graph, ensembles
+of value functions that do and do not allow bootstrapping respectively. For (a,b,c) we have V (v0, v1) =
+Ev2,v3|v0,v1 [(cid:96)1 + (cid:96)2] + (cid:96)0 = Ev2|v0,v1 [Ev3|v2,v1 [(cid:96)2] + (cid:96)1] + (cid:96)0 = Ev2|v0,v1 [Ev3|v2,v1 [V (v3)] + (cid:96)1] + (cid:96)0 =
+Ev2|v0,v1 [V (v1, v2)] + (cid:96)0. In (d,e,f) a Markov chain is conditioned on an additional shared parent v1. Here,
+V (v0) = Ev1,v2,v3|v0 [(cid:96)1 + (cid:96)2] + (cid:96)0 cannot be expressed in terms of V (v2) = Ev1,v3|v2 [(cid:96)2] + (cid:96)1 =
+Ev1,v3|v2 [V (3)] + (cid:96)1 due to the implicit marginalization over the shared parent in each value function. Note,
+however, that V (v0) can be expressed in terms of V (v0, v2). This is akin to a POMDP that can be translated
+into a MDP by treating the entire history as the state (cf. Section 5.1). (g,h,i) provide additional examples for
+three related graphs: In (g), thanks to Markov properties, value functions at parent nodes can be expressed in
+terms of the value functions of the children, e.g. V (v0) = (cid:96)0 + Ev1|v0 [V (v1)] + Ev2|v0 [V (v2)]. In (h), simple
+Markov properties are missing, so bootstrap is possible only when value functions are additionally conditioned
+on x, i.e. V (v0, x) = (cid:96)0 + Ev1|v0,x[V (v1)] + Ev2|v0,x[V (v2, x)], or when the Xv form supersets of each other
+V (v0) = (cid:96)0 + Ev1|v0 [V (v1, v0)] + Ev2|v0 [V (v2, v0)]. But it is not possible to express e.g. V (v0) in terms of
+V (v2). In (i) the cost does not decompose if value functions V (v0), V (v1), V (v2) are naively deﬁned in terms
+of all downstream costs.
+
+Figure 7: Partial averages. Exam-
+ples of partial averages for a chain-
+structured and tree-structured graph re-
+In both cases the picture
+spectively.
+shows critics for node, computing the
+conditional expectations of R = r0 +
+r1 + r2. Conditioning nodes are in
+red; dark red nodes contain informa-
+tion, but light nodes do not contain in-
+formation not already contained in a
+dark node. The corresponding value
+functions are: a) V (v0), b) r0 +V (v1),
+c) r0 + r1 + V (v3), d) V (v0), e)
+r0+r1+V (v2), f) r0+r1+r2+r3+r4.
+
+{rt, . . . , rt+k−1} and downstream from V1 = {st+k}; the critic value function V (st, . . . , st+k) is
+therefore equal8 to (cid:80)t+k−1
+rt(cid:48) + V (st+k). This implies in turn that V (st) = E[V (st, . . . , st+k)] is
+also equal to E[(cid:80)t+k
+
+t(cid:48)=t rt(cid:48) + V (st+k)].
+
+t(cid:48)=t
+
+3.5 APPROXIMATE VALUE FUNCTIONS
+
+In practice, value functions often cannot be computed exactly.
+In such cases, one can resort to
+learning parametric approximations. For node v, conditioning set X , we will consider an ap-
+proximate value function ˆV φ(X ) as an approximation (with parameters φ) to the value function
+V (X ) = EG\Xv|Xv [L(v)].
+
+8We assume for simplicity that the rewards are deterministic functions of the state; the result can be trivially
+
+generalized.
+
+10
+
+Following corollary 1, we know that for a possible assignment x of variables X , V (x) minimizes
+(cid:2)(L(v) − vx)2(cid:3) over vx. We therefore elect to optimize φ by considering the following
+EG\X |X
+weighted average, called a regression on return in reinforcement learning:
+(L(v) − ˆV φ(X ))2(cid:105)(cid:105)
+
+Lφ = EX
+
+(cid:104)
+
+(cid:104)
+
+EG\X |X
+(L(v) − ˆV φ(X ))2(cid:105)
+(cid:104)
+
+,
+
+= EG
+
+from which we obtain (note that φ does not affect the distribution of any variable in the graph, and
+therefore exchange of derivative and integration follows under common regularity conditions):
+
+dLφ
+dφ
+
+= EG
+
+(cid:20) d
+dφ
+
+ˆV φ(X )
+
+(cid:16) ˆV φ(X ) − L(v)
+
+(cid:17)(cid:21)
+
+,
+
+(5)
+
+which can easily be computed by forward sampling from G, even if conditional sampling given X
+is difﬁcult. This is possible because of the use of EX as a particular weighting on the collection of
+problems of the type EG\X |X [(L(v) − ˆV φ(X ))2].
+We now leverage the recursion methods from the previous sections in two different ways. The ﬁrst
+is to use the combination of approximate value functions and partial averages to deﬁne other value
+functions. For a partial average as deﬁned in theorem 1 and family of approximate value functions
+ˆV φ
+(cid:96)v +
+vi
+(cid:80)
+In other words, using the bootstrap equations, approximating value functions for
+i
+certain sets automatically deﬁnes other approximate value functions for other sets.
+
+(Xvi), we can deﬁne an approximate value function through the bootstrap equation: (cid:80)
+ˆV φ(Xvi).
+
+(cid:96)∈V0
+
+In general, we can trade bias and variance by making V0 larger (which will typically result in lower
+bias, higher variance) or not, i.e. by shifting the boundary at which variables are integrated out. An
+extreme case of a partial average is not an average at all, where X = G, in which case the value
+function is the empirical return L(v). K-step returns in reinforcement learning (see section 5.1)
+are an example of trading bias and variance by choosing the integration boundary to be all nodes
+at a distance greater than K, and V0 all costs at a distance less than K. λ-weighted returns in
+the RL literature (Section 5.1) are convex combinations of partial averages. λ similarly controls a
+bias-variance tradeoff.
+
+The second way to use the bootstrap equation is to provide a different, lower variance target to the
+value function regression. By combining theorem 3 and equation 5, we obtain:
+(cid:32)
+
+(cid:32)
+
+(cid:34)
+
+dLφ
+dφ
+
+= EG
+
+d
+dφ
+
+ˆV φ(X )
+
+ˆV φ(X ) −
+
+(cid:96)v +
+
+ˆV φ(Xvi)
+
+(cid:88)
+
+(cid:96)∈V0
+
+(cid:88)
+
+i
+
+(cid:33) (cid:33)(cid:35)
+.
+
+(6)
+
+i
+
+(cid:96)∈V0
+
+(cid:96)v + (cid:80)
+
+By following this gradient, the value function ˆV φ(Xv) will tend towards the bootstrap value
+(cid:80)
+ˆV φ(Xvi) instead of the return L(v). Because the former has averaged out stochastic
+nodes, it is a lower variance target, and should in practice provide a stronger learning signal. Fur-
+thermore, as it can be evaluated as soon as Xvi is evaluated, it provides a local or online learning rule
+for the value at v; by this we mean the corresponding gradient update can be computed as soon as
+all sets Xvi are evaluated. In RL, this local learning property can be found in actor-critic schemes:
+when taking action at in state st, as soon as the immediate reward rt is computed and next state
+st+1 is evaluated, the value function V (st) (which is a baseline for at) can be regressed against
+low-variance target rt + V (st+1) (which is also a critic for at), and the temporal difference error (or
+advantage) can be used to update the policy by following d log π(at|st,θ)
+
+(rt + V (st+1) − V (st)).
+
+dθ
+
+4 GRADIENT-BASED METHODS
+
+In the previous section, we developed techniques to lower the variance of the score-function terms
+E
+in the gradient estimate. This led to the construction of a sur-
+
+Q(C) − B(Bv)
+
+(cid:104)(cid:16) d
+
+(cid:17)(cid:16)
+
+(cid:17)(cid:105)
+
+dθ log p(v)
+
+rogate loss Ls which satisﬁes d
+dθ
+
+E [J (θ)] = E (cid:2) dLs
+
+(cid:3).
+
+dθ
+In this section, we develop corresponding techniques to lower the variance estimates of the gradi-
+ents of surrogate cost d
+dθ Ls. To this end, we will again make use of conditional expectations to
+
+11
+
+partially average out variability from stochastic nodes. This leads to the idea of a gradient-critic, the
+equivalent of the value critic for gradient-based approaches.
+
+4.1 GRADIENT-CRITIC
+
+Deﬁnition 8 (Value-gradient). The value-gradient for v with set C is the following function of C:
+
+g(C) = EG\C|C
+
+(cid:20) dLs
+dv
+
+(cid:21)
+
+.
+
+Value-gradients are not directly useful in our derivations but we will see later that certain value-
+gradients can reduce the variance of our estimators. We call these value-gradient gradient-critics.
+Deﬁnition 9 (Gradient-critic). Consider two nodes u and v, and a value-gradient gv for node v with
+set C. If dv
+dv are conditionally independent given C9, then we say the value-gradient is a
+gradient-critic for v with respect to u.
+Corollary 2. If dv
+respect to u.
+
+du is deterministically computable from C, then gv(C) is a gradient-critic for v with
+
+du and dLs
+
+We can use gradient-critics in the backpropagation equation. First, we recall the equation for back-
+propagation and stochastic backpropagation. Let u be an arbitrary node of H, and {v1, . . . , vd} be
+the children of u in G. The backpropagation equations state that:
+
+From this we obtain the stochastic backpropagation equations:
+
+dLs
+du
+
+(cid:88)
+
+=
+
+i
+
+dLs
+dvi
+
+∂vi
+∂u
+
+EG
+
+(cid:21)
+
+(cid:20) dLs
+du
+
+= EG
+
+(cid:34)
+
+(cid:88)
+
+i
+
+(cid:35)
+
+dLs
+dvi
+
+∂vi
+∂u
+
+EG
+
+(cid:21)
+
+(cid:20) dLs
+du
+
+= EG
+
+(cid:34)
+
+(cid:88)
+
+(cid:35)
+
+.
+
+gvi
+
+∂vi
+∂u
+
+i
+
+Gradient-critics allow for replacing these stochastic estimates by conditional expectations, poten-
+tially achieving lower variance:
+Theorem 4. For each child vi of v, let gvi be a gradient-critic for vi with respect to u. We then
+have:
+
+Note a similar intuition as the idea of critic deﬁned in the previous section. In both cases, we want
+to evaluate the expectation of a product of two correlated random variables, and replace one by its
+expectation given a set which makes the variables conditionally independent.
+
+4.2 HORIZON GRADIENT-CRITIC
+
+More generally, we do not have to limit ourselves to {v1, v2, . . . , vd} being children of u. We deﬁne
+a separator set for u in H to be a set {v1, v2, . . . , vd} such that every deterministic path from u
+to the loss Ls is blocked by a vi ∈ H. For simplicity, we further require the separator set to be
+unordered, which means that for any i (cid:54)= j, vj cannot be an ancestor to vi; we drop this assumption
+for a generalized result in the appendix A. Under these assumptions, the backpropagation rule can
+be rewritten (see (Naumann, 2008; Parmas, 2018), also appendix A):
+
+i
+Theorem 5. Assume that for every i, gvi is a gradient critic for vi with respect to u. We then have:
+
+EG
+
+(cid:21)
+
+(cid:20) dLs
+du
+
+= EG
+
+(cid:34)
+
+(cid:88)
+
+(cid:35)
+
+.
+
+dLs
+dvi
+
+dvi
+du
+
+EG
+
+(cid:21)
+
+(cid:20) dLs
+du
+
+= EG
+
+(cid:34)
+
+(cid:88)
+
+(cid:35)
+
+.
+
+gvi
+
+dvi
+du
+
+i
+
+12
+
+9See lemma 7 in Appendix for a characterization of conditional independence between total derivatives.
+
+(7)
+
+(8)
+
+Figure 8: Gradient-critics.
+a) A computation graph where {u1, u2} and {v1, v2, v3} are both unordered separator sets. For the latter for
+instance, every path from θ to (cid:96) goes through {v1, v2, v3}, and given the set of all parents of {v1, v2, v3}, they
+can be computed in any order.
+b) The (horizon) gradient-critic for set {v1, v2, v3}: the forward and backward computations occurring after
+the separator set can be replaced by a gradient-critic: d(cid:96)
+c) The gradient-critic for set {u1, u2}.
+d) The gradient-critic bootstrap: for node u1, one can use the separator set {v1, v2, v3} to estimate the gradient
+of the loss with respect to u1 as the ‘partial gradient-critic’ ˆgu1 = (cid:80)
+. The gradient critic gu1 can be
+regressed against either the empirical gradient dL
+du1
+
+or the partially averaged gradient ˆgu1 .
+
+dθ = (cid:80)
+
+dvi
+dθ .
+
+i gvi
+
+i gvi
+
+dvi
+du1
+
+This theorem allows us to ‘push’ the horizon after which we start using gradient-critics. It constitutes
+the gradient equivalent of partial averaging, since it combines stochastic backpropagation (the terms
+dvi
+du ) and gradient critics gvi.
+
+4.3 THE GRADIENT-CRITIC BOOTSTRAP
+
+We now show how the result from the previous section allows to derive a generic notion of boot-
+strapping for gradient-critics.
+Theorem 6 (Gradient-critic bootstrap). Consider a node u, unordered separator set {v1, . . . , vd}.
+Consider value-gradient gu with set Cu for node u, and (gv1, gv2, . . . , gvd ) with Markov sets
+(Cv1, . . . , Cvd ) critics for vi with respect to u. Suppose that for all i, Cu ⊂ Cvi. Then,
+
+gu =
+
+(cid:88)
+
+i
+
+ECvi |Cu
+
+(cid:20)
+gvi
+
+(cid:21)
+
+.
+
+dvi
+du
+
+(9)
+
+4.4 GRADIENT-CRITIC AND GRADIENT OF CRITIC
+
+The section above proposes an operational deﬁnition of a gradient critic, in that one can replace
+the sampled gradient dLs
+du by the expectation of the gradient gu. A natural question follows – is a
+value-gradient the gradient of a value function? Similarly, is a gradient-critic the gradient of a critic
+function?
+
+13
+
+It is in general not true that the value-gradient must be the gradient of a value function. However, if
+the critic set is Markov, the gradient-critic is the gradient of the critic.
+Theorem 7. Consider a node v and critic set C, and corresponding critic value function Q(C) and
+gradient-critic gv(C). If C is Markov for v, then we have:
+
+dQ(C)
+dv
+
+= gv.
+
+This characterization of the gradient-critic as gradient of a critic plays a key role in using
+reparametrization techniques when gradients are not computable. For instance, in a continuous
+control application of reinforcement learning, the state of the environment can be assumed to be an
+unknown but differentiable function of the previous state and of the action. In this context, a critic
+can readily be learned by predicting total costs. By the argument above, the gradient of this critic
+actually corresponds to the gradient-critic of the unknown environment dynamics. This technique is
+at the heart of differentiable policy gradients (Lillicrap et al., 2015) and stochastic value gradients
+(Heess et al., 2015).
+
+When estimating the gradient critic from the critic, one needs to make sure that the conditional
+distribution on C conditional on G \ C has ‘full density’ (i.e. that the loss function can be evaluated
+in a neighborhood of the values of C), otherwise the resulting gradient estimate will be incorrect.
+This is an issue for instance if variables in C are deterministic function of one another. To address
+this issue, one can sample C from a different distribution than p(C|Gv \ C), for instance by injecting
+additional noise in the variables. One may have to use bootstrap equation instead of regression on
+return, since other we would be estimating the critic of a different graph (with added noise). See for
+instance (Silver et al., 2014; Lillicrap et al., 2015).
+
+4.5 GRADIENT-CRITIC APPROXIMATION AND COMPUTATION
+
+Following the arguments regarding conditional expectation and square minimization from sec-
+tion 3.1, we know that gv satisﬁes the following minimization problem:
+(cid:19)2(cid:35)
+
+(cid:34)(cid:18)
+
+gv(C) =argmingcv
+
+EG\C|C
+
+gcv −
+
+dLs
+dv
+
+For a parametric approximation gφ
+that:
+
+v , and using the same weighting scheme as section 3.5, it follows
+
+Lφ = EC
+
+(cid:34)
+EG\C|C
+
+(cid:34)(cid:18)
+
+gφ
+v (C) −
+
+(cid:19)2(cid:35)(cid:35)
+
+dLs
+dv
+
+= EG
+
+gφ
+v (C) −
+
+(cid:19)2(cid:35)
+
+dLs
+dv
+
+(cid:18)
+
+(cid:34)(cid:18)
+
+(cid:20) d
+dφ
+
+dLφ
+dφ
+
+= EG
+
+gφ
+v (C)
+
+gφ
+v (C) −
+
+(cid:19)(cid:21)
+
+dLs
+dv
+
+Finally, if C is Markovian for v, from Theorem 7, the gradient-critic gφ
+ﬁrst, as the critic of a gradient (E[ dLs
+d
+dv Q(C)).
+In this case, it makes sense to parameterize gφ
+deﬁne gφ
+
+dv |C]), and second, as the gradient of a critic ( d
+
+dv
+
+v can be deﬁned in two ways:
+E[L|C] =
+
+v as the derivative of a function Qφ(C), where v ∈ C, i.e.
+. The gradient-critic can therefore deﬁned directly by the gradient-critic loss
+(Qφ(C) − L)2(cid:105)10. It may therefore
+
+, and indirectly by the critic loss EG
+
+(cid:104)
+
+dv
+
+EG
+
+(cid:20)(cid:16) dQφ(C)
+
+v (C) = dQφ(C)
+(cid:17)2(cid:21)
+dv − dLs
+makes sense to combine them:
+(cid:104)
+
+dv
+
+Lφ = EG
+
+α(Qφ(C) − L)2 + β
+
+(cid:18) dQφ(C)
+dv
+
+−
+
+dLs
+dv
+
+(cid:19)2 (cid:105)
+
+10For the critic loss, note however that approximating a function well does not imply the corresponding
+
+gradients are close.
+
+(10)
+
+(11)
+
+14
+
+where α, β are relative weights for each norm. This is called a Sobolev norm, see also (Czarnecki
+et al., 2017).
+
+5 APPLICATIONS IN THE RL LITERATURE
+
+In this section and next we discuss multiple examples of models from the RL and probabilistic
+modeling literature. We present the corresponding SCGs and associate surrogate losses.
+
+5.1 MARKOV DECISION PROCESSES AND PARTIALLY OBSERVED MARKOV DECISION
+
+PROCESSES
+
+Figure 9 shows several examples of decision processes from the reinforcement learning literature.
+For simplicity we focus on the undiscounted, ﬁnite horizon case but note that generalizations to the
+discounted, inﬁnite horizon case are straightforward.11
+
+Markov decision processes (MDPs) As explained in in Fig. 1 the MDP objective is the (in
+our case undiscounted) return Eτ [(cid:80)T
+t=1 r(st, at)] where trajectories τ = (. . . , st, at, . . .) are
+drawn from the distribution obtained from the composition of policy πθ and system dynamics:
+τ ∼ p(τ, θ) = p(s0) (cid:81)
+Fig. 9(a) shows a vanilla, undiscounted MDP with a policy πθ(a|s) parameterized by θ. A large
+number of different estimators have been proposed for this model using a variety of different critics
+including Monte-Carlo returns, k-step returns, λ-weighted returns etc.:
+
+t π(at|st, θ)p(st+1|st, at).
+
+QM C
+at
+
+=
+
+r(st(cid:48), at(cid:48))
+
+Q0
+at
+
+= Qat(st, at)
+
+(cid:88)
+
+t(cid:48)≥t
+
+t+k
+(cid:88)
+
+t(cid:48)=t
+
+Qλ
+at
+
+= (1 − λ)
+
+λkQk
+at
+
+.
+
+∞
+(cid:88)
+
+k=0
+
+Qk
+at
+
+=
+
+r(st(cid:48), at(cid:48)) + V (st+k+1),
+
+∀k > 0
+
+(12)
+
+(13)
+
+(14)
+
+(15)
+
+The λ-weighted returns are an instance of a convex combination of a different set of critics, in
+this case of k-step returns critics. K-step returns are examples of partial averages. These critics
+can be used both to estimate the advantage for a policy update using the policy gradient theorem.
+Furthermore, they can be valuable as bootstrap targets for learning value functions. In general, the
+critic used for estimating the advantage can be different from the one used to construct a target for
+the value function update.
+
+i πθ(ai
+
+Fig. 9(c) shows an example of an MDP where independence between the components of a
+multi-dimensional action is assumed, corresponding to a factorized policies with πθ(at|st) =
+(cid:81)
+t|st).12 This motivates the use of action-conditional baselines (e.g. Wu et al., 2018) or
+marginalized critics. For instance, the action-conditional baseline for action dimension i, in state st
+[Q(st, at)], where a−i
+is given by Vai
+t ). This is
+t
+a valid baseline value function according to our Def. 3 as the remaining a−i
+are non-descendants of
+the action ai
+t.
+
+t , . . . , ai−1
+
+t = (a1
+
+t ) = E
+
+t , . . . aN
+
+(st, a−i
+
+t|st,a−i
+ai
+
+, ai1
+
+t
+
+t
+
+t
+
+Partially Observable Markov Decision Processes (POMDPs) Fig. 9(c,d,e) show two examples
+of POMDPs. (c) shows the standard setup where the state st is unobserved. Information about the
+state of the environment are available to the agent only via observations ot ∼ p(·|st). Observations
+typically provide only partial information about the state. To act optimally (or to predict the value
+
+11 In fact, the ﬁnite horizon requires particular care in that policies and value functions become time-indexed
+
+but we ignore this here in favor of a simple notation.
+
+12 This is the predominant case in practice, especially in continuous action spaces where policies are fre-
+
+quently chosen to be factorized Gaussian distributions.
+
+15
+
+in some state) the agent therefore needs to infer (the distribution over) the state at timestep t given
+the interaction history ht = (o0, a0, . . . , ot): p(st|ht). The aggregated interaction history is often
+referred to the internal agent state or belief state bt. Internal state and action choice are usually
+trained from return (prediction - when training value functions - and maximization - when optimiz-
+ing the policy). Note that when training the internal state from returns only, there is no guarantee
+that bt will correspond to a true ‘belief state’, e.g. the sufﬁcient statistics of the ﬁltering distribu-
+tion p(st|o0, a0, . . . ot); for a discussion of differences between internal and belief states, see for
+instance (Igl et al., 2018; Gregor et al., 2018; Moreno et al., 2018).
+
+The Markov structure of the model naturally suggests that value functions for time step t should
+be conditioned on the entire observation history up to time-step t. Since the policy shown in the
+ﬁgure is dependent on the entire observation history, a critic has to be conditioned on the entire ob-
+servation history (through bt) too in order to satisfy Deﬁnition 4. Furthermore, the Markov property
+of the model also requires conditioning of the value function on the entire observation history for
+bootstrapping to be valid, independent of the dependency structure chosen for the policy.
+
+But the theorems presented in this paper suggest interesting, less explored alternatives, in particular
+when the state st is available at training time (but not at testing time, so that the agent policy cannot
+depend on st). For instance, since st is a non-descendendant of the action at, the baseline for
+action at may be trained to depend on the full state, for instance by using a value function V (st, bt).
+This baseline is likely to be signiﬁcantly more accurate since it has access to information which
+may be very predictive of the return. It can also be used to help train the internal state bt of the
+agent better, since V (st, bt) is a valid, lower variance bootstrap target for training the value function
+V (bt), which in turn will affect the representation bt learned by the agent. st may also be used for
+critics, for instance by using Q functions which depend on both the environment and agent state:
+Q(st, bt, at).
+
+The example in Fig. 9(d) is a special case of the general POMDP. Shown is a multi-task MDP with
+shared transition dynamics but with reward function that depends on a goal g (which varies across
+tasks). The Markov structure suggests conditioning both policy and value functions on the goal
+variable g if observed (in which case the model is a MDP with g being part of the state), or the entire
+interaction history when g is unobserved. As for a general POMDP setting, conditioning on g or on
+the state-history is optional for the policy but required for bootstrapping of the value function (of
+course performance will suffer when the policy does not have access to sufﬁcient information).
+
+Figure 9(e) shows a similar setup but with the transition dynamics dependent on an unobserved
+variable d affecting the dynamics. The same arguments as for (d) and (b) apply. The option of
+conditioning the value function but not the policy on the system dynamics d has been exploited
+e.g. in the sim-to-real work in (Peng et al., 2017). The setup gives better baselines and allows
+bootstrapping of the value function, while the policy learns to act robustly without knowledge of the
+true dynamics d.
+
+Figure 9: Example for SCG representations of decision processes.
+dimensioal, independent (factored) actions a0
+variable g. (e) MDP with unobserved system dynamics d.
+
+t and a1
+
+(a) Vanilla MDP. (b) MDP with two-
+t . (c) General POMDP. (d) Multi-task MDP with goal
+
+16
+
+5.2 REPARAMETERIZED MDPS, VALUE-GRADIENTS, AND BLACK-BOX POLICY SEARCH
+
+Reparameterization The method of reparameterization is heavily exploited in the probabilistic
+modeling literature, but it can also be useful in RL by applying it to MDPs. Fig. 10 (a) shows again
+the regular MDP from Fig. 9a. Fig. 10 (b) shows the fully reparameterized version of Heess et al.
+(2015) where π(a|s) and p(st|st−1, at−1) are replaced by deterministic functions of independent
+noise: at = π(st, (cid:15)t) and st = f (st−1, at−1, ξt−1) respectively. (Deterministic policies and de-
+terministic system dynamics can be treated as simple special cases of this general setup.) If the
+(differentiable) system dynamics and distributions of the noise sources ξt are know, we can use the
+standard backpropagation algorithms to compute policy gradients, as all stochastic nodes are root
+nodes in the graph (cf. e.g. Eqs. 6-8 in Heess et al. 2015). When the system dynamics are unknown
+or non-differentiable, gradients of learned critics Q(s, a) w.r.t. the actions can be used to obtain
+gradients both for deterministic and stochastic policies, e.g.
+
+∂J
+∂θ
+
+(cid:88)
+
+E
+
+=
+
+t
+
+(cid:20) ∂Qat
+∂at
+
+∂πθ
+∂θ
+
+(cid:21)
+
+,
+
+as discussed in Section 4.4. For a deterministic policy this corresponds to the Deterministic Policy
+Gradients (DPG) algorithm (Silver et al., 2014; Lillicrap et al., 2015); for stochastic policies it is a
+special case of the stochastic value gradients (SVG; Heess et al. 2015) family, SVG(0). The SVG(K)
+family also contains the analogue of partial averages. For instance, the policy gradient computed
+from 1-step MC returns (SVG(1)) is given by
+
+∂J
+∂θ
+
+(cid:88)
+
+E
+
+=
+
+t
+
+(cid:20)(cid:18) ∂Vst+1
+∂st+1
+
+∂st+1
+∂at
+
++
+
+∂rt
+∂at
+
+(cid:19) ∂πθ
+∂θ
+
+(cid:21)
+
+.
+
+We can further construct convex combinations (e.g. similar to λ-weighted returns) of such partial
+averages. These ideas have also been studied in the literature e.g. by Werbos (1982); Fairbank &
+Alonso (2012).
+
+Black-box policy search These methods ignore the temporal structure of the MDP and instead
+perform search directly at the level of the parameter θ. A variety of different algorithms exist, with
+a particular simple form arising from representing an MDP in the equivalent from shown in Fig.
+10(c). The standard score-function estimator is used to learn a distribution over policy parameters
+θ, which is parameterized by θ0, such as mean and standard deviation of θ:
+
+J(θ0) = Eθ|θ0
+
+(cid:34)
+
+(cid:34)
+EG|θ
+
+(cid:88)
+
+t
+
+(cid:35)(cid:35)
+
+r(st, at)
+
+(16)
+
+(17)
+
+(18)
+
+The reparameterized version of this model is shown Fig. 10(d); it is closely related to a variety of
+recent proposals in the literature Fortunato et al. (2017); Plappert et al. (2017).
+
+17
+
+Figure 10: (a) MDP from Fig. 9 (for reference). (b) Fully reparameterized MDP as discussed in Heess et al.
+(2015). The stochastic action and state nodes have been replaced by deterministic nodes and independent noise
+variables. (c) Evolution strategies learn the parameters θ0 of a distribution over parameters θ. (d) Same as (c)
+but with the distribution over θ reparameterized, similar to noisy networks.
+
+5.3 HIERARCHICAL RL AND HIERARCHICAL POLICIES
+
+Figure 11: Examples of “hierarchical” policies: a) Policy with latent variable (“option”) that is ﬁxed for
+K = 3 steps. b) similar to (a) but the option is reparameterized (as e.g. in Heess et al. (2016)). c) Options with
+variable duration as in the Option Critic (Bacon et al., 2017).
+
+Figure 11 shows several simple examples of MDPs in which the policies have been augmented
+with latent variables. Such latent variables can, for instance, be seen as implementing the notion of
+options. For the discussion we assume that the objective remains unchanged (i.e. that no additional
+loss terms are introduced and we aim to optimize the full architecture to maximize expected reward).
+
+Fig. 11(a) shows a simple example of a policy with “options” that have a ﬁxed duration of three
+steps. For options of duration M (M = 3 in the example) the trajectory distribution is drawn from
+τ ∼ p(τ ; θ) = p(s0) (cid:81)
+t=0,M,2M,... π(zt|st; θ) (cid:81)M −1
+t(cid:48)=0 π(at+t(cid:48)|st+t(cid:48), zt; θ)p(st+t(cid:48)+1|st+t(cid:48), at+t(cid:48)).
+Below we also use [·]M to denote the “current” option, i.e. [t]M = (cid:98)t/M (cid:99)M .
+
+18
+
+A variety of gradient estimators can be constructed. The main change compared to the choices
+discussed in 5.1 is that critic and baselines have to reﬂect the dependence of τ≥t on z[t]M . Valid
+baselines for zt and at would, for instance, be Vzt(st) = Eτ≥t|st[(cid:80)
+t(cid:48)≥t r(st(cid:48), at(cid:48))] for t = 0, M, . . .
+[(cid:80)
+and Vat(st, z[t]M ) = Eτ≥t|st,z[t]M
+Q0
+at
+
+t(cid:48)≥t r(st(cid:48), at(cid:48))], and similarly for critics:
+
+= Qat (st, at, z[t]M ) = Eτ≥t|st,at,z[t]M
+
+r(st(cid:48), at(cid:48))]
+
+(19)
+
+(cid:88)
+
+=
+
+(cid:26)r(st, at) + Vt+1(st+1, z[t]M )
+r(st, at) + Vt+1(st+1)
+= Qzt (st, zt) = Eτ≥t|st,zt[
+
+(cid:88)
+
+Q1
+at
+
+Q0
+zt
+
+t(cid:48)≥t
+
+[
+t(cid:48)≥t
+
+if [t + 1]M = [t]M
+otherwise
+
+r(st(cid:48), at(cid:48))]
+
+for t = 0, M, 2M, . . . ,
+
+where we have made explicit that value functions may depend directly on the time step (due to the
+ﬁxed duration of the option).
+
+Fig. 11(b) shows the same model but with the random variables zt being replaced by a deterministic
+function of independent noise (cid:15)t. This allows the gradient with respect to θ at zt to be computed by
+backpropagation, e.g.
+
+t+M −1
+(cid:88)
+
+∂zt
+∂θ
+
+=
+
+Eτ≥t|st,zt
+
+(cid:20) ∂Qat(cid:48)
+∂at(cid:48)
+
+∂at(cid:48)
+zt
+
+∂zt
+∂θ
+
+(cid:21)
+
+,
+
+t(cid:48)=t
+where Qat(cid:48) may be a function of zt as discussed in the previous paragraph.
+Fig. 11(c) shows a more complex which captures the essential features e.g. of the Op-
+tion Critic architecture of Bacon et al.
+the option duration
+(2017).
+is variable and option termination depends on the state.
+This can be modeled with
+a binary random variable bt which controls whether z remains unchanged compared to
+trajectory distribution is given by τ ∼ p(τ ; θ) =
+the previous timestep.
+p(s0)p(z0|s0; θ)p(a0|s0, z0; θ) (cid:81)
+t>0 p(st+1|st, at)π(bt|st)π(zt|st, bt, zt−1; θ)π(at|st, zt; θ) where
+p(zt|st, bt, zt−1; θ) = δ(zt − zt−1)btπ(zt|st; θ)bt−1.
+
+Unlike in (a,b)
+
+The full
+
+for
+
+interest are,
+
+instance, Qat(st, at, zt) = Eτ≥t|st,zt[(cid:80)
+
+t r(st, at)]
+Value functions of
+(note the dependence on zt due to the dependence of
+future time steps on that
+value); Qzt(st, zt) = Vst,zt(st, zt) = Eat,st+1|st,zt[r(st, at) + Vst+1,zt(st+1, zt)] =
+Eτ≥t|zt,st[(cid:80)
+t(cid:48)≥t r(st, at)]] = Eat|st,zt[Qat(st, at, zt)], as well as Vst(st, zt−1, bt = 1) =
+Vst(st) = Ezt|st[Eτ≥t|zt,st[(cid:80)
+t(cid:48)≥t r(st, at)]], Vst,tt−1 (st, zt−1) = π(Bt = 1|st)V (st) + (1 −
+π(Bt = 1))Vst,zt(st, zt−1). Whereas the former two value functions are of interest as critics, the
+latter two are primarily interesting for bootstrapping purposes.
+
+(20)
+
+(21)
+
+(22)
+
+5.4 MULTI-AGENT MDPS
+
+Multi-agent MDPs can be seen as special cases of MDPs with a particular factorization. Two ex-
+amples are shown in Fig. 12 for the fully and partially observed case respectively. The factored
+structure of the MDP suggests particular choices for value function and critic, including condi-
+tioning the baseline on other agents’ actions in the same vein as for action conditional baselines
+(Foerster et al., 2017). A valid bootstrap target requires access to the full state. For a collection of
+agents a ∈ A = (A, B, . . .), denote ua
+t the action of agent a at time t. The tuple of all actions is
+u = (aA, aB, . . .); the tuple of all actions except that of agent a is u−a. The shared state is st. The
+value function Q(st, ut) is a valid critic for action ua
+t are
+non-descendents of ua
+). From the
+Bellman principle (Lemma. 3), we also have V (st, u−a
+Note that in the fully observed case (all agents observe their own as well as the other agents’ states),
+the above essentially takes the same form as the factored action model from Fig. 9, due to identical
+structure in the graphical model.
+
+t , they can be used to form an improved, valid baseline V (st, u−a
+t
+
+t (Def. 5). Since all actions other than ua
+
+) = E[Q(st, ut)] = (cid:80) π(ua
+
+t |st)Q(st, ut)
+
+t
+
+An actor-critic formulation that employs state-action critic to derive action-value gradients based
+has been considered by Lowe et al. (2017). Note that the use of action-value gradients means that
+no baseline is needed.
+
+19
+
+Fig. 9b shows the POMDP formulation of the same problem in which each agent has access to only a
+partial observation of the full system. While centralized baselines and critics may still be desirable,
+“factored” baselines and critics conditioned on the full history of observations accessible to each
+agents policy are also valid according to the deﬁnition of a critic (Def. 4) and admit bootstrapping
+according to Theorem 3.
+
+Figure 12: Examples: (a) Multiagent MDP. (b) Multiagent POMDP
+
+6 APPLICATIONS IN PROBABILISTIC MODELING
+
+6.1 MAPPING INFERENCE IN PROBABILISTIC MODELS TO STOCHASTIC COMPUTATION
+
+GRAPHS
+
+In this section, we brieﬂy explicit a general technique to turn probabilistic inference problems into
+stochastic computation graphs, in particular in the framework of variational inference. This section
+closely follows (Weber et al., 2015).
+
+Let us consider an arbitrary latent variable model p(z, x; Θ), where x = (x1, . . . , xM ) represents
+the observations, z = (z1, . . . , zK) the latent variables, and Θ = (θ1, . . . , θD) the parameters of p.
+Because x, z and Θ play very similar roles in what follows, for simplicity of notation, let yj be a
+variable that represents a single latent zj(cid:48) or observed variable xj(cid:48) for some corresponding j(cid:48) (for
+instance we could have yj = zj for j = 1, . . . K and yK+j = xj for j = 1, . . . , M ) Assume that
+the joint distribution of (z, x) is that of a directed graphical model with directed acyclic graph Gp;
+v be the parents of v in Gp (this includes parameters in Θ). We then
+for any variable v ∈ Gp, let hp
+have:
+(cid:89)
+(cid:89)
+
+(cid:89)
+
+p(z, x) =
+
+p(zk|hp
+zk
+
+)
+
+p(xm|hp
+
+xm
+
+) =
+
+p(yj|hp
+yj
+
+).
+
+k
+
+m
+
+j
+
+Let us consider a posterior distribution q(z|x; φ) which is also a directed graphical model Gq (Gp
+and Gq may have different topology). For a node v in Gq, let hv be the parents of v in Gq (again, this
+includes parameters in Θ or φ). Then,
+
+q(z|x) =
+
+q(zk|hzk ).
+
+(cid:89)
+
+k
+The variational objective is Eq [log p(x, z) − log q(z|x)], which can be decomposed into a sum
+(cid:80)
+) with sj = (yj, hyj ) or
+
+j rj(sj), where for each j, we either have rj(sj) = log p(yj|hp
+yj
+
+rj(sj) = − log q(zj|hzj ) with sj = (zj, hzj ).
+The stochastic computation graph composed of Gq and costs rj implements variational inference for
+p using variational distribution q.
+
+20
+
+6.2 VARIATIONAL AUTO-ENCODERS AND NEURAL VARIATIONAL INFERENCE
+
+Simple stochastic computation graphs can be obtained from the combination of a latent variable
+model p(z, x) and an amortized posterior network q(z|x) (Gershman & Goodman, 2014). In the
+most common implementations, the latent variable model maps a latent variable z with known prior
+(typically a normally distributed random vector, or a vector of Bernoulli random variables) to the
+distribution parameters (typically a Gaussian or Bernoulli) of the observation x. The model is in ef-
+fect a mixture model (with an inﬁnite number of components in the continuous case) where mixture
+components parameters are functions of the mixture ‘index’.
+
+When the network is not reparametrized, the score function estimator is commonly known as NVIL
+(neural variational inference and learning) or automated/black-box VI and has been developed in
+various works (Paisley et al., 2012; Wingate & Weber, 2013; Ranganath et al., 2013; Mnih & Gregor,
+2014). Baseline functions are commonly used. When the distribution are reparametrizable, the
+model is often known as a VAE (variational autoencoder) (Kingma & Welling, 2013; Rezende et al.,
+2014); many variants of the VAE were since developed, often differing on the form of the posterior
+network, decoder, or variational bound.
+
+Because of the simplicity and lack of structure of the model, it is not trivial to leverage critic or
+gradient-critics in these models. One could in principle learn a gradient-critic for NVIL and avoid
+the high-variance issue due to the score function estimator (see action parameter critics in section 8);
+to our knowledge this has not been explicitly attempted. Multiple sample techniques (Mnih &
+Rezende, 2016) can be used to lower variance of the estimators by estimating value function as the
+empirical average of independent samples (the validity of using other samples as baseline for one
+sample automatically follows from value functions from non-descendent sets of variables).
+
+Figure 13: Variational Autoencoder and Neural Variational Inference.
+a) Graphical model of neural latent variable model p(x, z) and amortized posterior q(z|x)
+b) Computation graph for Neural Variational Inference
+c) Reparametrized computation graph for Variational Autoencoder.
+
+6.3 STATE-SPACE MODELS
+
+State-space models are powerful models of sequential data x = (x1, . . . , xT ), which capture depen-
+dencies between variables by way of a sequence of states zt,
+
+There is a large amount of recent work on these type of models, which differ in the precise details
+of model components (Bayer & Osendorfer, 2014; Chung et al., 2015; Krishnan et al., 2015; Archer
+et al., 2015; Fraccaro et al., 2016; Liu et al., 2017; Buesing et al., 2018).
+
+21
+
+They generally consist of decoder or prior networks, which detail the generative process of states
+and observations, and encoder or posterior networks, which estimate the distribution of latents given
+the observed data.
+
+Let z = (z1, . . . , zT ) be a state sequence and x = (x1, . . . , xT ) an observation sequence. We
+assume a general form of state-space model, where the joint state and observation likelihood can be
+written as p(x, z) = (cid:81)
+t p(zt | zt−1)p(xt | zt).13 These models are commonly trained with a VAE-
+inspired bound, by computing a posterior q(z | x) over the states given the observations. Often, the
+posterior is decomposed autoregressively: q(z | x) = (cid:81)
+t q(zt | zt−1, φt(x)), where φt is a function
+of (x1, . . . , xt) for ﬁltering posteriors or the entire sequence x for smoothing posteriors. This leads
+to the following lower bound:
+
+log p(x) ≥ Ez∼q(z | x)
+
+(cid:104)(cid:88)
+t
+
+log p(xt | zt) + log p(zt | zt−1) − log q(zt | zt−1, φt(x))
+
+.
+
+(23)
+
+(cid:105)
+
+Continuous state-space models are often reparametrized (see (Krishnan et al., 2015; Buesing et al.,
+2018)). Comparatively less work investigates state-space model with discrete variables (see (Gan
+et al., 2015) for a recurrent sigmoid network, and (Eslami et al., 2016; Kosiorek et al., 2018) for
+hybrid models with both discrete and continuous variables). As with NVIL, discrete models suffer
+from higher variance estimates and could be combined with critics and gradient-critics, though it
+has not been extensively investigated.
+
+Figure 14: State-space model.
+a) Forward model or decoder p(z, zx)
+b) Inverse model or encoder q(z|x) based on ﬁltering or smoothing (with purple arrows) posterior
+c) Stochastic computation graph
+
+6.3.1 MORE GENERAL INFERENCE SCHEMES; RL AS INFERENCE
+
+The previous section addresses inference from a variational point of view, which maps closely to the
+RL problem14. More general inference schemes can be used, from message-passing to sequential
+Monte-Carlo. While we do not extensively cover the connections, many of the notions developed in
+the previous sections can be extended to the general case. The main difference is that value-function,
+which conserve the intuition of ‘summarizing the future’, are now deﬁned in a ‘soft’ fashion, by
+way of log-sum-exp operators (so do the corresponding bootstrap equations). For instance, for a
+
+13For notational simplicity, p(z1 | z0) = p(z1).
+14Note that an important distinction between RL and inference is that in RL, costs typically depend only
+on states and actions, while in inference, the cost depends on the parametrization of the random variables as
+well as on their samples; this is the reason why optimal posterior distributions are still entropic, as opposed to
+deterministic optimal policies in MDPs when not using entropy bonus.
+
+22
+
+state-space model, we can deﬁne a value function V (zt) as V (zt) = log p(xt+1, . . . , xT |zt) and
+Q(zt, zt+1) = log p(xt+1, . . . , xT |zt, zt+1); they are connected through a soft-Q update:
+
+V (zt) = log E [exp(Q(zt, zt+1))|zt] .
+
+The connection between inference and reinforcement learning is explored in details in (Levine,
+2018), see also soft-actor critic methods (Haarnoja et al., 2018). Just as value functions can be used
+to improve the quality of variational inference scheme (an idea proposed in (Weber et al., 2015)),
+soft-value functions can be used to improve the quality of other inference schemes, for instance
+sequential Monte-Carlo (Heng et al., 2017; Pich´e et al., 2019).
+
+7 COMBINATION OF ESTIMATORS AND CRITICS
+
+The techniques outlined above suggest a “menu” of choices for constructing gradient estimators
+for stochastic computation graphs. We lay out a few of these choices, highlighting how are results
+strictly generalize known methods from the literature.
+
+Reparameterization; use of score function and pathwise derivative estimators. Many distri-
+butions can be reparameterized, including discrete random variables (Maddison et al., 2016; Jang
+et al., 2016). This opens a choice between SF and PD estimator. The latter allows gradients to ﬂow
+through the graph. Where exact gradients are not available (e.g. in MDPs or in probabilistic pro-
+grams and approximate Bayes computation (Meeds & Welling, 2014; Ong et al., 2018)) gradients of
+critics can under certain conditions be used in combination with reparameterized distributions (see
+e.g. (Heess et al., 2015).
+
+Grouping of random variables. For many graphs there is a natural grouping of random variables
+that suggests obvious baseline and critic choices. Taking into account the detailed Markov structure
+of the computation graph may however reveal interesting alternatives. For instance, with an appro-
+priate use of critics it could be beneﬁcial to compute separate updates for each action dimension,
+marginalizing over the other action dimensions. Alternatively, independent action dimensions al-
+low updates in which baselines are conditioned on the values chosen for other action dimensions.
+Such ideas have been exploited e.g. in work on action-dependent baselines (Wu et al., 2018), and
+in multi-agent domains (Foerster et al., 2017). Other applications have been found in hierarchical
+RL, for instance in (Bacon et al., 2017), where the relation between options and actions directly
+informs the computation graph structure, in turn deﬁning the correct value bootstrap equations and
+corresponding policy gradient theorem. The main results of these works can be rederived from the
+theorems outlined in this paper.
+
+Use of value critics and baselines. The discussion in 3.2 highlights there are typically many
+different choices for constructing baselines and critics even beyond the choice of a particular variable
+grouping (e.g. the use of K-step returns or generalized advantage estimates in RL, Schulman et al.
+(2015a)) even for simple graphs (such as chains). Which of the admissible estimators will be most
+appropriate in any given situation will be highly application speciﬁc. The use of critics for stochastic
+computation graphs was introduced in (Weber et al., 2015), also independently explored in (Xu et al.,
+2018).
+
+Use of gradient-critics. For reparameterized variables or general deterministic pathways through
+a computation graph gradient critics can be used. Gradient critics for a given node in the graph can
+be obtained by either directly approximating the (expected) gradient of the downstream loss, or by
+approximating the value of the future loss terms (as for value critics) and then using the gradient
+of this approximation. Gradient-critics allow to conceptualize the links between related notions
+of value-gradient found in (Fairbank & Alonso, 2012; Fairbank, 2014), stochastic value-gradients
+(Heess et al., 2015), and synthetic gradients (Jaderberg et al., 2016; Czarnecki et al., 2017).
+
+Debiasing of estimators through policy-gradient correction. The use of critics or gradient-
+critics results in biased estimators. When using gradient-critic, it is often possible to debias the
+use of the gradient-critic by adding a correction term corresponding to the critic error. The resulting
+scheme is unbiased, but may or may not have lower variance than ‘naive’ estimators which do not
+
+23
+
+use critics at all. This is sometimes known as ’action-conditional’ baselines in the literature (Tucker
+et al., 2018), and is also strongly related to Stein variational gradient (Liu & Wang, 2016). See
+App. B.3 for more details.
+
+Bootstrapping. Targets for baselines and critics can be obtained in a variety of ways: For instance,
+they can be regressed directly onto empirical sums of downstream losses (“Monte Carlo” returns in
+reinforcement learning). But targets can also constructed from other, downstream value or gradient
+approximations (e.g. “K-step returns” or “λ-weighted returns” in reinforcement learning), an idea
+discussed above under the name bootstrapping (sections 3.3 and 4.3). The appropriate choice here
+will again be highly application speciﬁc.
+
+Decoupled updates.
+In its original form Theorem 1 requires a full and backward pass through
+the entire computation graph to compute a single sample approximation to its gradient. Through
+appropriate combination of surrogate signals and bootstrapping, however, updates for different parts
+of the graph can be decoupled to different extents. For instance, in reinforcement learning actor-
+critic algorithms compute updates to the policy parameters from single transitions st, at, rt, st+1.
+The same ideas can be applied to general computation graphs where additional freedom (e.g. to set
+intermediate states; full access to all parts of the model) can allow even more ﬂexible schemes (e.g.
+individual parts of the graph can be updated more frequently than others).
+
+8 A WORKED EXAMPLE
+
+In this section, we go in more details through a simple chain graph example. This will allow us
+to present the menu of estimators discussed in the previous section in a concrete situation, without
+having to deal with the complexities arising from more structured graphs.
+
+Figure 15: A simple MDP example, here shown fully reparametrized. Only parameters of the policy at time-
+step t = 1 are shown.
+
+We will use reinforcement learning terminology in order to connect to the wide literature on policy
+gradient and value-based methods, however the example is more general, and can be mapped to
+inference and learning in state-space models, time-series analysis, etc.
+
+In this example, the state is fully observed by the agent, and we assume every function in the graph is
+known and differentiable. We assume the graph can be arbitrarily reparametrized (with environment
+noise variables (cid:15)e, action noise (cid:15)a, parameter noise (cid:15)p). We assume a distribution over the parameters
+θp used to compute the policy; this distribution has hyperparameter θ. That distribution may be a
+Dirac at θ (i.e. θ = θp).
+
+24
+
+The aim is to compute the parameters of the policy for the second action a1 (this is done for sim-
+plicity but can easily be extended to the case where policy parameters are shared across time-steps);
+for reasons which will be apparent later, we make the parameters π1 of the distribution of action a1
+a node of the graph (for other actions, those parameters are implicit in the state to action mappings);
+the mapping from π1 and (cid:15)a
+1 to a1 is parameterless. We detail different estimators of the gradient of
+the expected loss E[R] = E[(cid:80)
+
+i ri] with respect to θ.
+
+Black-box estimators: no reparametrization.
+
+The ﬁrst and simplest estimator is the black-box or ‘evolution strategies’ estimator, obtained by
+not reparametrizing θp; it is given by d log p(θp|θ)
+(R − V (θ)). It is hard to compute a value baseline
+or value critic for R here. A critic that could be used in principle is an estimator V (θp) which
+averages over the entire environment and policy, and produces the expected return as a function of
+the sampled parameter θp. The corresponding estimator would be d log p(θp|θ)
+(V (θp) − V (θ)). It is
+of course highly unlikely to be accurate in practice.
+
+dθ
+
+dθ
+
+Reparametrizing policy parameters: policy gradient algorithms.
+
+The next family of estimators is obtained by reparametrizing θp, but not the action or the envi-
+ronment. If the conditional distribution of θ is a Dirac (i.e. noiseless), we have classical version of
+the estimators; if not, we have ‘noisy’ or Bayesian estimators(Blundell et al., 2015; Fortunato et al.,
+2017; Plappert et al., 2017).
+
+We obtain ‘model-free’ estimators, which differ by the choice of the critic. One choice averages the
+entire future with a critic Q(s1, a1), which leads to the update
+
+Other choices involve the use of k-step returns, e.g.
+
+∂θ
+∂θp
+
+d log π1(a1)
+dθ
+
+(Q(s1, a1) − V (s1)).
+
+∂θ
+∂θp
+
+d log π1(a1)
+dθ
+
+(r1 + V (s2) − V (s1)),
+
+∂θ
+∂θp
+
+d log π1(a1)
+dθ
+
+(r1 + r2 + V (s3) − V (s1)),
+
+. . . ,
+
+the use of TD(λ) estimators, of empirical returns
+
+∂θ
+∂θp
+
+d log π1(a1)
+dθ
+
+(R − V (s1)).
+
+These methods are all viable and used in practice.
+
+Another more unusual option is to use a parameter gradient-critic g(θ) which will ’average out’ the
+entire environment and policy. Using a parameter gradient-critic leads to the update ∂θ
+g(θ). The
+∂θp
+gradient critic g(θ) can be learned in two ways. First, by learning a critic Q(θ) which approximates
+the return R, and take the derivative with respect to θ, i. e. g(θ) = dQ(θ)
+. Second, by directly
+learning a gradient critic by regressing against a valid gradient update, for instance
+(cid:20) d log π1(a1)
+dθ
+(cid:20) d log π1(a1)
+dθ
+
+(r1 + V (s2) − V (s1))
+
+or g(θ) =E
+
+(R − V (s1))
+
+g(θ) =E
+
+(cid:12)
+(cid:12)
+(cid:12)θ
+
+(cid:12)
+(cid:12)
+(cid:12)θ
+
+dθ
+
+(cid:21)
+
+(cid:21)
+
+,
+
+,
+
+the latter of which learns a gradient-critic from a value critic. But no method which tries to approx-
+imates the entire actor-environment loop by a gradient g(θ) estimated solely from the parameter is
+likely to work in practice.
+
+25
+
+Reparametrizing actions.
+
+The next estimator involves reparametrizing the parameters, actions, but not the environment. In
+this situation, only one value critic is possible, the critic Q(s1, a1) which averages the entire future.
+The corresponding estimator is the DDPG/SVG(0) estimator, which is
+
+∂θ
+∂θp
+
+∂π1(a1)
+∂θ
+
+∂a1
+∂π1
+
+dQ(s1, a1)
+da1
+
+.
+
+The term dQ(s1,a1)
+
+da1
+
+can be replaced by a gradient critic as we see next.
+
+Full reparametrization: differential dynamic programming and trajectory optimization.
+
+Finally, when reparametrizing the environment as well, we open the door to trajectory optimiza-
+
+tion type estimators. The general form is given by
+
+∂a1
+∂π1
+where g(s1, a1, ·) is some form of a gradient-critic for the future given (s1, a1). The most classical
+involves using sampled environment gradients, and corresponds to the following expression, also
+known as SVG(∞):
+
+∂π1(a1)
+∂θ
+
+g(s1, a1, ·),
+
+∂θ
+∂θp
+
+∂s2
+∂a1
+
+(
+
+∂r2
+∂s2
+
++
+
+∂s3
+∂s2
+
+(
+
+∂r3
+∂s3
+
++
+
+∂s4
+∂s3
+
+∂r4
+∂s4
+
+)).
+
+But by using partially averaged gradient-critic, for instance a one-step gradient critic:
+∂r2
+∂s2
+
+g(s3, a3)),
+
+∂s2
+∂a1
+
+∂s3
+∂s2
+
++
+
+(
+
+where g(s3, a3) either deterministically approximates the stochastic gradient ( ∂r3
+)), or is
+∂s3
+the gradient of Q(s3, a3). The most aggressive averaging would involve a gradient-critic g(s1, a1)
+which averages the entire future, and which can be computed either by differentiating Q(s1, a1), or
+by regression directly against a valid gradient target.
+
++ ∂s4
+∂s3
+
+∂r4
+∂s4
+
+Action parameter critics.
+
+Finally, let us consider a ﬁnal, slightly more unusual gradient-critic estimator, explored in (Wier-
+stra & Schmidhuber, 2007), related to the DDP/SVG(0) operators, but where the critic is not condi-
+tioned on (s1, a1) but on (s1, π1) instead, resulting in the following:
+
+∂θ
+∂θp
+
+∂π1(a1)
+∂θ
+
+g(s1, π1).
+
+The gradient-critic g(s1, π1) can be estimated in many ways. First, by regressing against a cor-
+rect gradient estimate, for instance a quantity like ∂a1
+; this is only possible if a1 can be
+∂π1
+differentiable reparametrized as a function of π1.
+Second, as a gradient dV
+of the value V (s1, π1) (note again this depends on the parameters π1 and
+dπ1
+not the sample a1); when using function approximators, this requires (during training at least) π1 to
+be a stochastic function of s1 (for the same reasons as highlighted in section 4.4).
+
+dQ(s1,a1)
+da1
+
+Third, it can regressed against an estimate of the gradient where a1 is not reparametrized, for instance
+d log π1(a1)
+(Q(s1, a1) − V (s1)).
+dπ1
+
+(R − V (s1)) or d log π1(a1)
+
+dπ1
+
+What is peculiar and particularly interesting about the second and third option is that they apply to
+non-differentiable actions, and that the gradient critic implicitly sums over all actions. This results
+in a potentially signiﬁcantly lower variance gradient estimator for non-differentiable actions; note
+this does not require any relaxation to the discrete sampling. This could for instance be applied
+in inference and learning in discrete generative models, for instance as an alternative to the high
+variance estimators score function estimators.
+In this entire section, any bias introduced by the use of a critic or gradient-critic can be removed by
+using combined operators, as detailed in Appendix B.3.
+
+Here, we don’t discuss in depth the different options for bootstrap targets or linear combinations of
+critic, gradient critics and value functions, and yet, by making different choices on what quantities
+to condition on and which to average over, investigated a rich number of options available to us even
+in this very simple graph.
+
+26
+
+9 CONCLUSION
+
+In this paper, we have provided a detailed discussion and mathematical analysis of credit assign-
+ment techniques for stochastic computation graphs. Our discussion explains and uniﬁes existing
+algorithms, practices, and results obtained in a number of particular models and different ﬁelds of
+the ML literature. They also provide insights about the particular form of algorithms, highlighting
+how they naturally result from the constraints imposed by the computation graph structure, instead
+of ad-hoc solutions to particular problems.
+
+The conceptual understanding and tools developed in this work do not just allow the derivation of
+existing solutions as special cases. Instead, they also highlight the fact that for any given model there
+typically is a menu of choices, each of which gives rise to a different gradient estimator with different
+advantages and disadvantages. For new models, these tools provide methodological guidance for the
+development of appropriate algorithms. In that sense our work emphasizes a similar separation of
+model and algorithm that has been proven fruitful in other domains, for instance in the probabilistic
+modeling and inference literature.
+
+We believe that this separation as well as a good understanding of the underlying principles will
+become increasingly important as both models and training schemes become more complex and the
+distinction between different model classes blurs.
+
+ACKNOWLEDGMENTS
+
+Wed like to thank the many people for useful discussions and feedback on the research and the
+manuscript, including Ziyu Wang, S´ebastien Racani`ere, Yori Zwols, Chris Maddison, Arthur Guez
+and Andriy Mnih.
+
+27
+
+REFERENCES
+
+Archer, Evan, Park, Il Memming, Buesing, Lars, Cunningham, John, and Paninski, Liam. Black box
+
+variational inference for state space models. arXiv preprint arXiv:1511.07367, 2015.
+
+Arjona-Medina, Jose A, Gillhofer, Michael, Widrich, Michael, Unterthiner, Thomas, and Hochreiter,
+Sepp. Rudder: Return decomposition for delayed rewards. arXiv preprint arXiv:1806.07857,
+2018.
+
+Bacon, Pierre-Luc, Harb, Jean, and Precup, Doina. The option-critic architecture.
+
+In AAAI, pp.
+
+Bayer, Justin and Osendorfer, Christian. Learning stochastic recurrent networks. arXiv preprint
+
+1726–1734, 2017.
+
+arXiv:1411.7610, 2014.
+
+Bengio, Yoshua, L´eonard, Nicholas, and Courville, Aaron. Estimating or propagating gradients
+through stochastic neurons for conditional computation. arXiv preprint arXiv:1308.3432, 2013.
+
+Blundell, Charles, Cornebise, Julien, Kavukcuoglu, Koray, and Wierstra, Daan. Weight uncertainty
+
+in neural networks. arXiv preprint arXiv:1505.05424, 2015.
+
+Buesing, Lars, Weber, Theophane, Racaniere, Sebastien, Eslami, SM, Rezende, Danilo, Reichert,
+David P, Viola, Fabio, Besse, Frederic, Gregor, Karol, Hassabis, Demis, et al. Learning and
+querying fast generative models for reinforcement learning. arXiv preprint arXiv:1802.03006,
+2018.
+
+Chung, Junyoung, Kastner, Kyle, Dinh, Laurent, Goel, Kratarth, Courville, Aaron C, and Bengio,
+Yoshua. A recurrent latent variable model for sequential data. In Advances in neural information
+processing systems, pp. 2980–2988, 2015.
+
+Czarnecki, Wojciech M, Osindero, Simon, Jaderberg, Max, Swirszcz, Grzegorz, and Pascanu, Raz-
+van. Sobolev training for neural networks. In Advances in Neural Information Processing Sys-
+tems, pp. 4278–4287, 2017.
+
+Eslami, SM Ali, Heess, Nicolas, Weber, Theophane, Tassa, Yuval, Szepesvari, David, Hinton, Geof-
+frey E, et al. Attend, infer, repeat: Fast scene understanding with generative models. In Advances
+in Neural Information Processing Systems, pp. 3225–3233, 2016.
+
+Fairbank, Michael. Value-gradient learning. PhD thesis, City University London, 2014.
+
+Fairbank, Michael and Alonso, Eduardo. Value-gradient learning. In Neural Networks (IJCNN),
+
+The 2012 International Joint Conference on, pp. 1–8. IEEE, 2012.
+
+Figurnov, Michael, Mohamed, Shakir, and Mnih, Andriy.
+
+Implicit reparameterization gradients.
+
+arXiv preprint arXiv:1805.08498, 2018.
+
+Foerster, Jakob N., Farquhar, Gregory, Afouras, Triantafyllos, Nardelli, Nantas, and Whiteson, Shi-
+
+mon. Counterfactual multi-agent policy gradients. CoRR, abs/1705.08926, 2017.
+
+Fortunato, Meire, Azar, Mohammad Gheshlaghi, Piot, Bilal, Menick, Jacob, Osband, Ian, Graves,
+Alex, Mnih, Vlad, Munos, Remi, Hassabis, Demis, Pietquin, Olivier, et al. Noisy networks for
+exploration. arXiv preprint arXiv:1706.10295, 2017.
+
+Fraccaro, Marco, Sønderby, Søren Kaae, Paquet, Ulrich, and Winther, Ole. Sequential neural models
+with stochastic layers. In Advances in neural information processing systems, pp. 2199–2207,
+2016.
+
+Gan, Zhe, Li, Chunyuan, Henao, Ricardo, Carlson, David E, and Carin, Lawrence. Deep temporal
+sigmoid belief networks for sequence modeling. In Advances in Neural Information Processing
+Systems, pp. 2467–2475, 2015.
+
+Geiger, Dan, Verma, Thomas, and Pearl, Judea. Identifying independence in bayesian networks.
+
+Networks, 20(5):507–534, 1990.
+
+28
+
+Gershman, Samuel and Goodman, Noah. Amortized inference in probabilistic reasoning. In Pro-
+
+ceedings of the Annual Meeting of the Cognitive Science Society, volume 36, 2014.
+
+Glasserman, Paul. Gradient estimation via perturbation analysis. Springer Science & Business
+
+Media, 1991.
+
+Research, 39(1):41–67, 1992.
+
+Glasserman, Paul. Smoothing complements and randomized score functions. Annals of Operations
+
+Grathwohl, Will, Choi, Dami, Wu, Yuhuai, Roeder, Geoff, and Duvenaud, David. Backpropagation
+through the void: Optimizing control variates for black-box gradient estimation. arXiv preprint
+arXiv:1711.00123, 2017.
+
+Greensmith, Evan, Bartlett, Peter L, and Baxter, Jonathan. Variance reduction techniques for gra-
+dient estimates in reinforcement learning. The Journal of Machine Learning Research, 5:1471–
+1530, 2004.
+
+Gregor, Karol, Papamakarios, George, Besse, Frederic, Buesing, Lars, and Weber, Theophane. Tem-
+
+poral difference variational auto-encoder. arXiv preprint arXiv:1806.03107, 2018.
+
+Gu, Shixiang, Levine, Sergey, Sutskever, Ilya, and Mnih, Andriy. Muprop: Unbiased backpropaga-
+
+tion for stochastic neural networks. arXiv preprint arXiv:1511.05176, 2015.
+
+Haarnoja, Tuomas, Zhou, Aurick, Abbeel, Pieter, and Levine, Sergey. Soft actor-critic: Off-
+policy maximum entropy deep reinforcement learning with a stochastic actor. arXiv preprint
+arXiv:1801.01290, 2018.
+
+Heess, Nicolas, Wayne, Gregory, Silver, David, Lillicrap, Tim, Erez, Tom, and Tassa, Yuval. Learn-
+ing continuous control policies by stochastic value gradients. In Advances in Neural Information
+Processing Systems, pp. 2944–2952, 2015.
+
+Heess, Nicolas, Wayne, Greg, Tassa, Yuval, Lillicrap, Timothy, Riedmiller, Martin, and Sil-
+arXiv preprint
+Learning and transfer of modulated locomotor controllers.
+
+ver, David.
+arXiv:1610.05182, 2016.
+
+Heng, Jeremy, Bishop, Adrian N, Deligiannidis, George, and Doucet, Arnaud. Controlled sequential
+
+monte carlo. arXiv preprint arXiv:1708.08396, 2017.
+
+Igl, Maximilian, Zintgraf, Luisa, Le, Tuan Anh, Wood, Frank, and Whiteson, Shimon. Deep varia-
+
+tional reinforcement learning for POMDPs. arXiv preprint arXiv:1806.02426, 2018.
+
+Jaderberg, Max, Czarnecki, Wojciech Marian, Osindero, Simon, Vinyals, Oriol, Graves, Alex, Sil-
+ver, David, and Kavukcuoglu, Koray. Decoupled neural interfaces using synthetic gradients. arXiv
+preprint arXiv:1608.05343, 2016.
+
+Jang, Eric, Gu, Shixiang, and Poole, Ben. Categorical reparameterization with gumbel-softmax.
+
+arXiv preprint arXiv:1611.01144, 2016.
+
+Kingma, Diederik P and Welling, Max. Auto-encoding variational Bayes. arXiv:1312.6114, 2013.
+
+Kingma, Diederik P and Welling, Max. Efﬁcient gradient-based inference through transformations
+
+between bayes nets and neural nets. arXiv preprint arXiv:1402.0480, 2014.
+
+Koller, Daphne and Friedman, Nir. Probabilistic graphical models: principles and techniques. MIT
+
+press, 2009.
+
+Kosiorek, Adam R, Kim, Hyunjik, Posner, Ingmar, and Teh, Yee Whye. Sequential attend, infer,
+
+repeat: Generative modelling of moving objects. arXiv preprint arXiv:1806.01794, 2018.
+
+Krishnan, Rahul G, Shalit, Uri, and Sontag, David. Deep Kalman ﬁlters.
+
+arXiv preprint
+
+arXiv:1511.05121, 2015.
+
+Levine, Sergey. Reinforcement learning and control as probabilistic inference: Tutorial and review.
+
+arXiv preprint arXiv:1805.00909, 2018.
+
+29
+
+Lillicrap, Timothy P, Hunt, Jonathan J, Pritzel, Alexander, Heess, Nicolas, Erez, Tom, Tassa, Yuval,
+Silver, David, and Wierstra, Daan. Continuous control with deep reinforcement learning. arXiv
+preprint arXiv:1509.02971, 2015.
+
+Liu, Hao, He, Lirong, Bai, Haoli, and Xu, Zenglin. Efﬁcient structured inference for stochastic
+
+recurrent neural networks. 2017.
+
+Liu, Qiang and Wang, Dilin. Stein variational gradient descent: A general purpose bayesian infer-
+ence algorithm. In Advances In Neural Information Processing Systems, pp. 2378–2386, 2016.
+
+Lowe, Ryan, Wu, Yi, Tamar, Aviv, Harb, Jean, Abbeel, Pieter, and Mordatch, Igor. Multi-agent
+actor-critic for mixed cooperative-competitive environments. In Advances in Neural Information
+Processing Systems 30: Annual Conference on Neural Information Processing Systems 2017, 4-9
+December 2017, Long Beach, CA, USA, pp. 6382–6393, 2017.
+
+Maddison, Chris J, Mnih, Andriy, and Teh, Yee Whye. The concrete distribution: A continuous
+
+relaxation of discrete random variables. arXiv preprint arXiv:1611.00712, 2016.
+
+Meeds, Edward and Welling, Max. Gps-abc: Gaussian process surrogate approximate bayesian
+
+computation. arXiv preprint arXiv:1401.2838, 2014.
+
+Mnih, Andriy and Gregor, Karol. Neural variational inference and learning in belief networks.
+
+arXiv:1402.0030, 2014.
+
+Mnih, Andriy and Rezende, Danilo J. Variational inference for monte carlo objectives. arXiv
+
+preprint arXiv:1602.06725, 2016.
+
+Moreno, Pol, Humplik, Jan, Papamakarios, George, Avila Pires, Bernardo, Buesing, Lars, Heess,
+Nicolas, and Weber, Theophane. Neural belief states for partially observed domains. NeurIPS
+2018 workshop on Reinforcement Learning under Partial Observability, 2018.
+
+Naumann, Uwe. Optimal jacobian accumulation is np-complete. Mathematical Programming, 112
+
+(2):427–441, 2008.
+
+Ng, Andrew Y, Harada, Daishi, and Russell, Stuart. Policy invariance under reward transformations:
+
+Theory and application to reward shaping. In ICML, volume 99, pp. 278–287, 1999.
+
+Ong, Victor MH, Nott, David J, Tran, Minh-Ngoc, Sisson, Scott A, and Drovandi, Christopher C.
+Variational bayes with synthetic likelihood. Statistics and Computing, 28(4):971–988, 2018.
+
+Paisley, John, Blei, David, and Jordan, Michael. Variational bayesian inference with stochastic
+
+search. arXiv preprint arXiv:1206.6430, 2012.
+
+Parmas, Paavo. Total stochastic gradient algorithms and applications in reinforcement learning. In
+Bengio, S., Wallach, H., Larochelle, H., Grauman, K., Cesa-Bianchi, N., and Garnett, R. (eds.),
+Advances in Neural Information Processing Systems 31, pp. 10224–10234. 2018.
+
+Peng, Xue Bin, Andrychowicz, Marcin, Zaremba, Wojciech, and Abbeel, Pieter. Sim-to-real transfer
+
+of robotic control with dynamics randomization. arXiv preprint arXiv:1710.06537, 2017.
+
+Pich´e, Alexandre, Thomas, Valentin, Ibrahim, Cyril, Bengio, Yoshua, and Pal, Chris. Probabilistic
+planning with sequential monte carlo methods. In International Conference on Learning Repre-
+sentations, 2019. URL https://openreview.net/forum?id=ByetGn0cYX.
+
+Plappert, Matthias, Houthooft, Rein, Dhariwal, Prafulla, Sidor, Szymon, Chen, Richard Y, Chen,
+Xi, Asfour, Tamim, Abbeel, Pieter, and Andrychowicz, Marcin. Parameter space noise for explo-
+ration. arXiv preprint arXiv:1706.01905, 2017.
+
+Ranganath, Rajesh, Gerrish, Sean, and Blei, David M. Black box variational inference. arXiv
+
+preprint arXiv:1401.0118, 2013.
+
+Rezende, Danilo Jimenez, Mohamed, Shakir, and Wierstra, Daan. Stochastic backpropagation and
+
+approximate inference in deep generative models. arXiv:1401.4082, 2014.
+
+30
+
+Robbins, Herbert and Monro, Sutton. A stochastic approximation method.
+
+In Herbert Robbins
+
+Selected Papers, pp. 102–109. Springer, 1985.
+
+Rumelhart, David E, Hinton, Geoffrey E, and Williams, Ronald J. Learning internal representations
+by error propagation. Technical report, California Univ San Diego La Jolla Inst for Cognitive
+Science, 1985.
+
+Schmidt, Mark, Roux, Nicolas L, and Bach, Francis R. Convergence rates of inexact proximal-
+gradient methods for convex optimization. In Advances in neural information processing systems,
+pp. 1458–1466, 2011.
+
+Schulman, John, Heess, Nicolas, Weber, Theophane, and Abbeel, Pieter. Gradient estimation using
+stochastic computation graphs. In Advances in Neural Information Processing Systems, pp. 3528–
+3536, 2015a.
+
+Schulman, John, Moritz, Philipp, Levine, Sergey, Jordan, Michael, and Abbeel, Pieter. High-
+arXiv preprint
+
+dimensional continuous control using generalized advantage estimation.
+arXiv:1506.02438, 2015b.
+
+Silver, David, Lever, Guy, Heess, Nicolas, Degris, Thomas, Wierstra, Daan, and Riedmiller, Martin.
+
+Deterministic policy gradient algorithms. In ICML, 2014.
+
+Sutton, Richard S, McAllester, David A, Singh, Satinder P, and Mansour, Yishay. Policy gradient
+methods for reinforcement learning with function approximation. In Advances in neural informa-
+tion processing systems, pp. 1057–1063, 2000.
+
+Tucker, George, Mnih, Andriy, Maddison, Chris J, Lawson, John, and Sohl-Dickstein, Jascha. Re-
+bar: Low-variance, unbiased gradient estimates for discrete latent variable models. In Advances
+in Neural Information Processing Systems, pp. 2627–2636, 2017.
+
+Tucker, George, Bhupatiraju, Surya, Gu, Shixiang, Turner, Richard E, Ghahramani, Zoubin, and
+Levine, Sergey. The mirage of action-dependent baselines in reinforcement learning. arXiv
+preprint arXiv:1802.10031, 2018.
+
+Weber, Theophane, Heess, Nicolas, Eslami, Ali, Schulman, John, Wingate, David, and Silver,
+David. Reinforced variational inference. In Advances in Neural Information Processing Systems
+(NIPS) Workshops, 2015.
+
+Werbos, Paul J. Applications of advances in nonlinear sensitivity analysis. In System modeling and
+
+optimization, pp. 762–770. Springer, 1982.
+
+Wierstra, Daan and Schmidhuber, J¨urgen. Policy gradient critics.
+
+In European Conference on
+
+Machine Learning, pp. 466–477. Springer, 2007.
+
+Williams, Ronald J. Simple statistical gradient-following algorithms for connectionist reinforcement
+
+learning. Machine learning, 8(3-4):229–256, 1992.
+
+Wingate, David and Weber, Theophane. Automated variational inference in probabilistic program-
+
+ming. arXiv preprint arXiv:1301.1299, 2013.
+
+Wu, Cathy, Rajeswaran, Aravind, Duan, Yan, Kumar, Vikash, Bayen, Alexandre M., Kakade, Sham,
+Mordatch, Igor, and Abbeel, Pieter. Variance reduction for policy gradient with action-dependent
+factorized baselines. CoRR, abs/1803.07246, 2018. URL http://arxiv.org/abs/1803.
+07246.
+
+Xu, Xiaoran, Zu, Songpeng, and Zhou, Hanning. Backprop-q: Generalized backpropagation for
+
+stochastic computation graphs. arXiv preprint arXiv:1807.09511, 2018.
+
+31
+
+A GRADIENT-CRITIC EXTENSIONS
+
+For variables x, y, and a set of variables v1, . . . , vd, dy
+dx|(v1,...,vd) is the total gradient of y with respect
+to x, but keeping the values of vi constant (i. e. the nodes vi are not back-propagated through when
+computing dy
+
+dx ).
+
+A.1 GENERAL FORM OF THE ‘HORIZON’ BACKPROPAGATION
+
+We ﬁrst extend equation (8) to the more general case where the separator set (v1, v2, . . . , vd) is not
+necessarily unordered. We only require the nodes to be topologically ordered (i.e. if vi is an ancestor
+of vj, i ≤ j). The more general form of ‘horizon’ backpropagation is given by the following:
+
+dLs
+dv
+
+(cid:88)
+
+=
+
+i
+
+dLs
+dvi
+
+dvi
+dv
+
+(cid:12)
+(cid:12)
+(cid:12)v1,...,vi−1
+
+From which the corresponding horizon stochastic backpropagation immediately follows:
+(cid:34)
+
+(cid:35)
+
+EG
+
+(cid:21)
+
+(cid:20) dLs
+dv
+
+= EG
+
+dLs
+dvi
+
+dvi
+dv
+
+(cid:12)
+(cid:12)
+(cid:12)v1,...,vi−1
+
+(cid:88)
+
+i
+
+A.2 NOTATIONAL HAZARDS FOR GRADIENTS
+
+Before going further, we work out through a few examples to highlight subtleties regarding the
+notation used for gradients, as well as the backpropagation equations given in equation (7) and in
+particular the version found in (25). Note the latter is equivalent to backpropagation, but written
+in a way which tries to decouple the backpropagation updates which happen ‘upstream’ and ‘down-
+stream’ of a group of nodes which are not necessarily the children of v.
+
+Figure 16: Examples for backpropagation equa-
+tions. a) In this example, we have v1 = f1(v),
+v2 = f2(v, v1) and (cid:96) = f(cid:96)(v1, v2).
+b) An example for the total gradient version of
+backpropagation.
+In this example, we have the
+following equations:
+At the ﬁrst layer, v1 = f1(x) and v2 = f2(v1, x)
+At the second layer, v3 = f3(v1) and v4 =
+f4(v2, v3)
+Finally, (cid:96) = f(cid:96)(v3, v4).
+
+We wish to compute d(cid:96)
+
+dv . We ﬁrst work through the ﬁrst example. Following the chain rule, we have
+
+d(cid:96)
+dv
+
+=
+
+∂(cid:96)
+∂v1
+
+∂v1
+∂v
+
++
+
+∂(cid:96)
+∂v2
+
+(cid:18) ∂v2
+∂v1
+
+∂v1
+∂v
+
++
+
+∂v2
+∂v
+
+(cid:19)
+
+We also have the following equations:
+
+=
+
++
+
+d(cid:96)
+dv1
+
+∂(cid:96)
+∂v1
+
+∂(cid:96)
+∂v2
+
+∂v2
+∂v1
+
+∂v1
+∂v
+(27)
+From which we have the two equivalent forms of the chain rule. The ﬁrst is equation (7), and is the
+last computation performed by backpropagation:
+
+∂v2
+∂v1
+
+∂(cid:96)
+∂v2
+
+∂v1
+∂v
+
+∂v2
+∂v
+
+d(cid:96)
+dv2
+
+dv2
+dv
+
+dv1
+dv
+
+=
+
+=
+
+=
+
++
+
+;
+
+;
+
+;
+
+d(cid:96)
+dv
+
+=
+
+d(cid:96)
+dv1
+
+∂v1
+∂v
+
++
+
+d(cid:96)
+dv2
+
+∂v2
+∂v
+
+32
+
+(24)
+
+(25)
+
+(26)
+
+(28)
+
+The second is related to forward differentiation:
+dv1
+dv
+
+d(cid:96)
+dv
+
+∂(cid:96)
+∂v1
+
+=
+
++
+
+∂(cid:96)
+∂v2
+
+dv2
+dv
+
+(29)
+
+(32)
+
+We now move on to the second example. Again, fully expanding the chain rule, and summing over
+all paths, we have:
+∂(cid:96)
+d(cid:96)
+∂v3
+dv
+
+∂v4
+∂v2
+
+∂v3
+∂v1
+
+∂(cid:96)
+∂v4
+
+∂v3
+∂v1
+
+∂(cid:96)
+∂v4
+
+∂v4
+∂v3
+
+∂v4
+∂v2
+
+∂(cid:96)
+∂v4
+
+∂v2
+∂v1
+
+∂v1
+∂v
+
+∂v1
+∂v
+
+∂v2
+∂v
+
+∂v1
+∂v
+
+(30)
+
++
+
++
+
++
+
+=
+
+Let us ﬁrst consider the horizon set {v2, v3}. Note this set is unordered, we could compute v2 ﬁrst,
+dv2
+then v3, or vice-versa. Equation (8) applies, which takes the form: d(cid:96)
+dv follows,
+which can be veriﬁed from the following equations:
+
+dv3
+dv + d(cid:96)
+dv2
+
+dv = d(cid:96)
+dv3
+
+d(cid:96)
+dv3
+
+=
+
+∂(cid:96)
+∂v3
+
++
+
+∂(cid:96)
+∂v4
+
+∂v4
+∂v3
+
+;
+
+d(cid:96)
+dv2
+
+=
+
+∂(cid:96)
+∂v4
+
+∂v4
+∂v2
+
+;
+
+dv3
+dv
+
+=
+
+∂v3
+∂v1
+
+∂v1
+∂v
+
+;
+
+dv2
+dv
+
+=
+
+∂v2
+∂v1
+
+∂v1
+∂v
+
++
+
+∂v2
+∂v
+
+(31)
+
+Next, consider the horizon set {v3, v4}. Note that v3 has to be computed before v4. First note we
+have d(cid:96)
+. We can compute the total gradients of v3 and v4 with
+dv3
+respect to v:
+
+and d(cid:96)
+dv4
+
+= ∂(cid:96)
+∂v3
+
+= ∂(cid:96)
+∂v4
+
++ ∂(cid:96)
+∂v4
+
+∂v4
+∂v3
+
+dv3
+dv
+dv4
+dv
+
+=
+
+∂v3
+∂v1
+∂v4
+∂v3
+
+∂v1
+∂v
+∂v3
+∂v1
+
+=
+
+∂v4
+∂v1
+∂v2
+∂v
+dv4
+A naive application of horizon backprop (equation (8)), i.e. d(cid:96)
+dv = d(cid:96)
+dv is incorrect,
+dv3
+∂v1
+because the term ∂(cid:96)
+∂v is double-counted. Following equation (25) instead, we keep v3
+∂v4
+constant when computing the gradient of v4 with respect to v, and obtain:
+
+∂v2
+∂v
+dv3
+dv + d(cid:96)
+dv4
+
+∂v4
+∂v2
+
+∂v2
+∂v1
+
+∂v1
+∂v
+
+∂v3
+∂v1
+
+∂v4
+∂v3
+
+(33)
+
++
+
++
+
+dv4
+dv
+dv = d(cid:96)
+dv3
+
+=
+
+(cid:12)
+∂v4
+(cid:12)
+(cid:12)v3
+∂v2
+dv3
+dv + d(cid:96)
+dv4
+
++
+
+∂v4
+∂v2
+
+∂v2
+∂v1
+∂v
+∂v1
+dv4
+, as per equation (8). Note we also have d(cid:96)
+dv |v3
+
+∂v2
+∂v
+
+dv =
+
+(34)
+
+and we correctly have d(cid:96)
+dv3
+dv + d(cid:96)
+d(cid:96)
+dv4
+dv3
+
+|v4
+
+dv4
+dv , which is closer to equation (29).
+
+A.3 EXTENSION TO THE GRADIENT-CRITIC THEOREM IN THE GENERAL CASE
+
+In this section, we provide an extension to the gradient-critic theorem 5 to the more general case.
+Theorem 8. If for each i, dvi
+dv
+
+are conditionally independent given Cvi,
+
+(cid:12)
+(cid:12)
+(cid:12)v1,...,vi−1
+(cid:21)
+(cid:20) dLs
+dv
+
+EG
+
+and dLs
+dvi
+(cid:34)
+
+= EG
+
+(cid:35)
+
+(cid:88)
+
+gvi
+
+i
+
+dvi
+dv
+
+(cid:12)
+(cid:12)
+(cid:12)v1,...,vi−1
+
+Similarly:
+Theorem 9. Consider a node v, separator set (v1, . . . , vd). Consider critics gv with set Cv and
+(gv1 , gv2 , . . . , gvd ) with sets (Cv1 , . . . , Cvd ). Suppose that for all i, Cvi ⊃ Cv and let ∆i = Cvi \ Cv.
+Then,
+
+gv =
+
+E∆i|Cv
+
+(cid:88)
+
+i
+
+(cid:20)
+gvi
+
+(cid:21)
+
+dvi
+dv
+
+(cid:12)
+(cid:12)
+(cid:12)(vj )j≤i
+
+(35)
+
+dv |v1,...,vi−1
+
+Note that while the quantities dvi
+may appear intimidating, they are implicitly the co-
+efﬁcients applied by backpropagation to the loss sensitivity dLs
+at a node vi when computing
+dvi
+dLs
+dv . In other words, if one replaces or initializes dLs
+by gvi in the backward graph and proceeds
+with backpropagation as usual, the resulting quantity compute at the root node will be effectively
+(cid:80) gvi
+; this implies that the bias in the gradient estimator will only come from the bias in
+critics themselves (not how they are used), and that for asymptotically perfect critics, the gradient
+estimator will be unbiased.
+
+dvi
+dv |(vj )j≤i
+
+dvi
+
+33
+
+B DISCUSSIONS
+
+B.1 OPTIMAL BASELINE AND VALUE FUNCTION BASELINE
+
+The estimator of theorem 2 is unbiased regardless of the choice of the baseline B(B), which only
+affects the variance. A well-chosen baseline will reduce the variance of the gradient estimator. It is
+in general difﬁcult to estimate or minimize the variance of the full estimator directly, however, we
+can derive a baseline which minimizes the variance of each qv.
+Deﬁnition 10. We say that a baseline set B is congruent with a critic set C if it subset of C.
+Theorem 10. Let s(v, θ) be the score function d
+dθ log pv, and consider a ﬁxed critic set C and
+congruent baseline set B. The following B∗(B) is the baseline for B which minimizes the variance
+of Gv:
+
+B∗(B) =
+
+EG\B|B
+
+(cid:2)s(v, θ)2Q(C)(cid:3)
+
+EG\B|B
+
+(cid:2)s(v, θ)2L(v)(cid:3)
+
+EG\B|B [s(v, θ)2]
+
+EG\B|B [s(v, θ)2]
+
+=
+
+.
+
+Furthermore, for two congruent sets B1 ⊂ B2, the variance of Gv using B∗(B1) is larger or equal
+than when using B∗(B2).
+
+This form of the optimal baseline is folklore, and can be found (in the context of RL) in (Greensmith
+et al., 2004) and (Ranganath et al., 2013) (in the context of VI).
+
+B.2 CHOOSING CONDITIONING SETS OF VALUE FUNCTIONS AND CRITICS
+
+From our main theorem 2, we know that valid critic and baseline sets together deﬁne a new estimate
+for the gradient of a stochastic computation graph. But how should one choose the critic and baseline
+sets? We discuss here the tradeoffs made when choosing different sets.
+
+• Given a critic with conditioning set C, how to choose an appropriate set B for the value?
+
+For congruent optimal baselines, theorem 10 states that variance is always reduced by increasing
+the conditioning set B. For the optimal baseline, this implies it is optimal to choose B to be the
+intersection of C and the set of non-descendants of v. A related statement happens to be true for
+value baselines:
+Lemma 4. Consider two congruent baseline sets B1 ⊂ B2 ⊂ C. Then the variance of the advantage
+using B1 is higher than that using B2:
+
+E
+
+(Q(C) − V (B2))2(cid:105)
+(cid:104)
+
+≤ E
+
+(Q(C) − V (B1))2(cid:105)
+(cid:104)
+
+• Is there any point in using non-congruent value functions (i.e. using a conditioning set B
+which is not a subset of the critic set C)?
+
+The previous lemma suggests, but does not prove, that value functions should also be conditioned
+on the maximal congruent set B∗, intersection of C with the non-descendants of v. One may wonder
+the usefulness of non-congruent value functions. Intuitively, variables in B \ C have already been
+averaged in the critic, so it would be tempting to disregard non-congruent baselines. The answer is
+here more complicated; non-congruent baselines may increasing or decrease variance, depending on
+correlations between value and critics, as we see in the following two examples.
+
+Figure 17: Constructing value sets. In (a), non-congruent baselines increase variance, in (b), they decrease it.
+
+Example 2. Consider the example of ﬁgure 17(a), where we consider two variables z ∼ pθ(z), z(cid:48) ∼
+N (0, σ), a loss function (cid:96)(z, z(cid:48)) = (cid:96)(z) + z(cid:48). Assume that the variance σ of z(cid:48) is large, that all
+
+34
+
+variables are observed. Because z(cid:48) has large variance, it tends to dominate the loss, even if it is not
+Ez,z(cid:48) [(cid:96)(z, z(cid:48))] is given, per theorem 2, by
+controllable by changing θ. The gradient estimate for d
+dθ
+d
+dθ log pθ(z)(Q(C) − Vz(B).
+The ‘naive’ estimate consists in using the empirical loss ((cid:96)(z) + z(cid:48)) as critic (which is equivalent to
+choosing C = {z, z(cid:48)}) and a baseline equal to E[(cid:96)(z)] (obtained by choosing the value set B = ∅);
+the resulting advantage (cid:96)(z) − E[(cid:96)(z)] + z(cid:48) has high variance due to z(cid:48). A lower variance estimate
+can be obtained by choosing either C = {z} and maximally congruent B = ∅, or C = {z, z(cid:48)} and
+maximally congruent B = {z(cid:48)}; both lead to the same low-variance estimate (cid:96)(z) − E[(cid:96)(z)] of the
+advantage.
+
+However, if we use C = {z} and non-congruent B = {z(cid:48)}, we obtain the high variance estimate
+again.
+Example 3. Consider next the example in ﬁgure 17(b), with z ∼ pθ(z), v0 ∼ N (0, σ); v1 and v(cid:48)
+1
+are conditionally independent with respective distributions N ((cid:96)(z) + v0, σ(cid:48)) and N (v0, σ(cid:48)), with
+σ(cid:48) << σ. Suppose that (cid:96)(v1, v(cid:48)
+1 and that all variables but v0 are observed. Taking
+for instance critic set C = {z, v1} and congruent set B = ∅, we have Q(C) − V (B) = ((cid:96)(z) −
+E[(cid:96)(z)]) + 2(v1 − (cid:96)(z)), which is high variance because (v1 − (cid:96)(z)) has variance at least as high
+as v0.
+Note however that if we choose the non-congruent set B = {v(cid:48)
+Q − V = ((cid:96)(z) − E[(cid:96)(z)]) + 2(v1 − (cid:96)(z) − v(cid:48)
+only has variance σ(cid:48).
+
+1, so that
+1), which is much lower variance since (v1 − (cid:96)(z) − v(cid:48)
+1)
+
+1}, then V (B) = E[(cid:96)(z)]+2v(cid:48)
+
+1) = v1 + v(cid:48)
+
+• Having looking at the conditioning set of the value function, we look at the following
+question: how should we construct a critic conditioning set C?
+
+A Rao-Blackwellization argument suggests that marginalizing out as many variables as possible
+leads to the lowest variance. However, this is assuming exact conditional expectations. However,
+in practice those are not easily computed and we will resort to function approximation (see sec-
+tion 3.5). When using function approximations to our estimates of value and functions, there will be
+a bias-variance trade-off between using approximate critic which marginalizes out random variable
+(which leads to bias) or using model samples of the losses (which leads to variance). Furthermore,
+the re-usability of a particular value function for multiple purposes (e.g. to serve as part of critics
+for multiple nodes, and / or as bootstrap target(s), see below) can motivate more limited marginal-
+ization).
+
+B.3 CRITIC CORRECTION WHEN USING GRADIENT-CRITICS
+
+A common pattern is to use critic to approximate a model that has no gradient, or whose gradients
+are unknown. In the case we use a Markovian set for the critic, we can learn the critic from predicted
+losses only (i.e. set α to 0 in equation 11), but then use the corresponding gradient as a gradient-
+critic in the reparameterized graph. The use of the critic or gradient critic incurs a bias in the
+estimator. Here we see a technique which combines gradient-critics and critics in order to build
+an unbiased estimator which still leverages the gradient-critic (this technique can in fact be used
+anytime a gradient-critic is used) Consider a stochastic node v which can be reparametrized, let
+L(v) be the sum of all downstream losses from v. Consider a Markovian critic set Cv for v and let
+Q(Cv) be the corresponding value critic, and ˆQ(Cv) an approximation of it. Let θv be an arbitrary
+parent of v. From theorem 7, dQ(Cv)
+
+is a valid gradient-critic for v, and we have
+
+dE[L(v)]
+dθv
+
+= E
+
+(cid:20) d log p(v)
+dθv
+
+L(v)
+
+= E
+
+(cid:20) d log p(v)
+dθv
+
+(cid:21)
+Q(Cv)
+
+= E
+
+(cid:20) dQ(Cv)
+dv
+
+dv
+dθv
+
+(cid:21)
+
+≈ E
+
+(cid:20) d log p(v)
+dθv
+
+(cid:21)
+
+ˆQ(Cv)
+
+dv
+
+(cid:21)
+
+The second equality is the regular score function estimator; the second, the score function estimator
+using critics; the third, a reparametrized estimator using gradient-critics. The last equality is the
+same as the second, but taking into account the bias induced by the use of an approximate critic.
+
+By writing the loss L(v) as the sum of two terms (L(v) − Q(Cv)) + Q(Cv), we can use the score
+function estimator on the ﬁrst term, reparameterize the second term, and therefore potentially lever-
+age the lower variance of the reparameterized gradient while keeping unbiasedness thanks to the
+
+35
+
+score function term. The resulting estimator will take the following form:
+
+dE[L(v)]
+dθv
+
+(cid:34)
+
+= E
+
+d log p(v)
+dθv
+
+(cid:16)
+
+(cid:17)
+L(v) − ˆQ(Cv)
+
++
+
+d ˆQ(Cv)
+dv
+
+dv
+dθv
+
+(cid:35)
+
+.
+
+This estimator is strongly related to Stein variational estimator, see e.g. (Liu & Wang, 2016). Note if
+the critic is exact, i.e. Q = ˆQ, the ﬁrst term has zero expectation and may be excluded. A common
+use pattern is when v is an action a (in RL) or sample z (in generative models), the critic set is
+(s, a), where s is the state (in RL) or context/previous state (in generative models). This technique
+sometimes called ‘action-conditional baselines’ in the literature, see for instance (Tucker et al., 2017;
+Gu et al., 2015; Grathwohl et al., 2017). Is it however not clear that the bias correction does not
+increase the variance in such a way that the gradients from reparameterization become dominated
+by the noise of the score function (Tucker et al., 2018). Interestingly, the action-conditional baseline
+literature takes an almost opposed interpretation to ours: while we see the (L(v) − ˆQ(C)) as a
+correction to the biased estimator resulting using an approximate critic ˆQ(C), (Tucker et al., 2017;
+Grathwohl et al., 2017) view instead the critic as an ‘invalid’ baseline (as in, it biases the gradient of
+the score function estimator), which needs to be corrected with the reparametrized term d ˆQ(Cv)
+dv
+.
+dθv
+In our view, this interpretation suffers from not having a natural way for trading off bias and variance,
+L(v) − ˆQ(Cv)
+) with a coefﬁcient less than 1 or leaving
+for instance weighting the correction term
+it out entirely.
+
+(cid:16)
+
+(cid:17)
+
+dv
+
+C PROOFS
+
+For any node v, let Gv be the set of non-descendants of v.
+
+C.1 COMPUTATION LEMMAS
+
+We provide a couple of useful lemmas describing properties of the computation resulting from a
+stochastic computation graph.
+
+Our ﬁrst lemma describes a set which deterministically computes (cid:96) given information in a set C,
+where C is ‘as far away’ from (cid:96) as possible.
+
+Lemma 5. Consider a cost (cid:96) and arbitrary set C for which (cid:96) descends from C. Let a sequence of set
+Vi be described as follows:V0 = {(cid:96)}, and for any i ≥ 1, we let Vi be deﬁned as follows:
+
+• Any stochastic or input node in Vi−1 is included in Vi.
+
+• Any node in C ∩ Vi−1 is included in Vi.
+
+• The parents of any deterministic node in Vi−1 \ C are included in Vi.
+
+Then, for any i, (cid:96) can be deterministically computed from Vi. Furthermore, the set converges to a
+set V which only contains stochastic nodes, input nodes, and nodes in C.
+
+Proof. The ﬁrst part of the proof is a simple recursion. (cid:96) is clearly a deterministic function of (cid:96).
+Assume now that (cid:96) is a deterministic function of Vi, and consider the set Vi+1. For any variable v
+in Vi, it is either in Vi+1, or a deterministic function of its parents, which are included in Vi+1. It
+follows that (cid:96) is a deterministic function of Vi+1. For proving convergence, the set of nodes which
+are are in Vi and either in C, stochastic, or input nodes is non-decreasing (since nodes of that type
+stay in Vi if they are in Vi−1). As for deterministic nodes, they can only be in Vi if they are in C
+or if they are in a directed path of distance i to (cid:96). This means that for j greater than the the longest
+directed path between a node and (cid:96), Vj can only contain deterministic nodes if they are in C (which
+proves the second part of the lemma). Together, these statements imply that for j(cid:48) ≥ j, the set Vj(cid:48) is
+non-increasing, and it is bounded, therefore it converges.
+
+We provide a pictorial representation of the algorithm for a given graph as follows:
+
+36
+
+Figure 18: Illustration of the algorithm described in Lemma 5. The set C is indicated by nodes with dark red
+background, the sets Vi by nodes with blue frame. The algorithm ﬁnishes at the third step, since the resulting
+set is stable. (cid:96) can indeed be deterministically computed from v2, v3 and v4.
+
+When C is Markovian, the set V has an important property which we will later use.
+
+Property 3. Let W(V) be the set of stochastic ancestors of nodes in V, unblocked by C. We have:
+
+P (W|C) =
+
+p(w|hw(C))
+
+(cid:89)
+
+w∈cW
+
+(36)
+
+where the notation hw(C) is simply to indicate that the simple forward computation of hw depends
+on the values of variables in C which are ancestors of variables in W.
+
+In other words, to sample all the variables in W, we can simply use the forward model; the con-
+ditioning set C only plays a role in setting the value of ancestors for some of the variables in that
+set.
+
+In the example above, the set W is {v3, v1}; this is because v3 is in V (but not in C) and v1 is an
+ancestor of v3, unblocked by C. The node vr is not included in W because it is in C. Conditional on
+C, the distribution of W is given by p(v1|vr)p(v3|v1).
+
+Proof of Prop. 3. By the deﬁnition of Markovianity, nodes in W cannot have a descendent in C. The
+property follows from applying Bayes’ rule. Using a graph-compatible ordering of variables in wi,
+we have: P (W|C) = (cid:81)
+. At this point we simply write numerator
+and denominators as product of probabilities of variables conditioned on parents; because none of
+the variables in C descend from a variable in W, all terms cancel out except for p(wi|hwi), which
+gives us the desired result.
+
+i p(wi|C, w<i) = (cid:81)
+
+p(wi,C,w<i)
+p(C,w<i)
+
+i
+
+Our second lemma relates conditional independence between variables to conditional independence
+between derivatives.
+Lemma 6. Assume that log pv is conditionally independent of cost (cid:96) given C. Then d log pv
+conditionally independent of (cid:96) given C.
+
+is
+
+dθ
+
+Proof. By forward mode differentiation, the stochastic computation which describes the computa-
+tion of C, (cid:96) and log πv can also describe the computation of C, (cid:96) and (log pv, d log pv
+). If the graph
+properties imply conditional independence of log pv and (cid:96) given C, they therefore also imply con-
+ditional independence of (cid:96) and d log pv
+given C. Note this is only true because we only consider
+graph-induced conditional independence properties.
+
+dθ
+
+dθ
+
+For similar reasons, we have:
+
+Lemma 7. Let u, v, w be nodes in a graph, and let C be an arbitrary set.
+are conditionally independent given C if {u(cid:48)
+v(cid:48) is in a path between v and w} are conditionally independent given C.
+
+: u(cid:48) is in a path between u and v} and {v(cid:48)
+
+du and dw
+dv
+:
+
+dv
+
+37
+
+C.2 PROOFS OF RESULTS FOR VALUE-BASED METHODS
+Proof of Theorem 2. We prove theorem 2 by proving that for any node v in S, E (cid:2) d
+dθ log pvL(cid:3) =
+E[qv]. To do so, we follow three steps: 1) show that L can be replaced by L(v), 2) show that any
+baseline B can be subtracted from L(v) (and hence, a value baseline can be subtracted), and 3) show
+that L(v) can be replaced by a critic Q(C).
+
+For any node v in S, consider any cost (cid:96) non-descendant from v, i (cid:96) ∈ Gv. the contribution of v to
+the gradient estimate with respect to (cid:96) is E (cid:2) d
+dθ log pv(cid:96)(cid:3). Using G = Gv ∪ (G \ Gv) and the law of
+iterated expectations, we obtain:
+
+E
+
+(cid:20) d
+dθ
+
+(cid:21)
+log pv(cid:96)
+
+(cid:20)
+
+E
+
+(cid:20)
+(cid:96) E
+
+=E
+
+Gv
+
+=E
+
+Gv
+
+G\Gv|Gv
+
+log pv(cid:96)
+
+(cid:21)(cid:21)
+
+(cid:21)(cid:21)
+
+(cid:20) d
+dθ
+(cid:20) d
+dθ
+
+G\Gv|Gv
+
+log pv
+
+= 0
+
+The second equality comes from the fact that this particular (cid:96) is a deterministic function of Gv (since
+it is a non-descendant of v). The third equality comes from the following:
+(cid:21)
+
+(cid:90)
+
+EG\Gv|Gv
+
+(cid:20) d
+dθ
+
+log pv
+
+=
+
+p(v|hv)
+
+log p(v|hv)
+
+d
+dθ
+d
+dθ p(v|hv)
+p(v|hv)
+d
+dθ
+
+(cid:90)
+
+v
+
+p(v|hv)
+
+v
+(cid:90)
+
+v
+(cid:90)
+
+v
+
+=
+
+=
+
+d
+dθ
+
+p(v|hv) =
+
+p(v|hv) =
+
+1 = 0
+
+d
+dθ
+
+It is important to note that conditional on the non-descendants Gv (which includes the parents hv of
+v, but no descendants) the distribution of v is simply p(v|hv). Using the same idea, we show that
+subtracting a baseline does not bias the expectation:
+
+(cid:21)
+log pvV (B)
+
+(cid:20)
+
+E
+
+=E
+
+Gv
+
+G\Gv|Gv
+
+(cid:20) d
+dθ
+
+log pvB(B)
+
+(cid:21)(cid:21)
+
+(cid:20)
+B(B)E
+
+= E
+
+Gv
+
+G\Gv|Gv
+
+(cid:20) d
+dθ
+
+(cid:21)(cid:21)
+
+log pv
+
+= 0
+
+E
+
+(cid:20) d
+dθ
+Finally,
+
+E
+
+(cid:20) d
+dθ
+
+(cid:21)
+log pvL(v)
+
+=ECv
+
+(cid:20)(cid:18) d
+dθ
+(cid:21)
+
+log pv|C
+
+(cid:19)
+
+(cid:21)(cid:21)
+
+log pv
+
+L(v)
+
+(cid:21)
+E [L(v)|C]
+
+(cid:20)
+EG\Cv|Cv
+(cid:20) d
+(cid:20)
+dθ
+(cid:20) d
+dθ
+
+E
+
+E
+
+(cid:20)
+
+(cid:20)
+
+(cid:20)
+
+E
+
+(cid:21)
+
+(cid:21)
+
+log pv|C
+
+Q(C)
+
+Q(C)
+
+log pv|C
+
+(cid:21)(cid:21)
+
+d
+dθ
+
+(cid:21)
+
+Q(C)
+
+log pv
+
+d
+dθ
+
+=ECv
+
+=ECv
+
+=ECv
+(cid:20)
+
+=E
+
+where the second line comes from the conditional independence of L(v) and d
+dθ log pv given C
+(following the conditional independence of L(v) and log pv, and applying lemma 6), the third line
+follows from the deﬁnition of the critic, and the fourth from the fact that the critic is constant as a
+function of C.
+
+Proof of Theorem 10. The variance of qv is Var(qv) = E[q2
+v] − E[qv]2. Since the later term is un-
+affected by the choice of the baseline function, minimizing the variance is equivalent to minimizing
+E[q2
+v].
+
+E[q2
+
+v] =E
+
+(cid:104)
+
+sθ(v, hv)2 (Q(v, C) − V (B))2(cid:105)
+
+(cid:16)
+
+p(B = b)
+
+EG\B|B=b
+
+θ (Q(v, C) − B(b))2(cid:105)(cid:17)
+(cid:104)
+s2
+
+(cid:88)
+
+=
+
+b
+
+38
+
+The expression above is a sum of non-negative expressions, each involving a distinct B(b) to op-
+timize. The sum is jointly minimized if each is minimized. For a given b, we take the gradient of
+EG\B|B=b
+
+with respect to B(b) and set it to zero; we ﬁnd:
+
+θ (Q(v, C) − B(b))2(cid:105)
+s2
+
+(cid:104)
+
+To prove the second equality, simply note that B ⊂ C (since the baseline is congruent); it follows
+that:
+
+B∗(B) =
+
+EG\B|B
+
+θQ(v, C)(cid:3)
+(cid:2)s2
+EG\B|B [s2
+θ]
+
+EG\B|B
+
+(cid:2)s2
+
+θL(v)(cid:3) = EC\B|B
+= EC\B|B
+
+θL(v)(cid:3)
+
+(cid:2)EG\C|Cs2
+θQ(v, C)(cid:3)
+(cid:2)s2
+
+Next, we consider two conditioning sets B1 ⊂ B2, with respective optimal baselines B∗
+2 (as
+deﬁned above). For an assignment b of variables in B2, let b|1 be the restriction of b to the variables
+found in B1. We can construct a baseline B with set B2 by choosing V (b) = V ∗
+1 (b|1); this is a
+valid baseline for set B2, but is strictly equivalent to using the optimal baseline B∗
+1 for set B1. By
+optimality of B∗(B2), the variance of qv using B∗(B1) is higher than using B∗(B2).
+
+1 and B∗
+
+Proof of lemma 2. Consider X 1
+V (X 1
+E[V (X 2
+
+v ) = E[L(v)|X 1
+v )|X 1
+v ].
+
+v ]. By the law of iterated expectation, E[L(v)|X 1
+
+v . By deﬁnition of the conditional expectation, we have
+v ] =
+
+v ] = E[E[L(v)|X 2
+
+v ]|X 1
+
+v ⊂ X 2
+
+Proof of property 2. Applying property 3, we can see that the conditional distribution of W given Xv
+v is the same (direct stochastic ancestors to a variable in W cannot be in X ↑
+and X ↑
+v \ Xv), therefore
+v ⊂ X ↑
+the conditional expectations are the same. By law of iterated expectations, for Xv ⊂ X (cid:48)
+v ,
+V (X (cid:48)
+
+v) = E[E[L(v)|X ↑
+
+v] = E[V (Xv)|X (cid:48)
+
+v] = E[V (X ↑
+
+v] = V (Xv).
+
+v )|X (cid:48)
+
+v ]|X (cid:48)
+
+Proof of lemma 3. Since X 1 ⊂ X 2↑, by Lemma 2, we have V (X 1) = E[V (X 2↑)|X 1]. But since
+X 2 is Markov, V (X 2↑) = V (X 2) and the lemma follows.
+
+Proof of theorem 3. By the decomposition assumption, we have:
+
+Taking expectations conditional on X , we obtain
+
+L(v) =
+
+L(Vi)
+
+(cid:88)
+
+i
+
+V (X ) = E[L(v)|X ] =
+
+E [Lvi|X ]
+
+(cid:88)
+
+i
+
+For each i, V (XVi) = E[L(Vi)|XVi ]; by lemma 3, E [L(Vi)|X ] = E[V (XVi|X ].
+
+Proof of Lemma 4. This follows from classical manipulation regarding conditional expectation:
+
+E (cid:2)(Q(C) − V (B2))2|B2
+
+(cid:3) =E
+
+(Q(C) − V (B1)) + (V (B1) − V (B2))
+
+(cid:21)
+
+(cid:17)2(cid:12)
+(cid:12)
+(cid:12)B2
+
+(cid:20)(cid:16)
+
+(cid:104)
+=E
+
+(Q(C) − V (B1))2 + (V (B1) − V (B2))2
+(cid:105)
+
++ 2(Q(C) − V (B1))(V (B1) − V (B2))
+
+(cid:12)
+(cid:12)
+(cid:12)B2
+
+The last term can be simpliﬁed:
+
+(cid:104)
+
+E
+
+(Q(C) − V (B1))(V (B1) − V (B2))
+
+(cid:105)
+
+(cid:12)
+(cid:12)
+(cid:12)B2
+
+= (V (B1) − V (B2))E
+= −(V (B1) − V (B2))2
+
+(cid:12)
+(cid:104)
+(cid:12)
+(cid:12)B2
+Q(C) − V (B1)
+
+(cid:105)
+
+39
+
+The ﬁrst equality is due to the fact that since B1 ⊂ B2, conditioned on B2, both values are constant;
+the second equality due to E[Q(C)|B2] = V (B2) due to B2 ⊂ C and the law of iterated expec-
+(cid:105)
+tations. We obtain E (cid:2)(Q(C) − V (B2))2|B2
+(cid:3) = E
+,
+which from applying the law of iterated expectation again becomes
+E (cid:2)(Q(C) − V (B2))2(cid:3) = E
+
+(Q(C) − V (B1))2 − (V (B1) − V (B2))2(cid:12)
+(cid:104)
+(cid:12)
+(cid:12)B2
+
+(Q(C) − V (B1))2 − (V (B1) − V (B2))2(cid:105)
+(cid:104)
+
+(Q(C) − V (B1))2(cid:105)
+
+≤ E
+
+(cid:104)
+
+C.3 PROOFS OF RESULTS FOR GRADIENT-BASED METHODS
+
+Proof of theorem 4. Using the iterated law of expectations once again:
+
+(cid:34)
+
+(cid:88)
+
+EG
+
+i
+
+(cid:35)
+
+dLs
+dvi
+
+∂vi
+∂v
+
+=
+
+=
+
+=
+
+(cid:88)
+
+i
+(cid:88)
+
+i
+(cid:88)
+
+i
+
+(cid:21)(cid:21)
+
+(cid:20)
+EG|Cvi
+
+ECvi
+
+(cid:20)
+EG|Cvi
+
+ECvi
+
+(cid:20) dLs
+dvi
+(cid:20) dLs
+dvi
+
+∂vi
+∂v
+(cid:21)
+
+(cid:20)
+EG|Cvi
+
+(cid:20)
+gvi
+
+ECvi
+
+∂vi
+∂v
+
+(cid:21)(cid:21)
+
+(cid:88)
+
+E
+
+=
+
+(cid:20)
+gvi
+
+i
+
+(cid:21)
+
+i
+∂vi
+∂v
+
+EG|Cvi
+
+(cid:21)(cid:21)
+
+(cid:20) ∂vi
+∂v
+
+(cid:88)
+
+=
+
+ECvi
+
+(cid:20)
+gvi
+
+EG|Cvi
+
+(cid:21)(cid:21)
+
+(cid:20) ∂vi
+∂v
+
+The third equality comes the conditional independence assumption, the fourth from the deﬁnition of
+the gradient-critic, and the fourth from the fact that the gradient-critic is a deterministic function of
+Cvi.
+
+Proof of theorem 7. From the Markov assumption, following Lemma 5 and property 3, we can write
+L(v) as a deterministic function of a set V (cid:51) v with stochastic ancestors W with P (W|C) =
+(cid:81)
+
+w∈W p(w|hw(C)).
+We have Q(C) = (cid:82)
+
+(cid:81)
+
+w∈W
+
+w∈W p(w|hw)L(v)(V). Taking the gradient with respect to v, we obtain:
+
+dQ(C)
+dv
+
+w∈W
+
+w∈W
+
+w∈W
+
+w∈W
+
+(cid:32)
+
+(cid:32)
+
+(cid:32)
+
+(cid:89)
+
+(cid:89)
+
+(cid:89)
+
+(cid:90)
+
+(cid:90)
+
+(cid:90)
+
+=
+
+=
+
+=
+
+w∈W
+
+w∈W
+
+(cid:33) (cid:32)
+
+p(w|hw)
+
+dL(v)
+dv
+
++
+
+(cid:88)
+
+w∈W
+
+d log p(w|hw)
+dv
+
+L(v)
+
+(cid:33)
+
+(cid:33)
+
+p(w|hw)
+
+L(v) +
+
+log p(w|hw)L(v)
+
+(cid:33)
+
+(cid:32)
+
+d
+dv
+
+d
+dv
+
+(cid:33)
+
+(cid:88)
+
+w∈AS
+
+(cid:21)
+
+(cid:20) d
+dv
+
+p(w|hw)
+
+v = E
+Ls
+
+Ls
+
+v|C
+
+= gv(C)
+
+40
+

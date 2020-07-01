@@ -1,0 +1,1564 @@
+9
+1
+0
+2
+ 
+v
+o
+N
+ 
+7
+2
+ 
+ 
+]
+L
+C
+.
+s
+c
+[
+ 
+ 
+2
+v
+7
+6
+3
+5
+0
+.
+9
+0
+9
+1
+:
+v
+i
+X
+r
+a
+
+Learning in Text Streams: Discovery and
+Disambiguation of Entity and Relation Instances ∗
+
+Marco Maggini, Giuseppe Marra, Stefano Melacci, Andrea Zugarini †
+
+November 28, 2019
+
+Abstract
+
+We consider a scenario where an artiﬁcial agent is reading a stream of text com-
+posed of a set of narrations, and it is informed about the identity of some of the
+individuals that are mentioned in the text portion that is currently being read. The
+agent is expected to learn to follow the narrations, thus disambiguating mentions
+and discovering new individuals. We focus on the case in which individuals are en-
+tities and relations, and we propose an end-to-end trainable memory network that
+learns to discover and disambiguate them in an online manner, performing one-
+shot learning, and dealing with a small number of sparse supervisions. Our sys-
+tem builds a not-given-in-advance knowledge base, and it improves its skills while
+reading unsupervised text. The model deals with abrupt changes in the narration,
+taking into account their effects when resolving co-references. We showcase the
+strong disambiguation and discovery skills of our model on a corpus of Wikipedia
+documents and on a newly introduced dataset, that we make publicly available.
+
+1
+
+Introduction
+
+Most of nowadays machine-learning-based approaches to language-related problems
+are deﬁned in the classical setting in which we exploit a batch of data to build powerful,
+ofﬂine predictors, especially when the data are paired with supervisions. Little has been
+done when considering the setting in which we process a continuous stream of text and
+build systems that learn and respond in an online manner. However, conversational
+systems [1], information extractors from streams of news [2], or social network data
+[3], and those systems that require interactions with the environment [4], belong to
+the latter setting. Supervisions are usually sparse and very limited, and the system is
+expected to perform “one-shot” learning and to quickly react to them.
+
+∗ c(cid:13) 2019 IEEE. Personal use of this material is permitted. Permission from IEEE must be obtained for all
+other uses, in any current or future media, including reprinting/republishing this material for advertising or
+promotional purposes, creating new collective works, for resale or redistribution to servers or lists, or reuse
+of any copyrighted component of this work in other works.
+
+†M. Maggini and S. Melacci are with the Department of Information Engineering and Mathematics,
+University of Siena, Siena, Italy. G. Marra and A. Zugarini are with the University of Florence, Florence,
+Italy.
+
+1
+
+Our work faces the problem of learning to extract information while reading a text
+stream, with the aim of identifying entities and relations in the text portion that is cur-
+rently being read. This problem is commonly tackled by assuming the existence of a
+Knowledge Base (KB) of entities and relations, where several entity/relation instances
+are paired with additional information, such as the common ways of referring to them
+or sentences/facts in which they are involved. Then, once an input sentence is pro-
+vided for reading, sub-portions of text must be linked to entity or relation instances of
+the KB. The linking process introduces the challenging issue of dealing with multiple
+distinct entities (relations) that are mentioned with the same text, and thus the system
+has to disambiguate which is the “right” entity or relation instance of the KB for the
+considered text fragment. In particular, the context around the fragment or, if needed,
+information that was provided in the previous sentences of the text stream can be used
+to perform the disambiguation. As a very simple example, consider the sentence Clyde
+went to the ofﬁce, being Clyde and the ofﬁce two text fragments that indicate entities,
+while went to is text that is about a relation. Clyde could be the mention that is used
+to indicate different people in the KB, and several ofﬁces could be mentioned by the
+expression the ofﬁce (mentions to relations follow the same logic).
+
+At a ﬁrst glance, this problem shares basic principles and intuitions with several
+existing methods, such as Entity Linking [5], Word Sense Disambiguation [6], Named
+Entity Recognition [7], Knowledge Population [8], and others (we postpone to Section
+5 the description of the related approaches). However, the problem we consider in this
+paper is way more challenging, since the aforementioned KB is not given in advance,
+and the system has to take care of progressively building it, while also using such
+KB to disambiguate the input data. This means that the system is required to decide
+whether a certain mention is about an entity/relation instance already inserted into the
+KB or if it is about a never-seen-before entity/relation, and, in that case, to update the
+KB. Moreover, since we deal with streams of text, learning is performed in an online
+manner, and the system has to take a decision before processing the following sentence.
+
+Motivated by the aforementioned challenges, in this paper we propose an end-to-
+end memory-augmented trainable system that learns to discover and disambiguate en-
+tity/relation instances in a text stream, exploiting a small number of sparse supervi-
+sions1 and operating in an online manner. In particular, this work makes the following
+(1) We propose a new online-learning method for populating a not-
+contributions.
+given-in-advance KB of entities and relations. (2) We introduce a new scheme to learn
+latent representations of entities and relations directly from data, either autonomously
+(self-learning) or using limited supervisions. Character-based encoders are exploited
+to handle small morphological variations (plurals, sufﬁxes, ...) and typos, synonymy,
+semantic similarity. (3) We present a new problem setting where the system is evalu-
+ated while reading a stream of sentences organized into short stories, requiring online
+learning capabilities. (4) We showcase the validity of our approach both in an exist-
+ing dataset made of Wikipedia articles and a new dataset that we introduce and make
+publicly available.
+
+This paper is organized as follows. Section 2 formally describes the problem we
+
+1Supervisions are indications of the precise entity/relation instance that a fragment of text refers to.
+
+2
+
+face. The inferential process of the proposed architecture is described in Section 3,
+while online learning dynamics are described in Section 4. Related work is reviewed
+in Section 5. Experiments and future plans are reported in Section 6 and 7, respectively.
+
+2 Problem Setting
+
+We consider a continuous stream of text, that at each time step t produces a sentence st.
+Groups of contiguous sentences are organized into small stories about a (not-known-
+in-advance) set of actors/objects, so that the narration is discontinuous whenever a new
+story begins.
+
+We focus on the problem of developing a system that, given st, produces its inter-
+pretation by linking text fragments to a KB, that the system is responsible of creating
+and updating (Figure 1). We think of the KB as a set of instances, and the considered
+text fragments of st are mentions to them. Some mentions are about entities, others
+are about relations. For each instance, the KB stores (possibly) multiple mentions that
+are commonly used to refer to the instance itself, as for entity 1 and 2 in Figure 1.
+On the other way around, the same mention can be shared by more than one instance,
+as in the example of Figure 1 where the same textual form Clyde refers to different
+entities (entities 1 and 6). KB instances also include information about the contexts in
+which instances have been mentioned in the stream so far, where the notion of context
+compactly indicates the whole sentence in which the instance was mentioned. Here and
+throughout the paper, we simplify the descriptions by frequently using the generic term
+instance to refer to both the cases of relations and entities, without making a precise
+distinction (if not needed).
+
+We consider the case in which text fragments of st are matched with the mentions
+in the KB to detect compatible instances. Then, instances are disambiguated by observ-
+ing the current context (that is the portion of st around the mention), and exploiting the
+knowledge about the story to which st belongs (up to the current sentence). At the
+beginning of each story, a small number of sentences are supervised with the identity
+of the mentioned entities and relations. The system is expected to follow the narration
+by disambiguating mentions, learning from such sparse supervisions (and quickly re-
+acting to them), and discovering new instances. The natural ambiguity of language,
+the discontinuous narration, and the dynamic nature of the KB, require the system to
+develop advanced disambiguation procedures to interpret st.
+
+It is worth noticing that, in the proposed setting, the system decisions on a given
+sentence are evaluated immediately when processing the following sentences, regard-
+less of whether the sentence was supervised or not. This schema gives rise to a novel
+online dynamics of the learning process, which is profoundly different from most of
+the existing approaches, being it more challenging and realistic than common batch-
+mode ofﬂine approaches (consider, for example, the case in which it is framed within
+conversational applications). This work encourages the development of new methods,
+models and datasets, for this extremely relevant, but largely unexplored setting.
+
+The proposed model has the potentiality of being enhanced by introducing a more
+structured and advanced knowledge component (types, facts, abstract notions for higher
+level inference - such as logic formulas). For example, once entities and relations are
+
+3
+
+Figure 1: Left: text stream composed of two stories. Right: an example of KB. (a)
+Input: sentences from the stream. (b) System output: mentions to entities and relations
+are detected (pale yellow and pale blue background, respectively), and linked (dashed
+lines) to KB instances (circles) - only some links are shown, for clarity. Empty circles
+are entity instances, while ﬁlled-grey circles are relation instances (circles are intended
+to also include context-related information that characterize the instances). Boxes rep-
+resent known mentions, and they are connected with the compatible instances. We
+printed with the same color those mentions that should be linked to the same instance.
+
+detected from a sentence st, they could be combined together to create symbolic rep-
+resentations of facts. Thus the KB could be represented as a knowledge graph, where
+entities are vertices and relations are the edges of the graph. As long as the knowledge
+base becomes more structured, the added information may be used to enhance the dis-
+ambiguation procedure, or to introduce a further level of abstraction on which symbolic
+reasoning can be performed. In this work we do not face the problem of designing an
+enhanced knowledge base module, but we focus on the tasks of instance discovery and
+disambiguation in text streams, that provide the basic functionalities required to link
+the input text to the instances in the KB.
+
+Section 3 will describe our model from an operational point of view, while Section
+
+4 will describe the learning dynamics associated to the online learning framework.
+
+3 Model
+
+At each time step, the system processes an input sentence s (we drop the time index, for
+simplicity), and it detects those text portions z (i.e. one or more adjacent tokens) that
+are expected to mention KB instances. This task is referred to as mention detection.
+
+4
+
+For each candidate mention z in s, the system predicts how much each KB instance
+is compatible with z in the context where it appears in s. The prediction scores are
+collected in a vector o, where each entry corresponds to a given instance in the KB.
+Then, then mention is linked to the most-likely instance y as
+
+o = φ(z, s),
+
+y = arg max(o) ,
+
+(1)
+
+where φ is the function that computes the afﬁnity scores of z with respect to all the
+KB instances, given the context of the current sentence s. In this work, we replace the
+second argument of φ by the sequence of mentions detected in s, excluding z itself,
+i.e., φ(z, {zj : zj ∈ s, zj (cid:54)= z}).
+
+Figure 2: Computational ﬂow of the model for mention-instance linking. The system
+can be seen as a sequential composition of sub-systems that process the input sentence s
+and ﬁnally output the identiﬁers of the instances that are linked to the mentions detected
+in s (z is a generic mention detected in s).
+
+The whole system is the composition of multiple computational modules, that we
+sketch in Figure 2. The MENTION DETECTOR segments s by identifying mentions to
+entities and relations. For example, Parry is chasing a mouse is segmented into two
+mentions to entities (i.e “Parry” and “a mouse”) and a mention to a relation (i.e “is
+chasing”). Each mention z and its context are encoded into vectorial representations
+(i.e. embeddings) by the ENCODER module. The CANDIDATE GENERATOR produces
+a probability distribution over the KB instances, by combining different sources of in-
+formation (e.g. surface form of the mention, embedding, temporal coherence in the
+current story). Finally, a DISAMBIGUATOR takes the ﬁnal decision on which is the
+most likely KB instance to link, using the aforementioned probability distribution and
+the embedding of the mention context. Section 3.1, 3.2, 3.3, 3.4 describe each compu-
+tational block in details.
+
+3.1 Mention Detection
+
+The goal of the MENTION DETECTOR (ﬁrst block of the pipeline in Figure 2) is to
+segment each sentence into non-overlapping text fragments, which are mentions to
+yet-unknown entity or relation instances.
+
+Motivated by the need of developing models that are robust to morphological changes
+
+and that do not depend on a pre-deﬁned vocabulary of words (as needed by inter-
+active/conversational applications), we process the input data using a character-level
+
+5
+
+i of the word xi as
+i ), ←−−re,w(ew
+
+1 . . . , ew
+
+encoding, following the approach we proposed in [9]. In particular, Bidirectional Re-
+current Neural Networks (BiRNN) are exploited to build vectorial representations of
+words at multiple levels. Given an input sentence s, composed of v words xi, i ∈ [1, v],
+the word embedding ew
+
+i of the word xi is
+
+i = ←→rc,w(ˆci,1 . . . ˆci,|xi|) ,
+ew
+(2)
+where ˆci,k is the k-th character of the i-th word and ←→rc,w is a BiRNN outputting the
+concatenation of its hidden states in both directions. Since the morphological represen-
+tation of a word is usually meaningless if taken isolated from its context, we compute
+the contextualized word embedding ˜ew
+
+i = [−−→re,w(ew
+˜ew
+
+(3)
+where −−→re,w and ←−−re,w are two RNNs processing the character-level embeddings of the
+words in the left and right contexts of xi within the sentence s, including xi itself. −−→re,w
+and ←−−re,w output their hidden state and we denote with [·, ·] the concatenation operation.
+All the RNNs used in this work are LSTMs.
+
+i )] ,
+
+n . . . ew
+
+The output of this computational block is based on the predictions of an MLP clas-
+siﬁer that processes (one-by-one) the contextualized embeddings of the words in the
+input sentence, computed as in eq. (3). The MLP is trained using supervised learning,
+with a tagging scheme similar to [10]. In particular, each word needs to be classiﬁed
+as being the begin, inside, end word of either an entity or a relation mention, for a
+total of 6 classes. As a result, each mention z is composed by the sequence of words
+where the ﬁrst word is tagged with the begin tag, the last word with the end tag, and
+the other words are predicted as inner (tags must be all of the same type, either entity
+or relation).
+
+As remarked in Sections 1 and 2, we exploit sparse supervisions, so that training
+the MLP-tagger (and, in turn, the embedding networks rc,w, re,w) might be difﬁcult.
+However, we follow the intuition that syntax has a crucial role in text segmentation:
+noun phrases are mentions to entities, while fragments that start with a verb and end
+with a preposition (if any) are mentions to relations [11].2 Hence, we can use these
+rules to automatically generate artiﬁcial supervisions on large collections of text to
+pre-train the MENTION DETECTOR.
+
+3.2 Mention and Context Encoding
+
+Once mentions have been detected, the ENCODER module (second block of Figure 2)
+encodes them and their contexts into vectorial representations, following an encoding
+scheme similar to the one in Section 3.1. However, after the processing of the pre-
+vious computational block, the input sentence becomes a sequence of mentions, each
+In details, at this stage, s is a sequence of ms men-
+composed of one or more words.
+tions zi, i = 1, . . . , ms. Two different vectorial representations are computed for each
+mention. First, the mention embedding em
+
+i of zi is obtained as
+
+i = ←−→rc,m(ˆci,1 . . . ˆci,|zi|) ,
+em
+
+(4)
+
+2See the supplemental material for the details.
+
+6
+
+being ˆci,1 . . . ˆci,|zi| the sequence of characters of the mention.
+
+Second, the context embedding ˆem
+i
+
+is computed from the other mentions zj, j (cid:54)= i
+
+in s, as
+
+i = [−−→re,m(em
+ˆem
+
+1 . . . , em
+
+i−1), ←−−re,m(em
+
+n . . . em
+
+i+1)].
+
+(5)
+
+Notice that, differently from eq. (3), here we are encoding only the context around the
+considered mention, excluding the mention itself.
+
+In order to learn the parameters of the encoders (rc,m and re,m), we follow the
+principles at the basis of the Word2Vec-CBOW architecture [12], that is rooted on the
+idea of encoding the context around a word and decoding the word itself, to gener-
+ate representations where synonyms or semantically similar words are close to each
+other in the embedding space. However, differently from the original CBOW, we use
+character-level input encoding (Eq. 4), so that we also expect morphologically simi-
+lar inputs to be close in the embedding space. We also introduce another feature that
+makes our approach different from other related systems (e.g. [13, 9]), that is we keep
+also the decoding stage at a character-level, thus avoiding the need of a large mention
+vocabulary.
+
+In particular, once the context around mention zi is encoded into the context em-
+bedding ˆem
+(Eq. 5), we exploit an LSTM-based decoder whose initial state is set to
+i
+ˆem
+i , and that generates the sequence of characters that compose zi. The encoder and
+the decoder can be trained by exploiting the cross-entropy loss function over character
+predictions. Once the MENTION DETECTOR has been pre-trained accordingly to what
+suggested in Section 3.1, the ENCODER module can be pre-trained as well without any
+human intervention, by processing large collections of text and learning to decode each
+mention.
+
+3.3 Candidate Generation
+Given an input mention z from the current sentence and its embedding ˆem, the CAN-
+DIDATE GENERATOR (third block of Figure 2) implements four memory components
+that are used to generate a list of candidate KB instances compatible with z, and, after-
+wards, to store the information on the disambiguated instance. Before providing further
+details on the candidate generation process, we describe the four memory components,
+as shown in Figure 3.
+
+i) The memory component H is an ordered set that collects all the mentions that
+were processed up to the current sentence; this allows a fast lookup of previously pre-
+dicted instances for speciﬁc mentions. For example, if the mention John Doe was
+previously assigned to instance k, when processing the same mention again the system
+could easily hypothesize that it still belongs to instance k.
+
+ii) The matrix E stores (row-wise) the embeddings of the mentions in H, computed
+with the encoder of Section 3.2, Eq. 4. Thanks to a similarity measure in the embedding
+space, this component allows the system to associate KB instances to never-seen-before
+mentions which are small variations of previously seen ones, or that refer to semanti-
+cally similar elements. For example, given the never-seen-before mention John D., the
+system could easily predict it still belongs to instance k, since its char-level embedding
+
+7
+
+Figure 3: A graphical representation of the four memory components H, E, M , and
+T . H collects the (lowercase) mentions that are stored in the KB. For each of them,
+the embedding vector (blue rectangle) is stored in a row of the matrix E. The afﬁnity
+scores of the considered mention, with respect to each of the n instances in the KB, are
+stored in a row of the matrix M . Finally, T contains the KB instances that have been
+recently linked by the system (here represented as a histogram of the number of times
+each KB instance was recently linked).
+
+8
+
+Figure 4: A visual representation of the combination of the three hypotheses.
+p(z=“john doe”) suggests that the current mention (i.e. “john doe”) has been often linked
+to entity instance 1. p(e) indicates that the embedding of the current mention is very
+similar to the embeddings of mentions usually linked to entity 1. Finally, p(t) indicates
+that entity 1 has been recently mentioned several times.
+
+is close to the one of John Doe, even though the exact lookup in H failed.
+
+iii) The set T keeps track of the last disambiguated instances (with repetitions).
+This memory naively allows the system to handle co-references. As we will see shortly,
+the system can learn that some speciﬁc inputs (e.g. pronouns, category identiﬁers, etc.)
+are often assigned to recently mentioned instances, making valuable temporal hypothe-
+ses when it has to disambiguate such inputs.
+
+iv) The matrix M stores (row-wise) the instance-activation scores of each mention
+in H. Each row is associated to a mention in H, each column corresponds to a KB
+instance. The row of M associated to a certain mention u ∈ H models how strongly
+each KB instance is associated to the mention u. The matrix M is learned while reading
+the text stream, as we will describe in Section 4.
+
+In the following, we will show how the CANDIDATE GENERATOR exploits these
+memory components to generate candidates of KB instances, given an input mention.
+For the purpose of this description, we suppose that the current memory consists of
+n instances and m mentions. The candidate generation routine ﬁrst outputs three hy-
+potheses, that are represented by three vectors p(z), p(e), p(t), of n scores each. Each
+score is in [0, 1], and it represents how strongly an instance is a candidate for being
+linked to the mention z. For example, p(z)
+(the i-th component of p(z)) models the
+i
+probability of the instance i to be a link candidate accordingly to the ﬁrst hypothesis.
+Then, the three hypotheses are combined into a ﬁnal vector p. A visual representation
+of this combination is shown in Figure 4.
+
+The ﬁrst vector, p(z), named STRING-MATCH HYPOTHESIS, contains the activation
+scores of the n instances given the string z. It models the idea that the surface form of
+z is a strong indicator for spotting candidate links. Formally,
+
+p(z) = σ (cid:0)Mh(z,H)
+where the function h(z, H) returns the index of z in H, σ(·) is a sigmoidal function that
+operates element-wise on its input (yielding output values in (0, 1)) and the subscript
+after the matrix M indicates the matrix row.
+
+(cid:1) ,
+
+(6)
+
+The second hypothesis, p(e), named EMBEDDING-MATCH HYPOTHESIS, collects
+the activations of the instances given the embedding em of z. The rationale behind it
+
+9
+
+is that if em is similar to an embedding of a known mention (in the sense of the cosine
+similarity cos(·, ·)), then it is likely to activate the same instances. Due to the way our
+embeddings are computed (Section 3.2), we expect that two embeddings are “close”
+if they have similar roles in the processed sentences (semantic-similarity, synonymy),
+and similar morphological properties (due to the character-level input). Formally:
+
+(cid:32)(cid:34)
+
+p(e) =
+
+cos(em, Ei) + 1
+j=1 cos(em, Ej) + m
+
+(cid:80)m
+
+(cid:35)m
+
+(cid:33)(cid:48)
+
+· σ(M )
+
+(7)
+
+i=1
+where the notation [vi]m
+i=1 indicates the (column) vector [v1, . . . , vm]. Notice that
+σ(M ) is a matrix of the same size of M , and p(e) involves a vector-times-matrix op-
+eration that basically computes a weighted sum of the rows of M accordingly to the
+similarity between em and the stored embeddings3.
+
+The third hypothesis, p(t), named TEMPORAL HYPOTHESIS, implements the idea
+that recently disambiguated instances are good candidates for co-reference resolution
+(temporal locality).
+In other words, if a story is talking about a certain entity, it is
+likely that the narration will make references to it using some new surface forms. For
+example, given an entity labeled Donald Trump, there could be ambiguous mentions
+like Donald, Mr. Trump (other people called this way), or the president (that cannot
+be captured by the other two hypotheses). In these cases, the temporal locality has a
+crucial role, that is even more evident when using pronouns, that are shared by several
+instances. Formally, we have
+
+p(t) =
+
+[u(i, T )]n
+i=1
+max [u(j, T )]n
+
+,
+
+j=1
+
+(8)
+
+where u(j, T ) returns the number of occurrences of instance j in T .
+
+The CANDIDATE GENERATOR merges the three hypotheses and produces the FI-
+NAL HYPOTHESIS p. The idea behind this operation is to give more priority to p(z)
+than to p(e) when the former is strongly activated (since p(z) is about “exact” matches
+in terms of surface forms). The importance of the temporal component p(t) in the
+merge operation depends on the current mention z. For example, if z is a pronoun, the
+system must trust p(t) more than the others, while, in case of some unambiguous men-
+tion, it must learn that p(t) is not important. We let the system learn the importance
+of p(t) depending on the mention embedding em. Formally, the system computes
+γ = q(em) ∈ [0, 1], where q(·) is a learnable function (whose form will be deﬁned
+shortly), and the vector of merged hypotheses is
+
+p = (1 − γ) ·
+
+(cid:16)
+
+p(z) +
+
+(cid:16)
+
+1 − p(z)(cid:17)
+
+p(e)(cid:17)
+
++ γ · p(t) .
+
+The vector p contains a set of scores that model how strongly each KB instance is
+related to the current input mention.
+
+We kept the model as simple as possible by considering only the three hypotheses
+that were necessary to cover all the ambiguities present in the task at hand. However
+any number of hypotheses can be attached to the candidate generation module, making
+our model adaptable to different NLP problems.
+
+3In our implementation, we kept only the top-k cosine similarities (k = 5), forcing the other ones to −1.
+
+10
+
+3.4 Disambiguation
+
+While the candidate generation routine only focusses on the mention z, the DISAM-
+BIGUATOR (Figure 2, fourth block) is responsible of determining what are the most
+likely KB instances given the context of z. The representation of the context ˆem is
+computed by the ENCODER (Section 3.2) by Eq. (5). The DISAMBIGUATOR is based
+on the functions di(ˆem), i = 1, . . . , n, also referred to as disambiguation units. In
+details, each di is associated to a KB instance, and it is learned while reading the
+text stream in a supervised or unsupervised way, as we will describe in Section 4. In
+particular, in the considered problem, we do not have the use of any discriminative
+information: when we receive the supervision that the input mention is about a certain
+KB instance (or when the model decides this in an unsupervised manner), we cannot
+infer that the context of the considered mention is not compatible with any other KB
+instance. As a matter of fact, the same context may be shared by several instances, so
+each di(·) must have the capability of learning from positive examples only. For this
+reason we implement di with a locally supported similarity measure,
+
+di(ˆem) =
+
++
+
+1
+2
+
+1
+2
+
+max
+j=1,...,κ
+
+cos(ˆem, wij) ∈ [0, 1] ,
+
+(9)
+
+that models the distribution of the contexts for instance i by means of κ centroids
+{wij}. As we will describe Section 4, these centroids are developed in an online
+manner, and, in the unsupervised case, we end up in an instance of online spherical
+K-Means. Also the previously mentioned function q(·) needs to be locally supported
+(for the same reasons), so we implemented it following Eq. (9) as well.
+
+We combine the activations of candidates (i.e., the vectors p), and the disambiguation-
+
+unit outputs, d = [di(ˆe)]n
+
+i=1, to get the output o of the system,
+
+o = δ(p > τr) · (η · p + (1 − η) · d) ,
+
+(10)
+
+where δ returns a binary vector with 1’s in those positions for which the (element-
+wise-evaluated) condition in bracket is true. The scalar τr > 0 is a reject threshold,
+and η ∈ [0, 1] is a tunable parameter that controls the role of the hypothesis p in
+the decision process4. The reject threshold allows us to avoid computing the di(·)
+associated to very-low-probability candidate instances.
+
+4 Online Learning Dynamics
+
+The system reads data from a text stream and it optimizes the model parameters in an
+online manner. Before going into further details, we recall that the learnable parameters
+of the proposed model are the matrix M in the memory component, the vectors wij of
+the disambiguation units and of the temporal relevance function q (i.e., the parameters
+of the CANDIDATE GENERATOR and of the DISAMBIGUATOR), and the weights of the
+LSTMs in the MENTION DETECTOR and in the ENCODER.
+
+The system starts with an empty KB (so M is not allocated yet), and with randomly
+initialized model parameters. As already introduced in Sections 3.1 and 3.2, we can
+
+4For simplicity, we set η = 0.5.
+
+11
+
+pre-train those modules that constitute the preliminary stages in the system pipeline of
+Figure 2, i.e., the MENTION DETECTOR ﬁrst, and then the ENCODER (in both cases,
+without human intervention). In other words, the system will start reading data from
+the text stream and it will progressively acquire the skill of detecting mentions to en-
+tities and relations, and the skill of encoding such mentions and their context. When
+a stationary condition is reached in the detector and encoders, the system can start to
+develop also the KB-based disambiguator, and to eventually reﬁne and improve the
+pre-trained modules.
+
+Algorithm 1: Learning Dynamics
+1 foreach mention in the current sentence do
+if supervision not provided then
+2
+
+if recognized some instances then
+
+reinforce the associated disambiguation units
+
+end
+else if uncertain disambiguation then
+
+no actions
+
+end
+else if no recognized instances then
+
+create new instance
+reinforce the new disambiguation unit until > τa
+
+if already known supervision then
+
+reinforce the associated disambiguation unit until > τa
+penalize the other disambiguation units until < τa
+
+disambiguate instance y
+if y was associated to another supervision then
+
+goto line 10
+
+associate supervision to the y-th disambiguation unit
+goto line 16
+
+3
+
+4
+
+5
+
+6
+
+7
+
+8
+
+9
+
+10
+
+11
+
+12
+
+13
+
+14
+
+15
+
+16
+
+17
+
+18
+
+19
+
+20
+
+21
+
+22
+
+23
+
+24
+
+25
+
+26
+
+27
+
+28
+
+end
+
+end
+else
+
+end
+else
+
+end
+else
+
+end
+
+end
+
+end
+
+29
+30 end
+
+While processing the text stream, accordingly to Eq. (1), each detected mention z
+is associated to a disambiguated KB instance y. Before starting the disambiguation,
+the system veriﬁes if z is already in H. If it is not the case, then z is included in H,
+its embedding em is appended to E, and a new row is added to M (with values such
+that σ(Mh(z,H)) ≈ 0). The learning stage consists in an online process to optimize the
+model parameters accordingly to either SELF-LEARNING or a SUPERVISION about the
+target instance y. A sketch of the whole learning stage is shown in Algorithm 1.
+
+Self-Learning. When no supervision is provided, learning dynamics changes in
+function on the conﬁdence that the system yields in formulating hypotheses (p) and in
+
+12
+
+disambiguating the mention z (o). We distinguish among three cases:
+
+i. max o ≥ τa : RECOGNIZED SOME INSTANCES
+
+ii. max p > τr ∧ max o < τa : UNCERTAINTY
+
+iii. max p ≤ τr : UNKNOWN INSTANCE ,
+
+where τr is the aforementioned reject threshold, and τa ∈ (τr, 1) is an accept thresh-
+old.5 In case i. the response of the system has been rather strong in indicating at least
+one instance, therefore the prediction of the model is considered reliable enough, so
+such decision must be reinforced for all those disambiguation units that generated out-
+puts in o above the accept threshold τa. This is done in a self-learning fashion [14],
+by means of a single online gradient-based update, with the aim of minimizing the
+quadratic loss that measures the distance between the selected disambiguation unit out-
+puts (indexed by j) and 1, that is (cid:80)
+j(dj − 1)2 (i.e., we reinforce the selected outputs).
+In case ii. the system activates some candidates but it is uncertain in the disambigua-
+tion, so no further actions are taken. Case iii.
+is triggered when p is composed of
+only low-conﬁdence candidate activations. This situation happens when the candidate
+generation module does not ﬁnd a known instance that is compatible with the current
+mention, that is likely to indicate the occurrence of a new entity/relation. Therefore, the
+system creates a new instance in the KB and reinforces its disambiguation unit until its
+response is above τa, to develop the new instance model (i.e., multiple gradient-based
+updates).
+
+Supervision. When a supervision y ∈ Y is provided for the mention z, we want the
+system to immediately learn from it. The system keeps track of the mapping between
+the set of user-provided supervisions Y and the set of instances in the memory compo-
+nents (the user is not aware of how the system handles instances). When y is a known
+supervision, the index of the corresponding instance is found, and the output of the
+disambiguation unit associated to this instance is reinforced until it is greater than the
+accept threshold τa. We also push the output of the other disambiguation units towards
+0, by minimizing the quadratic loss, (cid:80)
+j(dj)2. This implements a penalization process,
+that involves multiple gradient-based updates until all the involved outputs fall below
+6. When y is a never-seen-before supervision for the system, then it is associated
+τa
+with the disambiguated instance y. On the other hand, if y was previously associated
+to another supervision symbol in Y different from y, then we have a collision in the
+mapping and we solve it by creating a new instance and by associating it to y. Then,
+we follow the same steps as in case iii above7.
+
+5We set τr = 0.1 and τa = 0.9.
+6Notice that, whenever the system needs to reinforce the j-th output oj , and it also holds that pj ≤ τr,
+
+then, due to δ(·) in Eq. (10), we get no gradient, so we ﬁrst increase pj until it is above τr.
+
+7Supervisions may not only be related to the instance-label of the detected mentions, but they can also
+be associated with the detection of the mention. For example, the user could label a mention that does not
+correspond with the detected ones. This supervision signal is propagated to the mention detector, that can be
+reﬁned and improved. In turn, the mention and context encoders could be reﬁned as well. The investigation
+of these reﬁnement procedures goes beyond the scope of this paper.
+
+13
+
+5 Related Work
+
+Mining over text streams has been studied in a number of works [15, 16, 17], with
+several different purposes, that, however, are different from what we consider in this
+paper. Our approach to the learning problem is based on simple sentences that have the
+same structure of the ones used in many tasks of the bAbI project by Facebook [18, 19].
+However, none of such tasks is conceived for online learning or for entity/relation ex-
+traction and disambiguation. Interesting ideas on entity-oriented sub-symbolic memory
+components have been recently proposed by [20, 21], and extended to the case of rela-
+tions by [22]: their formulation is developed to comply with the aforementioned bAbI
+asks. The idea of considering small text passages could resemble the task of Machine
+Comprehension, where, however, such passages are read with the purpose of answering
+a question [23, 24, 25]. Concerning the input representation, we took inspiration from
+those works that exploit character-level embeddings to build models that also take into
+account morphological information [26, 13].
+
+Our approach disambiguates mentions using their contexts, so it shares several as-
+pects with Word Sense Disambiguation (WSD) and Entity Linking (EL), that, differ-
+ently from our case, assume to work with a given KB. In WSD [27, 6] the set of target
+words is known and the senses of each word are taken from a given dictionary. EL [5]
+is similar to WSD [28, 29], but it is about linking “potentially partial” entity mentions
+to a target KB, that has an encyclopaedic nature [30, 29]. The EL problem is presented
+in several variants and focussing on different types of data [31, 32, 33, 34, 35, 36], and
+it has been the subject of task-oriented evaluation procedures and benchmarks [37, 38].
+A few EL systems work in an unsupervised way [39, 33], but the KB is still given.
+Named Entity Recognition (NER) focusses on discovering mentions to entities, and it
+is also a basic module of several EL systems [40]. However NER is about proper nouns,
+as frequently is EL [31], while here we also consider common nouns. Moreover, NER
+systems output the entity type (person, location, etc.) without producing any instance-
+level information [10, 7]. Relation Extraction (RE) has been recently approached with
+end-to-end and advanced embedding-based models [41, 42]. The entities involved in
+the target relation are usually known, and a pre-deﬁned ontology is given (distant su-
+pervisions are also used, as in [43]). There are a number of discussions to better state
+the RE problem and build accurate gold labels [44].
+
+Finally, learning the KB component is the subject of those tasks of automatic KB
+Construction [45] and KB Population [46, 47], that, differently from the case of this
+paper, either make some application-speciﬁc assumptions to implement the KB, or
+exploit a given ontology schema, also combining unsupervised and supervised learning
+with ensembles and stacking techniques [8].
+
+6 Experiments
+
+6.1 Datasets
+
+Simple Story Dataset. A detailed experimentation was carried out in a new dataset that
+we created and made publicly available at http://sailab.diism.unisi.it/
+
+14
+
+stream-of-stories/. We remark that the problem we face shares some aspects
+with existing benchmarks, but none of them is really focussing on what we introduced
+in Section 2. The data we created is composed of a stream of 10,000 sentences, orga-
+nized into 564 stories (similarly to what reported in Figure 1). Each story is composed
+of a list of not-repeated facts, involving 130 entity and 27 relation instances that belong
+to a pre-designed ontology (not provided to the system) shown in Figure 5. Facts in a
+story mostly talk about a certain entity, that we refer to as “main entity”, and that can
+also appear in other stories. Entities and relations are mentioned with different surface
+forms (synonyms, sub-portions of names, etc.).
+
+In particular, a sentence is constituted by a triple of mentions, involving two en-
+tities and a relation. We automatically generated the data, after having deﬁned the
+aforementioned ontology with 21 and 28 entity and relation types, respectively (Figure
+5). Different kinds of noise are introduced, from character-level perturbations (simulat-
+ing typos) to non-main-entity related story facts (to make descriptions slightly depart
+from the main subject). The resulting dataset consists of 2176 unique single word to-
+kens, and dictionaries of 1526 and 288 mentions to entities and relations, respectively,
+that include different variations (typos, determiners, etc.) of 354 base entity mentions
+and of 176 base relation mentions. There are 7975 co-references (including pronouns).
+Finally, 6830 mention occurrences are ambiguous (i.e., refer to multiple instances).
+
+Figure 5: Ontology Graph of entity (nodes) and relation (edges) types in the Simple
+Story Dataset. Dashed lines between node pairs indicate a hierarchy between the two
+types.
+
+WikiFacts. WikiFacts is a dataset proposed in [48] where Wikipedia pages are loosely
+aligned with Freebase triples. It is composed of a collection of summaries, each of them
+being the textual description of a certain entity, belonging to the domain of movies. The
+textual span where an entity is mentioned on Wikipedia summaries is annotated with
+its identiﬁer on Freebase, and the Freebases fact to which it participates. Relations are
+not explicitly segmented in the text. Overall the dataset contains about 560k entities
+extracted from 10k pages. WikiFacts can be adapted to the problem setting we consider
+
+15
+
+Figure 6: Accuracy (%) for different amounts of supervision in the Simple Story
+Dataset, in the case of entities (two leftmost graphs), and relations. We include two
+competitors (Deep-RNN, RB), our system, and our system reading the stream again.
+
+Table 1: Accuracy (%) for different amounts of supervision in the Wikifacts Dataset.
+
+Model
+
+10% 25% 50% 90%
+
+16.84
+
+RB
+Deep-RNN 0.6
+Our Model
+Re-Reading
+
+39.25
+44.75
+
+17.28
+
+RB
+Deep-RNN 0.6
+Our Model
+Re-Reading
+
+37.44
+43.41
+
+40.44
+3.01
+54.57
+54.66
+
+40.87
+3.25
+52.93
+53.38
+
+48.28
+12.34
+69.64
+66.88
+
+48.04
+12.11
+67.45
+65.13
+
+49.55
+21.78
+75.45
+70.55
+
+49.37
+21.37
+75.37
+70.39
+
+All
+
+Last
+
+Figure 7: Accuracy (%) at different time instants for the Simple Story Dataset.
+
+16
+
+in this paper (Section 2). In particular, we focussed on a subportion of data containing
+10k Freebase facts (1112 pages), and we used each summary as a story, keeping only
+stories longer than three sentences. We considered all the sentences that include at
+least two entities, and we artiﬁcially marked as relation the text span between two
+consecutive entities. Since relations are not annotated with any Freebase identiﬁers,
+we only measure the accuracy on linking mentions to entity instances. A remarkable
+difference between the previous dataset and WikiFact is that, in the latter, entities are
+less often repeated among the stories. There are 4431 entities in 10K facts, with respect
+to the 130 entities in the previous data collection.
+
+6.2 Learning Settings
+
+We split each story into two parts: a supervised and an unsupervised one. The su-
+pervised portion covers the ﬁrst sentences of the story, and, in different experimental
+settings, it consists of 10%, 25%, 50% and 90% of the story sentences. The system
+reads the data, receives supervisions, and it makes predictions on the unsupervised sen-
+tences, accordingly to the stream order. The accuracy on each prediction is measured
+at the same time when the prediction is made. The results are reported considering
+all the unsupervised sentences of a story (ALL - this set of sentences is different in
+function of the supervised part size), and only the last sentence of the story (LAST -
+this set is the same for all the supervised part sizes). They are averaged over each story
+ﬁrst, and, then, over the whole set of stories. We use the same criterion of the cluster
+purity measure [49] to map unsupervised outputs to the ground truths, where, in case
+of conﬂicting assignments, we only keep the mappings that are determined using the
+largest statistics. The map used to convert predictions is computed with the statistics
+accumulated up to the time when the prediction is made.
+
+Our model was bootstrapped accordingly to the scheme of Section 4. In particular,
+before streaming the stories, we generated a stream of text composed of simple lan-
+guage sentences, taken from Simple English Wikipedia and the Children’s Book Test
+(CBT) data8, getting overall a total of 1.5 million sentences. We automatically gener-
+ated supervisions for the mention detector, accordingly to the procedure described in
+Section 3.1, and we processed the stream. Afterwards, we stopped updating the men-
+tion detector and we streamed the same data again to allow the system to develop the
+mention and context encoders (Section 3.2). In both the cases of the detector and of
+the encoders, we randomly injected a char-level noise (typos) to make the models more
+robust to these kind of perturbations. Finally, we stopped updating the encoder and we
+started to stream the stories.
+
+6.3 Competitors
+
+We compared our model with two competitors. The ﬁrst one, Deep-RNN, is a deep neu-
+ral architecture, where bottom layers completely coincide with our ENCODER module,
+thus they are two stacked bidirectional RNNs operating on characters and mentions
+
+8https://simple.wikipedia.org, https://research.fb.com/downloads/babi/
+
+17
+
+levels, respectively (they are pre-trained as in our model). In order to classify men-
+tions, the Deep-RNN architecture uses an MLP (1 hidden layer with 600 units and
+tanh activation; softmax activation in the output layer) on top of the concatenated
+representation [em, ˆem] (Eq. 4, Eq. 5). This network knows in advance the num-
+ber of instances of the datasets, that is the size of the output layer of the MLP, and it
+does not incur in errors related to the self-discovering of new instances. We followed
+a classic online supervised learning scheme, where a single gradient-based update is
+performed for each processed sentence, otherwise we experimented that the network
+simply overﬁts the last supervisions and forgets about the rest. We also considered a
+very informed rule-based model, RB, that buffers statistics on the supervisions received
+up to time t. Given an input mention, RB predicts the most-common supervision for
+it. When never-supervised-before mentions are encountered, RB predicts the most-
+frequent supervision of the story, that is likely to be the main entity of the story itself.
+This information is very precious (our model has no access to it), since several co-
+references refer to the main entity. We tested a large number of different rule-based
+classiﬁers, and RB was the one leading to the best results. Finally, we report another
+variant of our model, i.e. the case in which the system reads the whole stream another
+time (“Re-Reading” without providing supervisions again), that is the setting in which
+the self-learning skills are emphasized.
+
+6.4 Results
+
+Figure 6 shows the accuracy of discovering and disambiguating mentions to entity and
+relation instances, in the Simple Story Dataset, while Table 1 shows the accuracy in
+the case of the Wikifacts dataset (entities). Our system outperforms the competitors
+in all our experiments. Differently from Deep-RNN, our model exploits its capability
+of building local models of the instances, while Deep-RNN is not able to capture this
+locality, either not-learning enough or overﬁtting supervisions. Moreover, Deep-RNN
+has difﬁculties in storing information on the whole story, as shown in the LAST case.
+In the case of entities with few supervisions, RB shows an accuracy that is similar
+to the one of our system on the Simple Story Dataset. Differently, the proposed model
+signiﬁcantly outperforms RB on WikiFacts, showing interesting generalization capa-
+bilities on real world data. In the case of relations, RB is not different from our system,
+mostly due to the fact that relations are not so ambiguous in the Simple Story Dataset,
+also conﬁrmed by the improved results of the Deep-RNN. In most of the cases, the
+classiﬁcation capabilities of our model improve when it is allowed to read the stream
+a second time (re-reading), comparing favourably with all the other approaches. This
+property is more evident in the few-supervision settings. These results show that, de-
+spite the dynamic nature of the online problem we face, the proposed model has strong
+memorization skills, and the capability of improving its conﬁdence by self-learning.
+
+In the Simple Story Dataset, we also investigate the behaviour of the model at
+different time instants, using 50% of the supervisions (entities). Basically, we paused
+the system at a certain point of the stream, measured the accuracy, and activated the
+system again. This process is repeated until the end of the stream is reached. Results
+are reported in Figure 7. Our model reaches better results than RB after having read
+roughly the 20−25% of the input stream. We analyzed this result, and it turned out that
+
+18
+
+this is mostly due to the fact that our system takes some time to learn how to handle
+the temporal information (p(t)) needed to resolve co-references. As a matter of fact,
+co-reference resolution clearly depends on the number of supervisions, as reported in
+Table 2.
+
+Table 2: Accuracy (%) in the case of pronouns.
+Supervision
+
+10% 25% 50% 90%
+
+ALL
+LAST
+
+12.74
+8.57
+
+36.04
+42.85
+
+43.61
+44.76
+
+53.55
+54.28
+
+We also evaluated the values of γ, that weighs the importance of the temporal
+locality in the disambiguation process. In the case of pronouns the average value of
+γ is 0.33, while in the case of the other mentions (that might include some other co-
+references different from pronouns) is 0.21, thus showing that the system learns to
+give more importance to the temporal component when dealing with pronouns than
+other mentions. This is conﬁrmed by the small instance-activation scores in the case of
+mentions that are pronouns (the average of max p(z) is 0.005, remarking their inherent
+ambiguity), with respect to the ones of the other mentions (average of max p(z) is 0.5).
+
+6.5 Ablation Study
+
+We compare different variants of the model in order to emphasize the role of each
+component, and report the results in Table 3 - Simple Story Dataset. A ﬁrst compari-
+son regards the beneﬁts of using a character-level encoding for mentions with respect
+to classical word-level embedding approaches. To this end, we built a vocabulary of
+words, including all the correct-spelled words of our dataset (and an out-of-vocabulary
+token), and we limited the character-based encoder to such words, thus simulating a
+word-level encoder. Our model is able to encode in a meaningful way those words that
+contain typos, and to exploit them in context encoding, while the word-level encoder
+faces several out-of-vocabulary words, that also creates ambiguity while comparing
+contexts.
+
+Another variant of our model discards the temporal hypothesis p(t) when disam-
+biguating entities, and considers the hypotheses p(z) and p(e) only. Table 3 shows
+that the temporal locality has an important role, and disabling it degrades the perfor-
+mances. This is not only due to its positive effects in co-reference resolution, but also
+when disambiguating mentions to the main entity of the story. Finally, thanks to p(t),
+the system learns to develop the tendency of associating new mentions to already ex-
+isting instances, instead of creating new ones, that is an inherent feature of each story
+(in the worst case it creates only 183 entity instances).
+
+6.6 Dealing with Long Text Streams
+
+19
+
+Table 3: Accuracy (%) of our Full Model, of a system based on Word-Level (WL) En-
+coding, and of a system not-provided with information on the recently disambiguated
+instances.
+
+Entities
+
+Relations
+
+ALL
+
+LAST
+
+ALL
+
+LAST
+
+WL Enc.
+No Recent
+Full Model
+
+47.39
+55.56
+63.79
+
+84.33
+
+46.18
+54.95 −
+63.12
+
+85.41
+
+85.10
+−
+85.81
+
+The proposed model explicitly memorizes the information about entities and rela-
+tions of the current and past stories into distinct (i.e., independent) memory locations
+(Section 3.3). This strongly alleviates the catastrophic forgetting problem [?], that is
+usually due to memory interference among multiple entities or relations (e.g., due to
+weight sharing). The experimental analysis of Section 6.4, where the same stream is
+read a second time (“Re-Reading”), suggests that the proposed system does not in-
+cur into serious catastrophic forgetting issues, since its recognition accuracy improves
+once reading again the text stream, without additional supervisions (Figure 6). More-
+over, even if the encoding module of Section 3.2 is based on RNNs, we are not exposed
+to the problem of learning long-term dependencies with such RNNs [?]. As a matter of
+fact, the RNNs are only responsible of encoding each mention and its context within a
+single sentence, whose usual length is efﬁciently manageable with LSTMs without any
+long-term dependency problems.
+
+We performed a further experimental analysis aimed at evaluating the memoriza-
+tion skills of the system when dealing with long text streams. In particular, we provided
+the system an incremental number of stories, and we periodically evaluated its capa-
+bility of correctly recognizing the entities of the ﬁrst story of the stream. As long as
+the system reads more data, this procedure provides a clear indication of the persis-
+tence of the system memory. However, the system is still exposed to ambiguity issues,
+since multiple instances might share the same mention. For this reason, we considered
+different experimental settings with different levels of ambiguity.
+
+In detail, we considered four scenarios in the Simple Story Dataset, referred to as
+In each of them, we generated 10 different long streams
+A, B, C, D, respectively.
+(≈ 2600 sentences in each stream), randomly shufﬂing the involved stories. For each
+stream, we selected the ﬁrst story as target story. The model reads the stream and
+learns in an online manner, receiving supervisions about the mentioned entities, and
+constantly adapting its internal parameters as in the experiments of Section 6.2. After
+having processed t stories, we temporarily freeze the whole system, and we process
+the target story again, measuring the prediction accuracy on the entities of this story.
+By increasing the number t of intermediate stories, we evaluate how the systems keeps
+memory of the target story as long as the stream grows.
+
+The four settings differ in how the stream has been constructed, and they intro-
+duce an increasing level of ambiguity. In the ﬁrst setting (A), intermediate stories in
+the stream neither contain entities nor mentions belonging to the target story. Read-
+
+20
+
+Table 4: Average recognition accuracy (on 10 different streams) of the entities of target
+stories, with an increasing number t of intermediate stories for settings A, B, C, D
+(AccA, AccB, AccC, AccD), and average number of entities per mention (degree of
+ambiguity AmbA, AmbB, AmbC, AmbD).
+
+t = 0
+
+t = 10
+
+t = 50
+
+t = 100
+
+t = 150
+
+AmbA
+1.03
+AmbB
+1.05
+AmbC
+1.04
+AmbD 1.03
+
+AccA
+AccB
+AccC
+AccD
+
+98.41
+99.62
+98.89
+97.98
+
+1.03
+1.42
+1.50
+1.83
+
+98.41
+96.88
+85.05
+85.83
+
+1.03
+2.14
+2.49
+3.48
+
+98.41
+92.03
+72.25
+71.32
+
+1.03
+2.42
+3.28
+4.54
+
+98.41
+94.03
+70.30
+65.93
+
+1.03
+2.65
+3.64
+5.06
+
+98.41
+94.03
+71.85
+63.25
+
+ing the stream does not introduce any ambiguity in the contents of the target story.
+This allows us to evaluate whether the system is forgetting information as long as time
+passes, completely discarding ambiguity issues. In setting B we include pronouns in
+the intermediate stories. Mentions related to pronouns are obviously very ambiguous,
+hence the model will have to rely on the temporal hypothesis (Section 3.3) to be able
+to disambiguate them. The intermediate stories of setting C can contain mentions that
+are also used in the target story, and these mentions may or may not refer to the same
+entities of the target story. In this case, the system must not only remember what was
+read in the target story, but it must also gain stronger skills in disambiguating entities.
+Finally, in the last scenario (D), we ensure that the intermediate stories never refer to
+the entities of the target story. However, we still allow the stream to use mentions that
+are shared with the ones that are used in the target story, simulating a strong data drift.
+We explicitly computed the degree of ambiguity of each stream for all the settings
+(referred to as AmbA, AmbB, AmbC, AmbD), that is the average number of entities
+associated to each mention of the target story up to step t. Table 4 reports both the
+degrees of ambiguity and the recognition accuracy of the entities of the target story
+(averaged over the 10 generated streams). We report the results after t = 0, 10, 50,
+100, 150 intermediate stories (0, 180, 880, 1700, 2600 intermediate sentences, respec-
+tively). All the four settings show an accuracy close to 100% at t = 0, as expected,
+where the few errors are mostly due to pronouns, since the system has not developed
+strong co-reference skills, as expected. For t > 0, results in setting A conﬁrm that
+the model does not forget past information when processing text streams that do not
+interfere with it. Setting B shows an interesting behaviour, in which accuracy is re-
+duced as long as t grows up to 50, and then it increases again. This indicates that
+while at the beginning the system misclassiﬁes pronouns in the target story, it is able to
+improve pronoun resolution while reading several stories, thus adjusting the temporal
+hypothesis of Equation ??. In both settings C and D, as expected, results indicate that
+performances degrade as the number of intermediate stories increases, due to the in-
+creasing number of ambiguous mentions. The model clearly performs better in setting
+
+21
+
+C than in setting D, remarking the positive effects of reﬁning the disambiguation units
+while reading information about the entities of the target story in multiple occasions.
+Finally, it is worth noticing that the degradation of the performances is directly related
+to the degree of ambiguity in the streams. This is a clear hint that long streams increase
+the difﬁculty of the task not due to their length but to their intrinsic ambiguity.
+7 Conclusions and Future Work
+
+We presented an end-to-end model to process text streams, where mentions to entities
+and relations are detected, disambiguated, and eventually added to an internal KB, that,
+differently from many existing works, is not-given-in-advance. Our model is capable
+of performing one-shot learning, self-learning, and it learns to resolve co-references.
+It has shown strong disambiguation and discovery skills when tested on a stream of
+sentences organized into small stories (we also created a new dataset that we publicly
+made available for further studies), even when a few, sparse supervisions are provided.
+We also showed how it can improve its skills by continuously reading text. Our future
+work will focus on exploiting entities and relations structured into facts, higher-level
+reasoning, types, dynamic re-organization of the KB.
+
+References
+
+[1] Z. Yu, Z. Xu, A. W. Black, and A. Rudnicky, “Strategy and policy learning for
+non-task-oriented conversational systems,” in Proceedings of the 17th Annual
+Meeting of the Special Interest Group on Discourse and Dialogue, 2016, pp. 404–
+412.
+
+[2] G. M. Del Corso, A. Gulli, and F. Romani, “Ranking a stream of news,” in Pro-
+ceedings of the 14th international conference on World Wide Web. ACM, 2005,
+pp. 97–106.
+
+[3] A. Ritter, O. Etzioni, S. Clark et al., “Open domain event extraction from twitter,”
+in Proceedings of the 18th ACM SIGKDD international conference on Knowledge
+discovery and data mining. ACM, 2012, pp. 1104–1112.
+
+[4] K. Christakopoulou, F. Radlinski, and K. Hofmann, “Towards conversational rec-
+ommender systems,” in Proceedings of the 22nd ACM SIGKDD International
+Conference on Knowledge Discovery and Data Mining. ACM, 2016, pp. 815–
+824.
+
+[5] W. Shen, J. Wang, and J. Han, “Entity linking with a knowledge base: Issues,
+techniques, and solutions,” IEEE Transactions on Knowledge and Data Engi-
+neering, vol. 27, no. 2, pp. 443–460, 2015.
+
+[6] A. Raganato, J. Camacho-Collados, and R. Navigli, “Word sense disambiguation:
+A uniﬁed evaluation framework and empirical comparison,” in Proc. of EACL,
+2017, pp. 99–110.
+
+22
+
+[7] J. P. Chiu and E. Nichols, “Named entity recognition with bidirectional lstm-
+cnns,” Transactions of the Association for Computational Linguistics, vol. 4, pp.
+357–370, 2016.
+
+[8] N. F. Rajani and R. Mooney, “Combining supervised and unsupervised enem-
+bles for knowledge base population,” in Proceedings of the 2016 Conference on
+Empirical Methods in Natural Language Processing, 2016, pp. 1943–1948.
+
+[9] G. Marra, A. Zugarini, S. Melacci, and M. Maggini, “An unsupervised character-
+aware neural approach to word and context representation learning,” in Artiﬁcial
+Neural Networks and Machine Learning – ICANN 2018. Springer International
+Publishing, 2018, pp. 126–136.
+
+[10] G. Lample, M. Ballesteros, S. Subramanian, K. Kawakami, and C. Dyer, “Neural
+architectures for named entity recognition,” in Proceedings of NAACL-HLT, 2016,
+pp. 260–270.
+
+[11] A. Fader, S. Soderland, and O. Etzioni, “Identifying relations for open informa-
+tion extraction,” in Proceedings of the conference on empirical methods in natu-
+ral language processing. Association for Computational Linguistics, 2011, pp.
+1535–1545.
+
+[12] T. Mikolov, K. Chen, G. Corrado, and J. Dean, “Efﬁcient estimation of word
+
+representations in vector space,” arXiv:1301.3781, 2013.
+
+[13] R. Jozefowicz, O. Vinyals, M. Schuster, N. Shazeer, and Y. Wu, “Exploring the
+
+limits of language modeling,” arXiv:1602.02410, 2016.
+
+[14] K. Nigam and R. Ghani, “Analyzing the effectiveness and applicability of co-
+training,” in Proceedings of the ninth international conference on Information
+and knowledge management. ACM, 2000, pp. 86–93.
+
+[15] A. Banerjee and S. Basu, “Topic models over text streams: A study of batch and
+online unsupervised learning,” in Proceedings of the 2007 SIAM International
+Conference on Data Mining. SIAM, 2007, pp. 431–436.
+
+[16] B. Krawczyk, L. L. Minku, J. Gama, J. Stefanowski, and M. Wo´zniak, “Ensemble
+learning for data stream analysis: A survey,” Information Fusion, vol. 37, pp.
+132–156, 2017.
+
+[17] C. C. Aggarwal and C. Zhai, Mining text data.
+
+Springer Science & Business
+
+Media, 2012.
+
+[18] S. Sukhbaatar, J. Weston, R. Fergus et al., “End-to-end memory networks,” in
+Advances in neural information processing systems, 2015, pp. 2440–2448.
+
+[19] A. Kumar, O. Irsoy, P. Ondruska, M. Iyyer, J. Bradbury, I. Gulrajani, V. Zhong,
+R. Paulus, and R. Socher, “Ask me anything: Dynamic memory networks for nat-
+ural language processing,” in Proceedings of The 33rd International Conference
+
+23
+
+on Machine Learning, ser. Proceedings of Machine Learning Research, M. F. Bal-
+can and K. Q. Weinberger, Eds., vol. 48. New York, New York, USA: PMLR,
+20–22 Jun 2016, pp. 1378–1387.
+
+[20] M. Henaff, J. Weston, A. Szlam, A. Bordes, and Y. LeCun, “Tracking the world
+
+state with recurrent entity networks,” ICLR, pp. 1–14, 2017.
+
+[21] Y. Ji, C. Tan, S. Martschat, Y. Choi, and N. A. Smith, “Dynamic entity repre-
+sentations in neural language models,” in Proceedings of the 2017 Conference on
+Empirical Methods in Natural Language Processing. Association for Computa-
+tional Linguistics, 2017, pp. 1830–1839.
+
+[22] T. Bansal, A. Neelakantan, and A. McCallum, “Relnet: End-to-end modeling of
+
+entities & relations,” arXiv:1706.07179, 2017.
+
+[23] M. Richardson, C. J. Burges, and E. Renshaw, “Mctest: A challenge dataset for
+the open-domain machine comprehension of text,” in Proceedings of the 2013
+Conference on Empirical Methods in Natural Language Processing, 2013, pp.
+193–203.
+
+[24] P. Rajpurkar, J. Zhang, K. Lopyrev, and P. Liang, “Squad: 100,000+ questions
+for machine comprehension of text,” in Proceedings of the 2016 Conference on
+Empirical Methods in Natural Language Processing, 2016, p. pages 2383?2392.
+
+[25] S. Kobayashi, R. Tian, N. Okazaki, and K. Inui, “Dynamic entity representa-
+tion with max-pooling improves machine reading,” in Proceedings of the 2016
+Conference of the North American Chapter of the Association for Computational
+Linguistics: Human Language Technologies, 2016, pp. 850–855.
+
+[26] Y. Kim, Y. Jernite, D. Sontag, and A. M. Rush, “Character-aware neural language
+
+models.” in AAAI, 2016, pp. 2741–2749.
+
+[27] Z. Zhong and H. T. Ng, “It makes sense: A wide-coverage word sense disam-
+biguation system for free text,” in Proceedings of the ACL 2010 System Demon-
+strations. Association for Computational Linguistics, 2010, pp. 78–83.
+
+[28] A. Moro, A. Raganato, and R. Navigli, “Entity linking meets word sense dis-
+ambiguation: a uniﬁed approach,” Transactions of the Association for Computa-
+tional Linguistics, vol. 2, pp. 231–244, 2014.
+
+[29] A. Moro and R. Navigli, “Semeval-2015 task 13: Multilingual all-words sense
+disambiguation and entity linking,” in Proceedings of the 9th International Work-
+shop on Semantic Evaluation (SemEval 2015). Denver, Colorado: Association
+for Computational Linguistics, June 2015, pp. 288–297.
+
+[30] B. Hachey, W. Radford, J. Nothman, M. Honnibal, and J. R. Curran, “Evaluat-
+ing entity linking with wikipedia,” Artiﬁcial intelligence, vol. 194, pp. 130–150,
+2013.
+
+24
+
+[31] X. Ling, S. Singh, and D. S. Weld, “Design challenges for entity linking,” Trans-
+actions of the Association for Computational Linguistics, vol. 3, pp. 315–328,
+2015.
+
+[32] S. Guo, M.-W. Chang, and E. Kiciman, “To link or not to link? a study on
+end-to-end tweet entity linking,” in Proceedings of the 2013 Conference of the
+North American Chapter of the Association for Computational Linguistics: Hu-
+man Language Technologies, 2013, pp. 1020–1030.
+
+[33] X. Pan, T. Cassidy, U. Hermjakob, H. Ji, and K. Knight, “Unsupervised entity
+linking with abstract meaning representation,” in Proceedings of the 2015 Con-
+ference of the North American Chapter of the Association for Computational Lin-
+guistics: Human Language Technologies, 2015, pp. 1130–1139.
+
+[34] A. Sil and R. Florian, “One for all: Towards language independent named en-
+tity linking,” in Proceedings of the 54th Annual Meeting of the Association for
+Computational Linguistics, vol. 1, 2016, pp. 2255–2264.
+
+[35] A. Pappu, R. Blanco, Y. Mehdad, A. Stent, and K. Thadani, “Lightweight multi-
+lingual entity extraction and linking,” in Proceedings of the Tenth ACM Interna-
+tional Conference on Web Search and Data Mining. ACM, 2017, pp. 365–374.
+
+[36] Y. Lin, C.-Y. Lin, and H. Ji, “List-only entity linking,” in Proceedings of the
+55th Annual Meeting of the Association for Computational Linguistics (Volume
+2: Short Papers), vol. 2, 2017, pp. 536–541.
+
+[37] X. Ma, N. Fauceglia, Y.-c. Lin, and E. Hovy, “Cmu system for entity discovery
+
+and linking at tac-kbp 2017,” Proceedings of TAC2017, 2017.
+
+[38] M. Van Erp, P. N. Mendes, H. Paulheim, F. Ilievski, J. Plu, G. Rizzo, and J. Wait-
+elonis, “Evaluating entity linking: An analysis of current benchmark datasets and
+a roadmap for doing a better job.” in LREC, vol. 5, 2016, p. 2016.
+
+[39] X. Han and L. Sun, “A generative entity-mention model for linking entities with
+knowledge base,” in Proceedings of the 49th Annual Meeting of the Association
+for Computational Linguistics: Human Language Technologies-Volume 1. As-
+sociation for Computational Linguistics, 2011, pp. 945–954.
+
+[40] G. Luo, X. Huang, C.-Y. Lin, and Z. Nie, “Joint entity recognition and disam-
+biguation,” in Proceedings of the 2015 Conference on Empirical Methods in Nat-
+ural Language Processing, 2015, pp. 879–888.
+
+[41] M. Miwa and M. Bansal, “End-to-end relation extraction using lstms on se-
+quences and tree structures,” in Proceedings of the 54th Annual Meeting of the
+Association for Computational Linguistics, 2016, pp. 1105–1116.
+
+[42] A. Obamuyide and A. Vlachos, “Contextual pattern embeddings for one-shot re-
+lation extraction,” in 6th Workshop on Automated Knowledge Base Construction
+(AKBC), 2017, pp. 1–8.
+
+25
+
+[43] M. Mintz, S. Bills, R. Snow, and D. Jurafsky, “Distant supervision for relation
+extraction without labeled data,” in Proceedings of the Joint Conference of the
+47th Annual Meeting of the ACL and the 4th International Joint Conference on
+Natural Language Processing of the AFNLP: Volume 2-Volume 2. Association
+for Computational Linguistics, 2009, pp. 1003–1011.
+
+[44] T. Martin, F. Botschen, A. Nagesh, and A. McCallum, “Call for discussion: Build-
+ing a new standard dataset for relation extraction tasks,” in Proceedings of the 5th
+Workshop on Automated Knowledge Base Construction, 2016, pp. 92–96.
+
+[45] F. Niu, C. Zhang, C. R´e, and J. W. Shavlik, “Deepdive: Web-scale knowledge-
+base construction using statistical learning and inference.” VLDS, vol. 12, pp.
+25–28, 2012.
+
+[46] M. Dredze, P. McNamee, D. Rao, A. Gerber, and T. Finin, “Entity disambiguation
+for knowledge base population,” in Proceedings of the 23rd International Confer-
+ence on Computational Linguistics. Association for Computational Linguistics,
+2010, pp. 277–285.
+
+[47] H. Ji and R. Grishman, “Knowledge base population: Successful approaches and
+challenges,” in Proceedings of the 49th Annual Meeting of the Association for
+Computational Linguistics: Human Language Technologies-Volume 1. Associ-
+ation for Computational Linguistics, 2011, pp. 1148–1158.
+
+[48] S. Ahn, H. Choi, T. P¨arnamaa, and Y. Bengio, “A neural knowledge language
+
+model,” arXiv preprint arXiv:1608.00318, 2016.
+
+[49] C. D. Manning, P. Raghavan, H. Sch¨utze et al., Introduction to information re-
+
+trieval. Cambridge university press Cambridge, 2008, vol. 1.
+
+26
+

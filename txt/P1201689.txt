@@ -1,0 +1,3406 @@
+9
+1
+0
+2
+ 
+n
+a
+J
+ 
+6
+2
+ 
+ 
+]
+
+G
+L
+.
+s
+c
+[
+ 
+ 
+1
+v
+5
+3
+2
+9
+0
+.
+1
+0
+9
+1
+:
+v
+i
+X
+r
+a
+
+Distributed Convolutional Dictionary Learning (DiCoDiLe):
+Pattern Discovery in Large Images and Signals
+
+Moreau Thomas1∗, Alexandre Gramfort1
+1INRIA, Universit´e Paris Saclay, Saclay, France
+
+January 29, 2019
+
+Abstract
+
+Convolutional dictionary learning (CDL) estimates shift invariant basis adapted to multidimensional
+data. CDL has proven useful for image denoising or inpainting, as well as for pattern discovery on mul-
+tivariate signals. As estimated patterns can be positioned anywhere in signals or images, optimization
+techniques face the difﬁculty of working in extremely high dimensions with millions of pixels or time
+samples, contrarily to standard patch-based dictionary learning. To address this optimization problem,
+this work proposes a distributed and asynchronous algorithm, employing locally greedy coordinate de-
+scent and an asynchronous locking mechanism that does not require a central server. This algorithm can
+be used to distribute the computation on a number of workers which scales linearly with the encoded sig-
+nal’s size. Experiments conﬁrm the scaling properties which allows us to learn patterns on large scales
+images from the Hubble Space Telescope.
+
+1 Introduction
+
+The sparse convolutional linear model has been used successfully for various signal and image processing
+applications. It was ﬁrst developed by Grosse et al. (2007) for music recognition and has then been used ex-
+tensively for denoising and inpainting of images (Kavukcuoglu et al., 2010; Bristow et al., 2013; Wohlberg,
+2014). The beneﬁt of this model over traditional sparse coding technique is that it is shift-invariant. Instead
+of local patches, it considers the full signals which allows for a sparser reconstruction, as not all shifted
+versions of the same patches are present in the estimated dictionary (Bergstra et al., 2011).
+
+Beyond denoising or inpainting, recent applications used this shift-invariant model as a way to learn and
+localize important patterns in signals or images. Yellin et al. (2017) used convolutional sparse coding to
+count the number of blood-cells present in holographic lens-free images. Jas et al. (2017) and Dupr´e la Tour
+et al. (2018) learned recurring patterns in univariate and multivariate signals from neuroscience. This model
+has also been used with astronomical data as a way to denoise (Starck et al., 2005) and localize predeﬁned
+patterns from space satellite images (del Aguila Pla and Jalden, 2018).
+
+Convolutional dictionary learning estimates the parameters of this model. It boils down to an optimization
+problem, where one needs to estimate the patterns (or atoms) of the basis as well as their activations, i.e.
+where the patterns are present in the data. The latter step, which is commonly referred to as convolutional
+sparse coding (CSC), is the critical bottleneck when it comes to applying CDL to large data. Chalasani et al.
+(2013) used an accelerated proximal gradient method based on Fast Iterative Soft-Thresholding Algorithm
+
+∗Corresponding author thomas.moreau@inria.fr
+
+1
+
+(FISTA; Beck and Teboulle 2009 that was adapted for convolutional problems. The Fast Convolutional
+Sparse Coding of Bristow et al. (2013) is based on Alternating Direction Method of Multipliers (ADMM).
+Both algorithms compute a convolution on the full data at each iteration. While it is possible to leverage the
+Fast Fourier Transform to reduce the complexity of this step (Wohlberg, 2016), the cost can be prohibitive
+for large signals or images. To avoid such costly global operations, Moreau et al. (2018) proposed to use
+locally greedy coordinate descent (LGCD) which requires only local computations to update the activations.
+Based on Greedy Coordinate Descent (GCD), this method has a lower per-iteration complexity and it relies
+on local computation in the data, like a patch based technique would do, yet solving the non-local problem.
+
+To further reduce the computational burden for CDL, recent studies consider different parallelization strate-
+gies. Skau and Wohlberg (2018) proposed a method based on consensus ADMM to parallelize the CDL
+optimization by splitting the computation across the different atoms. This limits the number of cores that
+can be used to the number of atoms in the dictionary, and does not signiﬁcantly reduce the burden for very
+large signals or images. An alternative parallel algorithm called DICOD, proposed by Moreau et al. (2018)
+distributes GCD updates when working with 1d signals. Their results could be used with multidimensional
+data such as images, yet only by splitting the data along one dimension. This limits the gain of their dis-
+tributed optimization strategy when working with images. Also, the choice of GCD for the local updates
+make the algorithm inefﬁcient when used with low number of workers.
+
+In the present paper, we propose a distributed solver for CDL, which can fully leverage multidimensional
+data. For the CSC step, we present a coordinate selection rule based on LGCD that works in the asyn-
+chronous setting without a central server. We detail a soft-lock mechanism ensuring the convergence with
+a grid of workers, while splitting the data in all convolutional dimensions. Then, we explain how to also
+leverage the distributed set of workers to further reduce the cost of the dictionary update, by precomput-
+ing in parallel some quantities used in the gradient operator. Extensive numerical experiments conﬁrm the
+performance of our algorithm, which is then used to learn patterns from a large astronomical image.
+
+In Section 2, we describe the convolutional linear model and its parameter estimation through CDL. Then,
+Section 3 details the LGCD algorithm for convolutional sparse coding (CSC). Our distributed algorithm
+DiCoDiLe is introduced in Section 4. Section 5 presents results on simulations and images.
+
+2 Convolutional Dictionary Learning
+
+∈
+
+P ×Q
+Ω
+
+RP we denote Up
+∈
+Ω
+|
+|
+
+Notations. For a vector U
+where [0, Ti[ are the integers from 0 to Ti
+
+i=1 Ti. We denote
+X
+) the space of observations deﬁned on Ω with values in RP (resp. RP ×Q). For instance,
+X
+d = 2 is the space of RGB-images with height and width T1, T2. The value of an observation X
+position ω
+∈
+position is denoted Xp
+is denoted
+
+i=1[0, Ti[,
+P
+Ω (resp.
+3
+Ω with
+P
+Ω at
+RP , and its restriction to the pth coordinate at each
+Ω, X[ω] = 0. The convolution operator
+
+R its pth coordinate. For ﬁnite domain Ω = (cid:81)d
+is the size of this domain (cid:81)d
+
+1
+Ω. All signals are 0-padded, i.e. for ω
+
+Ω is given by X[ω] = X[ω1, . . . , ωd]
+
+(cid:54)∈
+as the signal X
+
+and is deﬁned for X
+
+X
+∈ X
+
+∈ X
+
+−
+
+1,
+
+∈
+
+YYY
+
+P
+Ω with
+
+∗
+
+K×P
+Ω
+
+K
+Ω and YYY
+
+∈ X
+YYY )[ω] =
+
+∈ X
+X[ω
+
+(cid:88)
+
+τ ∈Ω
+
+(X
+
+∗
+
+τ ]
+
+YYY [τ ] ,
+
+−
+
+·
+
+ω
+
+∀
+
+∈
+
+∈ X
+
+∗
+Ω .
+
+(1)
+
+For any signal X
+
+p-norm is deﬁned as
+deﬁned as
+
+P
+
+Ω , the reversed signal is deﬁned as X (cid:30)[ω] = X[T1
+∈ X
+(cid:17)1/p
+X
+(cid:107)
+
+ω∈Ω (cid:107)
+
+(cid:16)(cid:80)
+
+X[ω]
+
+p
+p
+(cid:107)
+
+p =
+
+(cid:107)
+
+−
+
+. We will also denote ST the soft-thresholding operator
+
+ω1, . . . , Td
+
+ωd]T and the
+
+−
+
+u
+ST(u, λ) = sign(u) max(
+|
+
+| −
+
+λ, 0) .
+
+2
+
+Figure 1: Decomposition of a noiseless univariate signal X (blue) as the convolution Z
+temporal pattern DDD (orange) and a sparse activation signal Z (green).
+
+∗
+
+DDD between a
+
+Convolutional Linear Model. For an observation X
+
+P
+Ω , the convolutional linear model reads
+
+∈ X
+DDD + ξ ,
+
+X = Z
+
+∗
+
+∈ X
+∈ X
+
+a dictionary of K atoms with the same number of dimensions P on a domain Θ = (cid:81)d
+
+K×P
+Θ
+K
+Ω the set of K activation vectors associated with this dictionary. ξ
+
+with DDD
+P
+and Z
+Ω is an additive noise
+term which is typically considered Gaussian and white. The dictionary elements DDDk are patterns present in
+the data and typically have a much smaller support Θ than the full domain Ω. The activations Zk encode the
+localization of the pattern k in the data. As patterns typically occur at few locations in each observation, the
+coding signal Z is considered to be sparse. Figure 1 illustrates the decomposition of a temporal signal with
+one pattern.
+
+∈ X
+
+The parameters of this model are estimated by solving the following optimization problem, called convolu-
+tional dictionary learning (CDL)
+
+(2)
+
+i=1[0, Li[
+
+Ω
+
+⊂
+
+min
+Z,DDD
+(cid:107)DDDk(cid:107)≤1
+
+1
+2
+(cid:124)
+
+(cid:13)
+(cid:13)X
+
+Z
+
+∗
+−
+(cid:123)(cid:122)
+F (Z,DDD)
+
+DDD(cid:13)
+2
+(cid:13)
+2
+(cid:125)
+
+.
+
++ λ
+
+Z
+1
+(cid:107)
+(cid:107)
+(cid:124) (cid:123)(cid:122) (cid:125)
+G(Z)
+
+where the ﬁrst term measures how well the model ﬁts the data, the second term enforces a sparsity constraint
+on the activation, and λ > 0 is a regularization parameter that balances the two. The constraint
+1
+is used to avoid the scale ambiguity in our model – due to the (cid:96)1 constraint. Indeed, the (cid:96)1-norm of Z can be
+made arbitrarily small by rescaling D by α
+α . The minimization (3) is not jointly convex
+in (Z, DDD) but it is convex in each of its coordinates. It is usually solved with an alternated minimization
+algorithm, updating at each iteration one of the block of coordinate, Z or DDD.
+
++ and Z by 1
+
+Dk
+(cid:107)
+
+2
+(cid:107)
+
+R∗
+
+≤
+
+∈
+
+Convolutional Sparse Coding (CSC). Given a dictionary of patterns DDD, CSC aims to retrieve the sparse
+decomposition Z∗ associated to the signal X. When minimizing only over Z, (3) becomes
+
+(3)
+
+(4)
+
+Z(cid:63) = argmin
+
+Z
+
+(cid:13)
+(cid:13)X
+
+1
+2
+
+Z
+
+−
+
+∗
+
+2 + λ (cid:13)
+DDD(cid:13)
+2
+(cid:13)
+
+(cid:13)Z(cid:13)
+
+(cid:13)1 .
+
+3
+
+Algorithm 1 Locally Greedy Coordinate Descent
+1: Input: DDD, X, parameter (cid:15) > 0, sub-domains
+2: Initialization:
+
+(k, ω)
+Zk[ω] = 0, βk[ω] =
+
+∀
+
+[1, K]
+∈
+(cid:16)
+DDD(cid:30)
+X
+
+Ω,
+[ω]
+
+×
+(cid:17)
+
+m,
+C
+
+k ∗
+
+3: repeat
+4:
+
+for m = 1 . . . M do
+[1, K]
+
+(k, ω)
+
+∈
+
+∀
+Choose (k0, ω0) = arg
+
+× C
+
+5:
+
+6:
+
+7:
+
+Update β using (8) and Zk0[ω0]
+
+m, Z(cid:48)
+
+k[ω] =
+
+ST(β(q)
+
+k [ω], λ) ,
+
+1
+DDDk
+(cid:107)
+
+2
+2
+(cid:107)
+∆Zk[ω]
+|
+
+[ω0]
+
+max
+(k,ω)∈[1,K]×Cm |
+Z(cid:48)
+k0
+
+←
+
+8:
+9: until
+
+end for
+∆Z
+
+(cid:107)
+
+(cid:107)
+
+∞ < (cid:15)
+
+The problem in (4) boils down to a LASSO problem with a Toeplitz design matrix DDD. Therefore, classical
+LASSO optimization techniques can easily be applied with the same convergence guarantees. Chalasani
+et al. (2013) adapted FISTA (Beck and Teboulle, 2009) exploiting the convolution in the gradient computa-
+tion to save time. Based on the ADMM algorithm (Gabay and Mercier, 1976), Bristow et al. (2013) solved
+the CSC problem with a fast computation of the convolution in the Fourier domain. For more details on
+these techniques, see Wohlberg (2016) and references therein. Finally, Kavukcuoglu et al. (2010) proposed
+an efﬁcient adaptation of the greedy coordinate descent (Osher and Li, 2009) to efﬁciently solve the CSC,
+which has been later reﬁned by Moreau et al. (2018) with locally greedy coordinate selection (LGCD).
+
+It is useful to note that for λ
+reads
+
+X
+
+DDD(cid:30)
+
+≥ (cid:107)
+
+∗
+
+∞, 0 minimizes the equation (4). The ﬁrst order condition for (4)
+(cid:107)
+
+∗
+This condition is always veriﬁed if λ > λmax =
+λ is set as a fraction of this value.
+
+∇
+
+ZF (0, DDD) = X
+
+DDD(cid:30)
+
+X
+
+(cid:107)
+
+∗
+
+∂G(0) = [
+∈
+DDD(cid:30)
+
+−
+
+(cid:107)
+
+λ, λ]K|Ω| .
+
+∞. In the following, the regularization parameter
+
+Dictionary Update. Given a activation signal Z(q), the dictionary update aims at improving how the model
+reconstructs the signal X using the ﬁxed codes, by solving
+
+(5)
+
+(6)
+
+DDD∗ = argmin
+
+DDD
+(cid:107)DDDk(cid:107)2≤1
+
+(cid:13)
+(cid:13)X
+
+1
+2
+
+Z
+
+−
+
+∗
+
+DDD(cid:13)
+2
+2 .
+(cid:13)
+
+This problem is smooth and convex and can be solved using classical algorithms. The block coordinate
+descent for dictionary learning (Mairal et al., 2010) can be easily extended to the convolutional cases. Re-
+cently, Yellin et al. (2017) proposed to adapt the K-SVD dictionary update method (Aharon et al., 2006)
+to the convolutional setting. Classical convex optimization algorithms, such as projected gradient descent
+(PGD) and its accelerated version (APGD), can also be used for this step (Combettes and Bauschke, 2011).
+These last two algorithms are often referred to as ISTA and FISTA (Chalasani et al., 2013).
+
+3 Locally Greedy Coordinate Descent for CSC
+
+4
+
+Coordinate descent (CD) is an algorithm which updates a single coefﬁcient at each iteration. For (4), it is
+possible to compute efﬁciently, and in closed form, the optimal update of a given coordinate when all the
+others are kept ﬁxed. Denoting q the iteration number, and Z(cid:48)
+[ω0] (atom k0 at position ω0) the updated
+k0
+version of Z(q)
+k0
+
+[ω0], the update reads
+
+where β(q) is an auxiliary variable in
+
+[ω0], λ) ,
+
+(7)
+
+Z(cid:48)
+
+ST(β(q)
+k0
+
+k0[ω0] =
+
+1
+DDDk0(cid:107)
+(cid:107)
+K
+Ω deﬁned for (k, ω)
+
+2
+2
+
+∈
+
+X
+(cid:32)(cid:18)
+
+β(q)
+k [ω]=
+
+X
+
+Z(q)
+
+−
+
+DDD+Z(q)
+∗
+
+k [ω]eω
+
+DDDk
+∗
+
+DDD(cid:30)
+k
+∗
+
+[1, K]
+
+Ω as
+
+×
+
+(cid:19)
+
+(cid:33)
+
+[ω] ,
+
+and where eω is a dirac (canonical vector) with value 1 in ω and 0 elsewhere. To make this update efﬁcient
+it was noticed by Kavukcuoglu et al. (2010) that if the coordinate Zk0[ω0] is updated with an additive update
+∆Zk0[ω0] = Z(cid:48)
+k0
+
+[ω0], then it is possible to cheaply obtain β(q+1) from β(q) using the relation
+
+Z(q)
+k0
+
+[ω0]
+
+−
+
+β(q+1)
+k
+
+[ω] = β(q)
+
+k [ω]
+
+−
+= (k0, ω0). As the support of (DDDk0 ∗
+
+for all (k, ω)
+after an update in ω0, the value β(q+1)
+
+DDD(cid:30)
+
+k)[ω
+
+(DDDk0 ∗
+DDD(cid:30)
+
+−
+k)[ω] is (cid:81)d
+
+i=1[
+
+ω0]∆Z(q)
+k0
+
+[ω0] ,
+
+only changes in the neighborhood
+
+(ω0) of ω0, where
+
+Li + 1, Li[, equation (8) implies that,
+
+−
+
+V
+
+k
+
+V
+
+(ω0) =
+
+[(ω0)i
+
+Li + 1, (ω0)i + Li[ .
+
+d
+(cid:89)
+
+i=1
+
+−
+
+(8)
+
+(9)
+
+(2dK
+) operations are
+Θ
+We recall that Li is the size of an atom in the direction i. This means that only
+|
+|
+needed to maintain β up-to-date after each Z update. The procedure is run until maxk,t
+∆Zk[t]
+becomes
+|
+|
+smaller than a speciﬁed tolerance parameter (cid:15)
+
+O
+
+0.
+
+≥
+
+The selection of the updated coordinate (k0, ω0) can follow different strategies. Cyclic updates (Friedman
+et al., 2007) and random updates (Shalev-Shwartz and Tewari, 2009) are efﬁcient strategies which only
+(1) computational complexity. Osher and Li (2009)
+require to access one value of (7). They have a
+propose to select greedily the coordinate which is the farther from its optimal value.
+In this case, the
+. The quantity ∆Zk[ω]
+∆Zk[ω]
+coordinate is chosen as the one with the largest additive update max(k,ω) |
+|
+acts as a proxy for the cost reduction obtained with this update.
+
+O
+
+). Yet, it has a better convergence
+This strategy is computationally more expensive, with a cost of
+|
+rate (Nutini et al., 2015; Karimireddy et al., 2018) as it updates in priority the important coordinates. To
+reduce the iteration complexity of greedy coordinate selection while still selecting more relevant coordi-
+nates, Moreau et al. (2018) proposed to select the coordinate in a locally greedy fashion. The domain Ω is
+= m(cid:48). Then, at each
+partitioned in M disjoint sub-domains
+C
+iteration q, the coordinate to update is selected greedily on the m-th sub-domain
+
+m: Ω =
+
+m and
+
+m(cid:48) =
+
+for m
+
+Ω
+|
+
+∩ C
+
+(K
+
+O
+
+∪
+
+C
+
+C
+
+m
+
+m
+
+∅
+
+m
+
+C
+
+(k0, ω0) = argmax
+
+(k,ω)∈[1,K]×Cm |
+
+∆Zk[ω]
+|
+
+,
+
+with m = q mod M (cyclic rule).
+
+5
+
+Algorithm 2 DiCoDiLe with W workers
+1: Input: DDD(0), X, stopping criterion ν.
+2: repeat
+3:
+
+4:
+
+Compute Z(q+1) with DiCoDiLe-Z(X, DDD(q), W ).
+Compute φ and ψ with (17) and W workers.
+Update DDD(q+1) with PGD and armijo backtracking line-search.
+
+5:
+6: until Cost variation is smaller than ν
+
+This selection differs from the greedy selection as it is only locally selecting the best coordinate to update.
+).
+The iteration complexity of this strategy is therefore linear with the size of the sub-segments
+|
+If the size of the sub-segments is 1, this algorithm is equivalent to a cyclic coordinate descent, while with
+1 = Ω it boils down to greedy updates. The selection of the sub-segment size is there-
+M = 1 and
+fore a trade-off between the cyclic and greedy coordinate selection. By using sub-segments of size 2d
+Θ
+,
+|
+the computational complexity of selecting the coordinate to update and the complexity of the update of β
+). Algorithm 1 summarizes the
+Θ
+are matched. The global iteration complexity of LGCD becomes
+|
+|
+computations for LGCD.
+
+(K
+
+(K
+
+|C
+
+O
+
+O
+
+C
+
+m
+
+|
+
+4 Distributed Convolutional Dictionary Learning (DiCoDiLe)
+
+In this section, we introduce DiCoDiLe, a distributed algorithm for convolutional sparse coding. Its step
+are summarized in Algorithm 2. The CSC part of this algorithm will be referred to as DiCoDiLe-Z and
+extend the DICOD algorithm to handle multidimensional data such as images, which were not covered
+by the original algorithm. The key to ensure the convergence with multidimensional data is the use of
+asynchronous soft-locks between neighboring workers. We also propose to employ a locally greedy CD
+strategy which boosts running time, as demonstrated in the experiments. The dictionary update relies on
+smart pre-computation which make the computation of the gradient of (6) independent of the size of Ω.
+
+4.1 Distributed sparse coding with LGCD
+
+For convolutional sparse coding, the coordinates that are far enough – compared to the size of the dictio-
+It is thus natural to parallelize CSC resolution by splitting the data
+nary – are only weakly dependent.
+in continuous sub-domains. It is the idea of the DICOD algorithm proposed by Moreau et al. (2018) for
+one-dimensional signals.
+
+Given W workers, DICOD partitions the domain Ω in W disjoint contiguous time intervals
+
+w.
+
+S
+
+Then each worker w runs asynchronously a greedy coordinate descent algorithm on
+w. To ensure the
+convergence, Moreau et al. (2018) show that it is sufﬁcient to notify the neighboring workers if a local
+update changes the value of β outside of
+w = (cid:81)d
+S
+
+i=1[li, ui[. The Θ-border is
+
+Let us consider a sub-domain,
+
+w.
+
+S
+
+S
+
+L(
+
+w) =
+
+B
+
+S
+
+[li, li + Li[
+
+[ui
+
+Li, ui[ .
+
+∪
+
+−
+
+d
+(cid:89)
+
+i=1
+
+(10)
+
+6
+
+w with sub-domains of size 2d
+S
+
+Θ
+.
+|
+
+|
+
+Algorithm 3 DiCoDiLe-Z with W workers
+
+1: Input: DDD, X, parameter (cid:15) > 0, sub-domains
+2: In parallel for w = 1
+· · ·
+(w)
+3: Compute a partition
+m
+{C
+4: Initialize βk[t] and Zk[t]
+5: repeat
+6:
+
+W
+M
+m=1 of the worker domain
+}
+(k, t)
+∀
+
+for m=1. . . M do
+
+[1, K]
+
+× S
+
+w,
+
+w,
+
+∈
+
+S
+
+Receive messages and update Z and β with (8)
+Choose (k0, ω0) =
+
+∆Zk[ω]
+
+argmax
+(k,ω)∈[1,K]×C(w)
+m
+
+|
+
+|
+∆Zk[ω] then
+
+if
+
+<
+
+∆Zk0[ω0]
+|
+|
+The coordinate is soft-locked, goto 6
+
+max
+(k,ω)∈[1,K]×V(ω0) |
+
+end if
+Update β with (8) and Zk0[ω0]
+if ω0
+
+w) then
+
+2L(
+
+Z(cid:48)
+k0
+
+[ω0]
+
+←
+
+∈ B
+Send (k0, ω0, ∆Zk0[ω0]) to neighbors
+
+S
+
+7:
+
+8:
+
+9:
+
+10:
+
+11:
+
+12:
+
+13:
+
+14:
+
+15:
+
+end if
+end for
+
+16:
+17: until global convergence
+
+∆Z
+
+∞ < (cid:15)
+
+(cid:107)
+
+(cid:107)
+
+L(
+
+In case that a Z update affects β in the Θ-border
+w, then one needs to notify other workers
+S
+B
+w(cid:48) whose domain overlap with the update of β i.e.
+It is done by sending the triplet
+w(cid:48)
+∩ S
+V
+(k0, ω0, ∆Zk0[ω0]) to these workers, which can then update β using formula (8). Figure 2 illustrates this
+communication process on a 2D example. There is few inter-processes communications in this distributed
+algorithm as it does not rely on centralized communication, and a worker only communicates with its neigh-
+w), a small number of iterations need
+bors. Moreover, as the communication only occurs when ω0
+to send messages if
+
+S
+(ω0)
+
+w) of
+
+∈ B
+
+.
+∅
+
+L(
+
+=
+
+S
+
+.
+
+L(
+
+w)
+
+|B
+
+S
+
+| (cid:28) |S
+
+w
+
+|
+
+As a worker can be affected by its neighboring workers, the stopping criterion of CD cannot be applied
+independently in each worker. To reach a consensus, the convergence is considered to be reached once no
+worker can offer a change on a Zk[ω] that is higher than (cid:15). Workers that reach this state locally are paused,
+waiting for incoming communication or for the global convergence to be reached.
+
+DiCoDiLe-Z This algorithm, described in Algorithm 3, is distributed over W workers which update asyn-
+chronously the coordinates of Z. The domain Ω is once also partitioned with sub-domain
+w but unlike
+DICOD, the partitioning is not restricted to be chosen along one direction. Each worker w
+[1, W ] is in
+charge of updating the coordinates of one sub-domain
+
+S
+∈
+
+w.
+
+S
+
+The worker w computes a sub-partition of its local domain
+Then, at each iteration q, the worker w chooses an update candidate
+
+S
+
+w in M disjoint sub-domains
+
+(w)
+m of size 2d
+
+C
+
+.
+
+Θ
+|
+|
+
+(11)
+
+(k0, ω0) =
+
+argmax
+(k,ω)∈[1,K]×C(w)
+m
+
+∆Zk[ω]
+|
+|
+
+,
+
+with m = q mod M . The process to accept or reject the update candidate uses a soft-lock mechanism
+described in the following paragraphs. If the candidate is accepted, the value of the coordinate Zk0[ω0] is
+updated to Z(cid:48)
+.
+k0
+∅
+V
+w
+m+1 without updating a coordinate.
+If the candidate is rejected, the worker moves on to the next sub-domain
+
+[ω0], beta is updated with (8) and the neighboring workers w(cid:48) are notiﬁed if
+
+(ω0)
+
+∩ S
+
+=
+
+w(cid:48)
+
+C
+
+7
+
+w
+S
+
+(ωi)
+
+V
+
+Soft-lock area
+
+L(
+
+w)
+
+B
+
+S
+
+Θ(
+
+w)
+
+E
+
+S
+
+w
+S
+
+−
+
+W1
+
+1
+
+−
+
+W1
+
+w
+S
+
+−
+
+W1+1
+
+w
+S
+
+−
+
+k1, ω1, ∆Zk1[ω1]
+
+ω1·
+
+w+1
+
+S
+
+ω0·
+
+Sw
+
+k2, ω2, ∆Zk2[ω2]
+
+T /W2
+
+T /W1
+
+L L
+
+w
+S
+
+1
+−
+
+ω2·
+
+w+W1
+
+S
+
+w+W1+1
+
+S
+
+Figure 2: Communication process in DiCoDiLe-Z
+with d = 2 and 9 workers centered around worker w.
+The update in ω0 is independent of the other workers.
+The update in ω1 is performed if no better coordinate
+update is possible in the soft-lock area
+w+1
+(red hatched area). If accepted, the worker w + 1
+needs to be notiﬁed. The update in ω2 changes the
+value of the optimal updates in the Θ-extension of the
+other workers sub-domains. Thus it needs to notify
+all the neighboring workers.
+
+(ω1)
+
+∩ S
+
+V
+
+Interferences. When W coordinates (kw, ωw)W
+the updates might not be independent. The local version of β used for the update does not account for the
+other updates. The cost difference resulting from these updates is denoted ∆E, and the cost reduction in-
+duced by only one update w is denoted ∆Ekw [ωw]. Simple computations, detailed in Proposition A.2, show
+that
+
+w=1 of Z are updated simultaneously by respectively ∆Zkw [ωw],
+
+∆E =
+
+∆Ekw [ωw]
+
+W
+(cid:88)
+
+i=1
+
+(cid:88)
+
+−
+
+w(cid:54)=w(cid:48)
+
+(DDDkw ∗
+
+DDD(cid:30)
+
+kw(cid:48) )[ωw(cid:48)
+
+−
+
+ωw]∆Zkw [ωw]∆Zkw(cid:48) [ωw(cid:48)] ,
+
+(12)
+
+If for all w, all other updates w(cid:48) are such that if ωw(cid:48) /
+
+ωw] = 0 and the up-
+(cid:12)
+(cid:12)
+(cid:12) = I0 > 1,
+(ω0)
+dates can be considered to be sequential as the interference term is zero. When
+the interference term does not vanish. Moreau et al. (2018) show that if I0 < 3, then, under mild assump-
+tion, the interference term can be controlled and DICOD converges. This is sufﬁcient for 1D partitioning
+as this is always veriﬁed in this case. However, their analysis cannot be extended to I0
+3, limiting the
+partitioning of Ω.
+
+(ωw), then (DDDkw ∗
+
+kw(cid:48) )[ωw(cid:48)
+(cid:12)
+(cid:9)
+(cid:8)ωw
+(cid:12)
+(cid:12)
+
+w ∩ V
+
+∈ V
+
+−
+
+≥
+
+DDD(cid:30)
+
+Soft Locks. To avoid this limitation, we propose the soft-lock, a novel mechanism to avoid interfering up-
+dates of higher order. The idea is to avoid updating concurrent coordinates simultaneously. A classical tool
+in computer science to address such concurrency issue is to rely on a synchronization primitive, called lock.
+This primitive can ensure that one worker enters a given block of code. In our case, it would be possible to
+w). This would avoid any interfering
+use this primitive to only allow one worker to make an update on
+update. The drawback of this method is however that it prevents the algorithm to be asynchronous, as typical
+lock implementations rely on centralized communications. Instead, we propose to use an implicit locking
+mechanism which keeps our algorithm asynchronous. This idea is the following.
+
+L(
+
+B
+
+S
+
+8
+
+Additionally to the sub-domain
+L(
+
+w) of its sub-domain, deﬁned for
+
+S
+
+E
+
+S
+
+w = (cid:81)d
+S
+
+i=1[li, ui[ as
+
+w, each worker also maintains the value of Z and β on the Θ-extension
+
+L(
+
+w) =
+
+E
+
+S
+
+[li
+
+Li, li[
+
+[ui, ui + Li[ .
+
+−
+
+∪
+
+d
+(cid:89)
+
+i=1
+
+(13)
+
+(14)
+
+(15)
+
+B
+
+2L(
+
+These two quantities can be maintained asynchronously by sending the same notiﬁcations on an extended
+w) with twice the size of Θ in each direction. Then, at each iteration, the worker w gets a
+border
+w), the coordinate is updated like in LGCD.
+candidate coordinate (k0, ω0) to update from (11). If ω0
+L(
+When ω0
+w),
+i.e. if
+
+w), the candidate is accepted if there is no better coordinate update in
+
+(ω0)
+
+∈ B
+
+(cid:54)∈ B
+
+∩ E
+
+L(
+
+L(
+
+V
+
+S
+
+S
+
+S
+
+S
+
+∆Zk0[ω0]
+|
+|
+
+>
+
+max
+k,ω∈[1,K]×V(ω0)∩EL(Sw) |
+
+∆Zk[ω]
+|
+
+.
+
+In case of equality, the preferred update is the one included in the sub-domain
+w(cid:48) with the minimal index.
+Using this mechanism effectively prevents any interfering update. If two workers w < w(cid:48) have update
+0 such that ω(cid:48)
+candidates ω0 and ω(cid:48)
+(ω0), then with (14), only one of the two updates will be accepted –
+0 ∈ V
+[ω(cid:48)
+or the one from w if both updates have the same magnitude
+0]
+∆Zk(cid:48)
+=
+∆Zk0[ω0]
+either the largest one if
+|
+|
+| (cid:54)
+|
+– and the other will be dropped. This way the Z updates can be done in an asynchronous way.
+
+S
+
+0
+
+O
+
+(2dK
+
+Speed-up analysis of DiCoDiLe-Z Our algorithm DiCoDiLe-Z has a sub-linear speed-up with the num-
+ber of workers W . As each worker runs LGCD locally, the computational complexity of a local iteration in
+). This complexity is independent of the number of workers used to run the algo-
+Θ
+a worker w is
+|
+|
+rithm. Thus, the speed-up obtained is equal to the number of updates that are performed in parallel. If we
+consider W update candidates (kw, ωw) chosen by the workers, the number of updates that are performed
+corresponds to the number of updates that are not soft locked. When the updates are uniformly distributed
+w is not soft locked can be lower bounded
+on
+by
+
+w, the probability that an update candidate located in ω
+
+∈ S
+
+S
+
+P (ω
+
+SL)
+
+(cid:54)∈
+
+≥
+
+d
+(cid:89)
+
+i=1
+
+(1
+
+−
+
+WiLi
+Ti
+
+)
+
+are large for all i, i.e. when the size
+Computations are detailed in Proposition B.1. When the ratios
+1. In
+of the workers sub-domains
+are large compared to the dictionary size
+this case, the expected number of accepted update candidates is close to W and DiCoDiLe-Z scales almost
+linearly. When Wi reaches Ti
+Li
+
+Θ
+|
+2 , and the acceleration is reduced to W
+2 .
+
+|S
+|
+( 21/d
+21/d−1
+
+), then P (ω
+
+, then P (ω
+
+SL) (cid:38) 1
+
+SL)
+
+(cid:39)
+
+(cid:54)∈
+
+w
+
+|
+
+Ti
+WiLi
+
+(cid:54)∈
+
+In comparison, Moreau et al. (2018) reports a super-linear speed-up for DICOD on 1D signals. This is due to
+the fact that they are using GCD locally in each worker, which has a very high iteration complexity when W
+is small, as it scales linearly with the size of the considered sub domain. Thus, when sub-dividing the signal
+between more workers, the iteration complexity is decreasing and more updates are performed in parallel,
+which explains why the speed-up is almost quadratic for low W . As the complexity of iterative GCD are
+worst than LGCD, DiCoDiLe-Z has better performance than DICOD in low W regime. Furthermore, in the
+1D setting, DICOD becomes similar to DiCoDiLe-Z once the size of the workers sub-domain becomes too
+(w)
+m of size 2d
+. The local iteration of DiCoDiLe-Z are
+Θ
+small to be further partitioned with sub-segments
+|
+the same as the one performed by DICOD in this case. Thus, DICOD does not outperform DiCoDiLe-Z in
+the large W setting either.
+
+C
+
+|
+
+9
+
+4.2 Distributed dictionary updates
+
+Dictionary updates need to minimize a quadratic objective under constraint (6). DiCoDiLe uses PGD to
+update its dictionary, with an Armijo backtracking line-search (Wright and Nocedal, 1999). Here, the bottle
+)). For
+neck is that the computational complexity of the gradient for this objective is
+|
+very large signals or images, this cost is prohibitive. We propose to also use the distributed set of workers to
+scale the computations. The function to minimize in (6) can be factorized as
+
+Ω
+log(
+|
+
+(P K2
+
+Ω
+|
+
+O
+
+|
+
+DDDF (Z, DDD) = Z(cid:30)
+
+(X
+
+Z
+
+DDD) = ψ
+
+φ
+
+DDD ,
+
+∇
+
+∗
+being the restriction of the convolution Z(cid:30)
+
+−
+
+∗
+
+−
+
+∗
+Z to Φ = (cid:81)d
+i=1[
+
+∗
+
+−
+
+Li + 1, Li[, and ψ
+
+(16)
+
+K×P
+Θ
+
+∈ X
+
+X restricted to Θ. These two quantities can be computed in parallel by the workers.
+
+K×K
+Φ
+
+with φ
+∈ X
+the convolution Z(cid:30)
+Φ,
+For τ
+
+∗
+
+∈
+
+(cid:88)
+
+W
+(cid:88)
+
+(cid:88)
+
+φ[τ ] =
+
+Z[ω]Z[τ + ω] =
+
+Z[ω]Z[τ + ω]
+
+(17)
+
+Φ
+
+ω∈Ω
+
+ω∈Sw
+
+× S
+
+w, we have ω
+
+and for all τ, ω
+τ
+−
+∈
+mapped to each worker, before being provided to the reduce operation φ = (cid:80)W
+valid for the computation of Z(cid:30)
+(K2
+puted with respectively
+The values of ψ and φ are sufﬁcient statistics to compute
+complexity
+dictionary atoms.
+
+w=1
+w). Thus, the computations of the local φw can be
+w=1 φw. The same remark is
+X. By making use of these distributed computation, φ and ψ can be com-
+)) operations.
+O
+∪ E
+DDDF and F , which can thus be computed with
+)), independently of the signal size. This allows to efﬁciently update the
+Θ
+|
+
+O
+log(2d
+
+)) and
+|
+
+∗
+w
+|S
+
+(K2P
+
+w)
+|
+
+(KP
+
+Θ
+|
+
+log(
+
+log(
+
+∈ S
+
+∪ E
+
+∪ E
+
+Θ(
+
+Θ(
+
+Θ(
+
+w)
+
+|S
+
+|S
+
+|S
+
+∇
+
+O
+
+S
+
+S
+
+S
+
+w
+
+w
+
+w
+
+w
+
+|
+
+|
+
+|
+
+|
+
+5 Numerical Experiments
+
+The numerical experiments are run on a SLURM cluster with 30 nodes. Each node has 20 physical cores,
+40 logical cores and 250 GB of RAM. DiCoDiLe is implemented in Python (Python Software Fundation,
+2017) using mpi4py (Dalc´ın et al., 2005)1.
+
+5.1 Performance of distributed sparse coding
+
+The distributed sparse coding step in DiCoDiLe is impacted by the coordinate descent strategy, as well as the
+data partitioning and soft-lock mechanism. The following experiments show their impact on DiCoDiLe-Z.
+
+Coordinate Selection Strategy The experimental data are generated following the sparse convolutional
+linear model (2) with d = 1 in RP with P = 7. The dictionary is composed of K = 25 atoms DDDk of length
+L = 250. Each atom is sampled from a standard Gaussian distribution and then normalized. The sparse
+code entries are drawn from a Bernoulli-Gaussian distribution, with Bernoulli parameter ρ = 0.007, mean 0
+and standard variation 10. The noise term ξ is sampled from a standard Gaussian distribution with variance
+1. The length of the signals X is denoted T . The regularization parameter was set to 0.1λmax.
+
+1Code available at github.com/tommoral/dicodile
+
+10
+
+Figure 3: Average running time of CD with three coordinate selection schemes – (blue) Locally Greedy,
+(orange) Randomized and (green) Greedy – for two signal lengths. LGCD consistently outperforms the two
+other strategies.
+
+Using one worker, Figure 3 compares the average running times of three CD strategies to solve (4): Greedy
+(GCD), Randomized (RCD) and LGCD. LGCD consistently outperforms the two other strategies for both
+T = 150L and T = 750L. For both LGCD and RCD, the iteration complexity is constant compared to the
+size of the signal, whereas the complexity of each GCD iteration scales linearly with T. This makes running
+time of GCD explode when T grows. Besides, as LGCD also prioritizes the more important coordinates, it
+is more efﬁcient than uniform RCD. This explains Figure 3 and justiﬁes the use of LGCD is the following
+experiments.
+
+Figure 4 investigates the role of CD strategies in the distributed setting. The average runtimes of DICOD
+(with GCD on each worker), and DiCoDiLe-Z (with LGCD) are reported in Figure 4. We stick to a small
+scale problem in 1D to better highlight the limitation of the algorithms but scaling results for a larger and
+2D problems are included in Figure C.1 and Figure C.2. DiCoDiLe-Z with LGCD scales sub-linearly
+with the number of workers used, whereas DICOD scales almost quadratically. However, DiCoDiLe-Z
+outperforms DICOD consistently, as the performance of GCD is poor for low number of workers using
+large sub-domains. The two coordinate selection strategies become equivalent when W reaches T /4L, as
+.
+in this case DiCoDiLe has only one sub-domain
+
+(w)
+1
+
+C
+
+Impact of 2D grid partitioning on images The performance of DiCoDiLe-Z on images are evaluated
+512). A dictionary DDD consists of K = 25
+using the standard colored image Mandrill at full resolution (512
+×
+patches of size 16
+16 extracted from the original image. We used λ = 0.1λmax as a regularization
+parameter.
+
+×
+
+The reconstruction of the image with no soft-locks is shown in Figure 5. To ensure the algorithm ﬁnishes,
+workers are stopped either if they reach convergence or if
+locally.
+When a coefﬁcient reaches this value, at least one pixel in the encoded patch has a value 50 larger than the
+maximal value for a pixel, so we can safely assume algorithm is diverging. The reconstructed image shows
+
+∞ becomes larger than mink
+(cid:107)
+
+50
+(cid:107)DDDk(cid:107)∞
+
+Z
+(cid:107)
+
+11
+
+Figure 4: Scaling of DICOD (orange) and DiCoDiLe-Z (blue) with the number of workers W . DiCoDiLe-
+Z only scales sub-linearly while DICOD scales super-linearly. However DiCoDiLe-Z is more efﬁcient that
+DICOD as the performance of the former with one worker is quite poor. When W reaches T /4L (dashed-
+green), DiCoDiLe-Z and DICOD become equivalent as DiCoDiLe-Z only has one sub-domain in each
+worker.
+
+Figure 5: Reconstruction of the image Mandrill us-
+ing DiCoDiLe with no soft-locks and 49 workers.
+The dashed lines show the partitions of the domain
+Ω. The algorithm diverges at the edges of some of
+the sub-domains due to interfering updates between
+more than two workers.
+
+w, as the activation are being wrongly estimated
+artifacts around the edges of some of the sub-domains
+in these locations. This visually demonstrates the need for controlling the interfering updates when more
+than two workers might interfere. When using DiCoDiLe-Z, the workers do not diverge anymore due to
+soft-locks.
+
+S
+
+To demonstrate the impact of the domain partitioning strategy on images, Figure 6 shows the average run-
+time for DiCoDiLe-Z using either a line of worker or a grid of workers. In this experiment K = 5 and
+the atom size is 8
+8. Both strategies scale similarly in the regime with low number of workers. But
+when W reaches T1/3L1, the performances of DiCoDiLe-Z stops improving when using the unidirectional
+partitioning of Ω. Indeed in this case many update candidates are selected at the border of the sub-domains
+w, therefore increasing the chance to reject an update. Moreover, the scaling of the linear split is limited to
+
+S
+W = T1/2L1 = 32, whereas the 2D grid split can be used with W up to 1024 workers.
+
+×
+
+12
+
+Figure 6: Scaling on 2D images of DiCoDiLe-Z with the number of workers for two partitioning strategies
+of Ω: (blue) Ω is split only along one direction, as in DICOD, (orange) Ω is split along both directions,
+on a grid. The running times are similar for low number of workers but the performances with the linear
+splits stop improving once W reaches the scaling limit T1/4L1 (green). With the grid of workers adapted to
+images, the performance improves further. The linear split stops when W reached T1/L1 because no more
+coordinate in
+
+w are independent from other neighbors.
+
+S
+
+5.2 Application to real signals
+
+Learning dictionary on Hubble Telescope images We present here results using CDL to learn patterns
+from an image of the Great Observatories Origins Deep Survey (GOODS) South ﬁeld, acquired by the
+Hubble Space Telescope (Giavalisco and the GOODS Teams, 2004). We used the STScI-H-2016-39 image2
+32 with regularization
+3600, and used DiCoDiLe to learn 25 atoms of size 32
+with resolution 6000
+parameter λ = 0.1λmax. The learned patterns are presented in Figure 7. This unsupervised algorithm is able
+to highlight structured patterns in the image, such as small stars. Patterns 1 and 7 are very fuzzy. This is
+probably due to the presence of very large object in the foreground. As this algorithm is not scale invariant,
+the objects larger than our patterns are encoded using these low frequency atoms.
+
+×
+
+×
+
+For comparison purposes, we run the parallel Consensus ADMM algorithm3 proposed by Skau and Wohlberg
+(2018) on the same data with one node of our cluster but it failed to ﬁt the computations in 250 GB of RAM.
+512 extracted randomly in the Hubble image.
+We restricted our problem to a smaller patch of size 512
+Figure C.3 in supplementary material reports the evolution of the cost as a function of the time for both
+methods using W = 36. The other algorithm performs poorly in comparison to DiCoDiLe.
+
+×
+
+2The image is at www.hubblesite.org/image/3920/news/58-hubble-ultra-deep-ﬁeld
+3Code available at https://sporco.readthedocs.io/
+
+13
+
+×
+
+32 learned from the Hubble Telescope images (STScI-H-2016-39-a) using
+Figure 7: 25 atoms 32
+DiCoDiLe with 400 workers and a regularization parameter λ = 0.1λmax. The atoms are sorted based on
+Zk
+1 from the top-left to the bottom-right. Most atoms displays a structure which corresponds to spatial
+(cid:107)
+objects. The atoms 1 and 7 have fuzzier structure because they are mainly used to encode larger scale
+objects.
+
+(cid:107)
+
+14
+
+6 Conclusion
+
+This work introduces DiCoDiLe, an asynchronous distributed algorithm to solve the CDL for very large
+multidimensional data such as signals and images. The number of workers that can be used to solve the CSC
+scales linearly with the data size, allowing to adapt the computational resources to the problem dimensions.
+Using smart distributed pre-computation, the complexity of the dictionary update step is independent of the
+data size. Experiments show that it has good scaling properties and demonstrate that DiCoDiLe is able to
+learn patterns in astronomical images for large size which are not handled by other state-of-the-art parallel
+algorithms.
+
+References
+
+Michal Aharon, Michael Elad, and Alfred Bruckstein. K-SVD: An Algorithm for Designing Overcom-
+plete Dictionaries for Sparse Representation. IEEE Transaction on Signal Processing, 54(11):4311–4322,
+2006.
+
+Amir Beck and Marc Teboulle. A Fast Iterative Shrinkage-Thresholding Algorithm for Linear Inverse
+
+Problems. SIAM Journal on Imaging Sciences, 2(1):183–202, 2009.
+
+J. Bergstra, A. Courville, and Y. Bengio. The Statistical Inefﬁciency of Sparse Coding for Images (or, One
+
+Gabor to Rule them All). arXiv e-prints, September 2011.
+
+Hilton Bristow, Anders Eriksson, and Simon Lucey. Fast convolutional sparse coding. In IEEE Conference
+
+on Computer Vision and Pattern Recognition (CVPR), pages 391–398, Portland, OR, USA, 2013.
+
+Rakesh Chalasani, Jose C. Principe, and Naveen Ramakrishnan. A fast proximal method for convolutional
+sparse coding. In International Joint Conference on Neural Networks (IJCNN), pages 1–5, Dallas, TX,
+USA, 2013.
+
+Patrick L Combettes and Heinz H. Bauschke. Convex Analysis and Monotone Operator Theory in Hilbert
+
+Spaces. Springer, 2011. ISBN 9788578110796. doi: 10.1017/CBO9781107415324.004.
+
+Lisandro Dalc´ın, Rodrigo Paz, and Mario Storti. MPI for Python. Journal of Parallel and Distributed
+
+Computing, 65(9):1108–1115, 2005. ISSN 07437315. doi: 10.1016/j.jpdc.2005.03.010.
+
+Pol del Aguila Pla and Joakim Jalden. Convolutional Group-Sparse Coding and Source Localiza-
+tion. In IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP), pages
+ISBN 978-1-5386-4658-8. doi: 10.1109/ICASSP.2018.8462235. URL https:
+2776–2780, 2018.
+//ieeexplore.ieee.org/document/8462235/.
+
+Tom Dupr´e la Tour, Thomas Moreau, Mainak Jas, and Alexandre Gramfort. Multivariate Convolutional
+Sparse Coding for Electromagnetic Brain Signals. In Advances in Neural Information Processing Systems
+(NeurIPS), pages 1–19, 2018.
+
+Jerome Friedman, Trevor Hastie, Holger H¨oﬂing, and Robert Tibshirani. Pathwise coordinate optimization.
+
+The Annals of Applied Statistics, 1(2):302–332, 2007. doi: 10.1214/07-AOAS131.
+
+Daniel Gabay and Bertrand Mercier. A dual algorithm for the solution of nonlinear variational prob-
+lems via ﬁnite element approximation. Computers & Mathematics with Applications, 2(1):17–40, 1976.
+ISSN 08981221. doi: 10.1016/0898-1221(76)90003-1. URL http://www.sciencedirect.com/
+science/article/pii/0898122176900031.
+
+15
+
+M. Giavalisco and the GOODS Teams. The Great Observatories Origins Deep Survey: Initial Results
+From Optical and Near-Infrared Imaging. The Astrophysical Journal Letters, 600(2):L93, 2004. doi:
+10.1086/379232. URL http://arxiv.org/abs/astro-ph/0309105%0Ahttp://dx.doi.
+org/10.1086/379232.
+
+Roger Grosse, Rajat Raina, Helen Kwong, and Andrew Y Ng. Shift-Invariant Sparse Coding for Audio
+
+Classiﬁcation. Cortex, 8:9, 2007.
+
+Mainak Jas, Tom Dupr´e la Tour, Umut S¸ ims¸ekli, and Alexandre Gramfort. Learning the Morphology of
+In Advances in Neural Information
+Brain Signals Using Alpha-Stable Convolutional Sparse Coding.
+Processing Systems (NIPS), pages 1–15, Long Beach, CA, USA, 2017. URL http://arxiv.org/
+abs/1705.08006.
+
+Sai Praneeth Karimireddy, Anastasia Koloskova, Sebastian U. Stich, and Martin Jaggi. Efﬁcient Greedy Co-
+ordinate Descent for Composite Problems. preprint ArXiv, 1810.06999, 2018. URL http://arxiv.
+org/abs/1810.06999.
+
+Koray Kavukcuoglu, Pierre Sermanet, Y-lan Boureau, Karol Gregor, and Yann Lecun. Learning Convolu-
+tional Feature Hierarchies for Visual Recognition. In Advances in Neural Information Processing Systems
+(NIPS), pages 1090–1098, Vancouver, Canada, 2010.
+
+Julien Mairal, Francis Bach, Jean Ponce, and Guillermo Sapiro. Online Learning for Matrix Factorization
+
+and Sparse Coding. Journal of Machine Learning Research (JMLR), 11(1):19–60, 2010.
+
+Thomas Moreau, Laurent Oudre, and Nicolas Vayatis. DICOD: Distributed Convolutional Sparse Coding.
+
+In International Conference on Machine Learning (ICML), Stockohlm, Sweden, 2018.
+
+Julie Nutini, Mark Schmidt, Issam H Laradji, Michael P. Friedlander, and Hoyt Koepke. Coordinate Descent
+Converges Faster with the Gauss-Southwell Rule Than Random Selection. In International Conference
+on Machine Learning (ICML), pages 1632–1641, Lille, France, 2015.
+
+Stanley Osher and Yingying Li. Coordinate descent optimization for (cid:96)1 minimization with application to
+
+compressed sensing; a greedy algorithm. Inverse Problems and Imaging, 3(3):487–503, 2009.
+
+Python Software Fundation. Python Language Reference, version 3.6, 2017.
+
+Shai Shalev-Shwartz and A Tewari. Stochastic Methods for (cid:96)1-regularized Loss Minimization. In Interna-
+
+tional Conference on Machine Learning (ICML), pages 929–936, Montreal, Canada, 2009.
+
+Erik Skau and Brendt Wohlberg. A Fast Parallel Algorithm for Convolutional Sparse Coding.
+
+In IEEE
+Image, Video, and Multidimensional Signal Processing Workshop (IVMSP), 2018. ISBN 9781538609514.
+doi: 10.1109/IVMSPW.2018.8448536.
+
+Jean-Luc Starck, Michael Elad, and David L Donoho. Image Decomposition Via the Combination of Sparse
+Representation and a Variational Approach. IEEE Trans.Image Process., 14(10):1570–1582, 2005. ISSN
+1057-7149. doi: 10.1109/TIP.2005.852206.
+
+Brendt Wohlberg. Efﬁcient convolutional sparse coding. In IEEE International Conference on Acoustics,
+Speech and Signal Processing (ICASSP), pages 7173–7177, Florence, Italy, 2014. ISBN 9781479928927.
+doi: 10.1109/ICASSP.2014.6854992.
+
+Brendt Wohlberg. Efﬁcient Algorithms for Convolutional Sparse Representations. IEEE Transactions on
+
+Image Processing, 25(1), 2016.
+
+16
+
+S. Wright and J. Nocedal. Numerical optimization. Science Springer, 1999.
+
+ISBN 0387987932. doi:
+
+10.1007/BF01068601.
+
+Florence Yellin, Benjamin D. Haeffele, and Ren´e Vidal. Blood cell detection and counting in holographic
+lens-free imaging by convolutional sparse dictionary learning and coding. In IEEE International Sympo-
+sium on Biomedical Imaging (ISBI), Melbourne, Australia, 2017.
+
+17
+
+A Computation for the cost updates
+
+When a coordinate Zk[t] is updated to Z(cid:48)
+Proposition A.1. If the coordinate (k0, ω0) is updated from value Zk0[ω0] to value Z(cid:48)
+k0
+in the cost function ∆Ek0[ω0] is given by:
+
+k[t], the cost update is a simple function of Zk[t] and Z(cid:48)
+
+k[t].
+[ω0], then the change
+
+∆Ek0[ω0] = (cid:107)
+
+2
+2
+
+DDDk0(cid:107)
+2
+
+(Zk0[ω0]2
+
+k0[ω0]2)
+Z(cid:48)
+
+βk0[ω0](Zk0[ω0]
+
+−
+
+−
+
+Z(cid:48)
+
+k0[ω0]) + λ(
+
+Zk0[ω0]
+|
+
+| − |
+
+Z(cid:48)
+
+).
+k0[ω0]
+|
+
+−
+
+if (k, ω) = (k0, ω0)
+elsewhere
+
+. Let α0 be the residual when coordinate
+
+αk0[ω] = (X
+
+Z
+
+−
+
+∗
+
+ω0]Zk0[ω0] = (X
+
+Z
+
+−
+
+DDD)[ω] + Zk0[ω0](eω0 ∗
+
+DDDk0)[ω0] .
+
+We also have αk0[ω] = (X
+
+Z(1)
+
+DDD)[ω] + DDDk0[ω
+
+ω0]Z(cid:48)
+k0
+
+−
+∗
+[ω0]. Then
+
+Proof. We denote Z(1)
+
+k [ω] =
+
+(k0, ω0) of Z is set to 0. For ω
+
+
+
+
+
+
+[ω0],
+
+Z(cid:48)
+k0
+Zk[ω],
+Ω,
+
+∈
+DDD)[ω] + DDDk0[ω
+
+−
+
+∗
+DDD(cid:1)2 [ω] + λ
+
+Z
+
+−
+
+∗
+
+Z
+
+(cid:107)
+
+1
+(cid:107)
+
+−
+
+αk0[ω]
+
+DDDk0[ω
+
+ω0]Zk0[ω0]
+
+−
+
+−
+
+1
+2
+
+(cid:17)2
+
+−
+
+(cid:88)
+
+(cid:16)
+
+ω∈Ω
+
+1
+2
+
+−
+
+(cid:88)
+
+(cid:16)
+
+ω∈Ω
+(cid:88)
+
+ω∈Ω
+
+−
+
+∆Ek0[ω0] =
+
+(cid:88)
+
+(cid:0)X
+
+ω∈Ω
+(cid:88)
+
+(cid:16)
+
+1
+2
+
+1
+2
+
+=
+
+=
+
+ω∈Ω
+(cid:88)
+
+ω∈Ω
+
+1
+2
+DDDk0(cid:107)
+2
+
+2
+2
+
+= (cid:107)
+
+This conclude our proof.
+
+(cid:17)2
+
+X
+
+Z(1)
+
+DDD
+
+−
+
+∗
+
+[ω] + λ
+(cid:107)
+
+Z(1)
+
+1
+(cid:107)
+
+αk0[ω]
+
+DDDk0[ω
+
+−
+
+−
+
+ω0]Z(cid:48)
+
+k0[ω0]
+
+(cid:17)2
+
+Zk0[ω0]
++ λ(
+|
+
+| − |
+
+Z(cid:48)
+
+k0[ω0]
+
+)
+
+|
+
+DDDk0[ω
+
+ω0]2(Zk0[ω0]2
+
+k0[ω0]2)
+Z(cid:48)
+
+−
+
+−
+
+αk0[ω]DDDk0[ω
+
+ω0](Zk0[ω0]
+
+−
+
+Z(cid:48)
+
+k0[ω0]) + λ(
+|
+
+−
+
+Zk0[ω0]
+
+Z(cid:48)
+
+k0[ω0]
+
+)
+
+|
+
+| − |
+
+(Zk0[ω0]2
+
+k0[ω0]2)
+Z(cid:48)
+
+−
+
+−
+
+(αk0 ∗
+(cid:124)
+
+DDD(cid:30)
+(cid:123)(cid:122)
+βk0 [ω0]
+
+(Zk0[ω0]
+k0)[ω0]
+(cid:125)
+
+−
+
+Z(cid:48)
+
+Zk0[ω0]
+k0[ω0]) + λ(
+|
+
+| − |
+
+Z(cid:48)
+
+)
+k0[ω0]
+|
+
+Using this result, we can derive the optimal value Z(cid:48)
+k0
+of the following optimization problem:
+
+[ω0] to update the coordinate (k0, ω0) as the solution
+
+Z(cid:48)
+
+k0[ω0] = arg min
+y∈R
+
+ek0,ω0(u)
+
+arg min
+u∈R
+
+∼
+
+DDDk0(cid:107)
+(cid:107)
+2
+
+2
+2
+
+(cid:16)
+
+u
+
+−
+
+(cid:17)2
+
+βk0[ω0]
+
++ λ
+|
+
+u
+|
+
+.
+
+(A.1)
+
+In the case where multiple coordinates (kw, ωw) are updated in the same iteration to values Z(cid:48)
+kw
+obtain the following cost variation.
+Proposition A.2. The update of the W coordinates (kw, ωw)W
+the cost by:
+
+w=1 with additive update ∆Zkw [ωw] changes
+
+[ωw], we
+
+iterative steps
+(cid:122)
+(cid:123)
+(cid:125)(cid:124)
+W
+(cid:88)
+
+∆Ew
+
+i=1
+
+∆E =
+
+−
+
+(cid:88)
+
+w(cid:54)=w(cid:48)
+(cid:124)
+
+(DDDkw ∗
+
+DDD(cid:30)
+
+kw(cid:48) )[ωw(cid:48)
+
+−
+
+ωw]∆Zkw [ωw]∆Zkw(cid:48) [ωw(cid:48)]
+,
+
+(cid:123)(cid:122)
+interference
+
+(cid:125)
+
+18
+
+
+
+
+
+
+K
+(cid:88)
+
+w=1
+
+Proof. We deﬁne Z(1)
+
+k [t] =
+
+Zkw [ωw],
+Zk[t],
+
+if (k, ω) = (kw, ωw)
+otherwise
+
+.
+
+Let
+
+and
+
+α[ω] = (X
+
+Z
+
+DDD)[t] +
+
+DDDkw [ω
+
+ωw]Zkw [ωw] = (X
+
+−
+
+∗
+
+−
+
+Z(1)
+
+DDD)[t] +
+
+−
+
+∗
+
+DDDkw [ω
+
+ωw]Z(cid:48)
+
+kw [ωw] ,
+
+−
+
+K
+(cid:88)
+
+w=1
+
+αw[ω] = (X
+
+Z
+
+−
+
+∗
+
+DDD)[t] + DDDkw [ω
+
+ωw]Zkw [ωw] = α[ω]
+
+−
+
+DDDkw(cid:48) [ω
+
+ωw(cid:48)]Zkw(cid:48) [ωw(cid:48)] .
+
+−
+
+(cid:88)
+
+−
+
+w(cid:48)(cid:54)=w
+
+19
+
+X[ω]
+
+Z
+
+DDD[ω]
+
+−
+
+∗
+
++ λ
+
+Z
+(cid:107)
+
+1
+
+(cid:107)
+
+−
+
+(cid:17)2
+
+X[ω]
+
+Z(1)
+
+DDD[ω]
+
+−
+
+∗
+
+Z(1)
+
++ λ
+(cid:107)
+
+1
+(cid:107)
+
+(cid:17)2
+
+(cid:88)
+
+(cid:16)
+
+ω∈Ω
+
+2
+
+=
+
+α[ω]
+
+DDDkw [ω
+
+ωw]Zkw [ωw]
+
+
+
+−
+
+W
+(cid:88)
+
+−
+
+w=1
+
+1
+2
+
+(cid:88)
+
+ω∈Ω
+
+−
+
+
+
+α[ω]
+
+W
+(cid:88)
+
+−
+
+w=1
+
+
+
+2
+
+DDDkw [ω
+
+ωw]Z(cid:48)
+
+kw [ωw]
+
+
+
+−
+
+Zkw [ωw]
+
+λ(
+|
+
+Z(cid:48)
+
+)
+kw [ωw]
+|
+
+| − |
+
+DDDkw [ω
+
+ωw]2(Zkw [ωw]2
+
+−
+
+kw [ωw]2) +
+Z(cid:48)
+
+−
+
+Zkw [ωw]
+
+λ(
+|
+
+Z(cid:48)
+
+)
+kw [ωw]
+|
+
+| − |
+
+W
+(cid:88)
+
+w=1
+
+α[ω]DDDkw [ω
+
+ωw]∆Zkw [ωw]
+
+(cid:88)
+
+−
+
+w(cid:54)=w(cid:48)
+
+DDDkw [ω
+
+ωw]DDDkw(cid:48) [ω
+
+ωw(cid:48)](Zkw [ωw]Zkw(cid:48) [ωw(cid:48)]
+
+−
+
+kw [ωw]Z(cid:48)
+Z(cid:48)
+
+−
+
+(cid:21)
+kw(cid:48) [ωw(cid:48)])
+
+2(Zkw [ωw]2
+2
+
+kw [ωw]2)
+Z(cid:48)
+
+(αkw ∗
+
+−
+
+Zkw [ωw]
+kw )[ωw]∆Zkw [ωw] + λ(
+|
+
+| − |
+
+Z(cid:48)
+
+kw [ωw]
+
+)
+|
+
+DDD(cid:30)
+
+−
+
+−
+
+−
+
+Then
+
+∆E =
+
+1
+2
+
+1
+2
+
+(cid:88)
+
+(cid:16)
+
+
+
+ω∈Ω
+
+(cid:88)
+
+ω∈Ω
+
++
+
+W
+(cid:88)
+
+w=1
+
+(cid:88)
+
+W
+(cid:88)
+
+=
+
+1
+2
+
+ω∈Ω
+
+w=1
+(cid:20) W
+(cid:88)
+
+(cid:88)
+
+−
+
+ω∈Ω
+
+w=1
+
+W
+(cid:88)
+
+=
+
+DDDkw (cid:107)
+(
+(cid:107)
+w=1
+(cid:20) W
+(cid:88)
+
+(cid:88)
+
+−
+
+ω∈Ω
+
+w=1
+
+αkw [ω]DDDkw [ω
+
+ωw]∆Zkw [ωw]
+
+−
+
+(cid:88)
+
++
+
+w(cid:54)=w(cid:48)
+
+DDDkw [ω
+
+ωw]DDDkw(cid:48) [ω
+
+−
+
+−
+
+−
+
+−
+
+ωw(cid:48)](∆Zkw [ωw]Z(cid:48)
+
+kw(cid:48) [ωw(cid:48)] + ∆Zkw(cid:48) [ωw(cid:48)]Z(cid:48)
+
+kw [ωw])
+
+kw [ωw]Z(cid:48)
+Z(cid:48)
+
+−
+
+(cid:21)
+kw(cid:48) [ωw(cid:48)])
+
+=
+
+W
+(cid:88)
+
+w=1
+
+∆Ekw [ωw]
+
+ωw]DDDkw(cid:48) [ω
+
+ωw(cid:48)](Zkw [ωw]Zkw(cid:48) [ωw(cid:48)]
+
+DDDkw [ω
+
+ωw]DDDkw(cid:48) [ω
+
+ωw(cid:48)]
+
+−
+
+(cid:19)
+
+×
+
+DDDkw [ω
+−
+
+(cid:18)(cid:88)
+
+
+(cid:88)
+
+w(cid:54)=w(cid:48)
+
+ω∈Ω
+
+−
+
+−
+
+(cid:20)
+
+Zkw [ωw]Zkw(cid:48) [ωw(cid:48)]
+
+Z(cid:48)
+
+kw [ωw]Zkw(cid:48) [ωw(cid:48)]
+
+Zkw [ωw]Z(cid:48)
+
+kw(cid:48) [ωw(cid:48)] + Z(cid:48)
+
+kw(cid:48) [ωw(cid:48)]Z(cid:48)
+
+−
+
+−
+
+
+
+DDDkw [ω]DDDkw(cid:48) [ω + ωw
+
+ωw(cid:48)]
+
+ (Zkw [ωw]
+
+−
+
+Z(cid:48)
+
+kw [ωw])(Zkw(cid:48) [ω1]
+
+Z(cid:48)
+kw(cid:48) [ωw(cid:48)])
+
+−
+
+−
+
+(cid:21)
+kw [ωw]
+
+
+
+
+
+∆Ekw [ωw]
+
+
+
+
+
+(cid:88)
+
+(cid:88)
+
+−
+
+w(cid:54)=w(cid:48)
+
+ω∈Ω
+
+=
+
+=
+
+W
+(cid:88)
+
+w=1
+
+W
+(cid:88)
+
+w=1
+
+∆Ekw [ωw]
+
+(cid:88)
+
+−
+
+w(cid:54)=w(cid:48)
+
+(DDDkw(cid:48) ∗
+
+DDD(cid:30)
+
+kw )[ωw
+
+−
+
+ωw(cid:48)]∆Zkw [ωw]∆Zkw(cid:48) [ωw(cid:48)]
+
+20
+
+B Probability of a coordinate to be soft-locked
+
+Proposition B.1. The probability of an update candidate being accepted, if the updates are spread uniformly
+on Ω, is lower bounded by
+
+P (ω
+
+SL)
+
+(cid:54)∈
+
+≥
+
+d
+(cid:89)
+
+i=1
+
+(1
+
+−
+
+WiLi
+Ti
+
+)
+
+∈
+
+[1, W ] be a worker indice and m
+
+Proof. Let w
+[1, M ] be the indice of the current sub-domain being
+considerd by the worker w. We denote ω = argmax
+the position of the update
+ω∈C(w)
+m
+candidate chosen by w and j =
+the number of workers that are impacted by this
+has
+update. With the deﬁnition of the soft-lock, there exists at least one worker in
+a coordinate which is not soft-locked. As the updates are uniformly spread across the workers, we get the
+1
+probability of ω being locked is P (ω
+j .
+
+∆Zk[ω]
+|
+
+w s.t.
+{
+
+maxk
+
+(ω) =
+
+(ω) =
+
+w s.t.
+
+∩ V
+
+∩ V
+
+∅}|
+
+SL
+
+ω)
+
+∅}
+
+|{
+
+∈
+
+S
+
+S
+
+w
+
+w
+
+|
+
+≥
+Thus, the probability of an update candidate (k, ω)
+
+(cid:54)∈
+
+|
+
+[1, K]
+
+w to be accepted is
+
+P (ω
+
+SL) =
+
+P (ω
+
+SL
+
+ω)P (ω)
+
+(cid:54)∈
+
+× S
+
+|
+
+(cid:54)∈
+
+1
+jω
+
+∈
+(cid:88)
+
+ω∈Sw
+1
+
+(cid:88)
+
+ω∈Sw
+d
+(cid:89)
+
+i=1
+
+≥
+
+w
+
+|
+
+|S
+
+≥
+
+1
+
+w
+
+|
+
+|S
+d
+(cid:89)
+
+(1
+
+≥
+
+i=1
+
+−
+
+(Ti
+
+WiLi)
+
+−
+
+WiLi
+Ti
+
+)
+
+(B.1)
+
+(B.2)
+
+(B.3)
+
+(B.4)
+
+where (B.3) results from the summation on Ω. This step is clearer by looking at Figure B.1.
+
+P = 1
+4
+jω = 4
+
+P = 1
+2
+jω = 2
+
+L2
+
+P = 1
+4
+jω = 4
+
+P = 1
+2
+jω = 2
+
+L1
+
+P = 1
+4
+jω = 4
+
+L(
+
+w)
+
+B
+
+S
+
+T1
+W1
+
+P = 1
+2
+jω = 2
+
+w
+jω = 1
+
+S
+
+T2
+W2
+
+P = 1
+2
+jω = 2
+
+P = 1
+4
+jω = 4
+
+Figure B.1: Summary of the
+value of jω on a 2D example.
+We can easily see that the sum
+along each direction is Ti
+Li
+on each workers. When multi-
+plied by the number of workers
+Wi along each direction, we ob-
+tain (B.3).
+
+Wi −
+
+21
+
+C Extra experiments
+
+Scaling of DiCoDiLe-Z for larger 1D signals Figure C.1 scaling properties of DICOD and DiCoDiLe-Z
+are consistent for larger signals. Indeed, in the case where T = 750, DiCoDiLe-Z scales linearly with the
+number of workers. We do not see the drop in performance, as in this experiments W does not reach the
+scaling limit T /3L. Also, DiCoDiLe-Z still outperforms DICOD for all regimes.
+
+Figure C.1: Scaling of DICOD (orange) and DiCoDiLe-Z(blue) with the number of workers W . DiCoDiLe-
+Zonly scales sub-linearly while DICOD scales super-linearly. However DiCoDiLe-Zis more efﬁcient that
+DICOD as the performance of the former with one worker are really bad. The green line denotes the number
+of cores where DiCoDiLe-Zand DICOD become the same as DiCoDiLe-Zonly has one sub-domain in each
+worker. The results are consistent for both small (left, T = 150L) and large (right T = 750L) signals sizes.
+
+Scaling of DiCoDiLe-Z for 2D signals Figure C.2 illustrates the scaling performance of DiCoDiLe-Z on
+images. The average running times of DiCoDiLe-Z are reported as a function of the number of workers W
+for different regularization parameters λ and for greedy and locally greedy selection. As for the 1D CSC
+resolution, the locally greedy selection consistently outperforms the greedy selection. This is particularly
+the case when using low number of workers W . Once the size of the sub-domains becomes smaller, the
+performances of both coordinate selection become closer as both algorithms become equivalent. Also, the
+convergence of DiCoDiLe-Z is faster for large λ. This is expected, as in this case, the solution Z∗ is sparser
+and less coordinates need to be updated.
+
+C.1 Comparison with Skau and Wohlberg (2018)
+
+Figure C.3 displays the evolution of the objective function (3) as a function of time for DiCoDiLe and the
+Consensus ADMM algorithm proposed by Skau and Wohlberg (2018). Both algorithms were run on a single
+node with 36 workers. We used the Hubble Space Telescope GOODS South image as input data. As the
+algorithm by Skau and Wohlberg (2018) raised a memory error with the full image, we used a random-
+patch of size 512
+512 as input data. Due to the non-convexity of the problem, the algorithms converge to
+different local minima, even when initialized with the same dictionary. The Figure C.3 shows 5 runs of both
+algorithm, as well as the median curve, obtained by interpolation. We can see that DiCoDiLe outperforms
+the Consensus ADMM as it converges faster and to a better local minima. To ensure a fair comparison, the
+objective function is computed after projecting back the atoms of the dictionary DDDk to the (cid:96)2-ball by scaling
+
+×
+
+22
+
+Figure C.2: Scaling of DiCoDiLe-Z with the number of workers W for different value of λ and for two
+strategies of coordinate selection: Greedy and Locally Greedy. The convergence is faster when λ is large
+because the activation becomes sparser and less coordinates need to be updated. Also, the locally greedy
+coordinate selection outperforms the greedy selection up to a certain point where the performances become
+similar as the sub-domain
+
+w becomes too small to be further partitioned with sub-domains of size Θ.
+
+S
+
+DDDk
+(cid:107)
+
+2
+2. This implies that we also needed to scale Z by the inverse of the dictionary norm i.e.
+(cid:107)
+
+1
+it with
+.
+(cid:107)dddk(cid:107)2
+2
+This projection and scaling step is necessary for the solver as ADMM iterations do not guarantee that all
+iterates are feasible (i.e., satisfy the constraints). This also explains the presence of several bumps in the
+evolution curve of the objective function.
+
+23
+
+Figure C.3: Comparison of DiCoDiLe algorithm with Consensus ADMM dictionary learning proposed
+by Skau and Wohlberg (2018). Algorithms were run 5 times with 36 workers on a random-patch of size
+512
+512 taken from the Hubble Space Telescope GOODS South image. The solid lines denote the median
+curves obtained through interpolation.
+
+×
+
+24
+

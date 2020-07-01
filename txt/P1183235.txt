@@ -1,0 +1,1865 @@
+BP-Transformer: Modelling Long-Range Context via Binary Partitioning
+
+Zihao Ye†, Qipeng Guo†‡∗, Quan Gan†, Xipeng Qiu‡, Zheng Zhang†§
+†AWS Shanghai AI Lab
+‡Fudan University
+§New York University Shanghai
+{yeziha, gqipeng, quagan, zhaz}@amazon.com, xpqiu@fudan.edu.cn
+
+9
+1
+0
+2
+ 
+v
+o
+N
+ 
+1
+1
+ 
+ 
+]
+L
+C
+.
+s
+c
+[
+ 
+ 
+1
+v
+0
+7
+0
+4
+0
+.
+1
+1
+9
+1
+:
+v
+i
+X
+r
+a
+
+Abstract
+
+The Transformer model is widely successful
+on many natural language processing tasks.
+the quadratic complexity of self-
+However,
+attention limit its application on long text. In
+this paper, adopting a ﬁne-to-coarse attention
+mechanism on multi-scale spans via binary
+partitioning (BP), we propose BP-Transformer
+(BPT for short). BPT yields O(k · n log(n/k))
+connections where k is a hyperparameter to
+control the density of attention. BPT has a
+good balance between computation complex-
+ity and model capacity. A series of experi-
+ments on text classiﬁcation, machine transla-
+tion and language modeling shows BPT has a
+superior performance for long text than previ-
+ous self-attention models. Our code, hyperpa-
+rameters and CUDA kernels for sparse atten-
+tion are available in PyTorch 1.
+
+1
+
+Introduction
+
+Transformer, a self-attention based model, has
+achieved many impressive results on Natural Lan-
+guage Processing (NLP) tasks, notably machine
+translation (Vaswani et al., 2017), language mod-
+eling (Radford et al., 2018), and text classiﬁcation
+(Devlin et al., 2018). However, its self-attention
+mechanism imposes a quadratic cost with respect
+to sequence length, limiting its wider application,
+especially for long text.
+
+To address this problem, some previous works
+have explored different directions. (1) Hierarchi-
+cal Transformers (Miculicich et al., 2018; Liu and
+Lapata, 2019) uses two Transformers in a hierar-
+chical architecture: one Transformer models the
+sentence representation with word-level context,
+and another the document representation with the
+sentence-level context.
+(2) Lightweight Trans-
+formers (Child et al., 2019; Sukhbaatar et al.,
+
+∗Work done during internship at AWS Shanghai AI Lab.
+1https://github.com/yzh119/BPT
+
+Figure 1: Different attention pattern in Transformer-
+like models. Solid line refers to direct attention, while
+the dashed line denotes dependency. Unrelated connec-
+tions and self loops are omitted for clarity.
+
+2019; Guo et al., 2019; Dai et al., 2019) reduce
+the complexity by reconstructing the connections
+between tokens.
+
+Besides the computational cost,
+
+the fully-
+connected nature of Transformer does not incor-
+porate the commonsensible inductive bias of lan-
+guage, such as sequential or syntax structure. The
+dependency relations between tokens are totally
+learned from scratch. Therefore, Transformer usu-
+ally performs better on huge datasets and is easy to
+overﬁt on small datasets (Guo et al., 2019).
+
+The above observation motivates us to explore
+better structure for self-attention models to bal-
+ance the capability and computation complexity.
+In this paper, we propose a new architecture called
+BP-Transformer (BPT for short), which parti-
+tions the input sequence into different multi-scale
+spans via binary partitioning (BP). BPT incor-
+porates an inductive bias of attending the context
+information from ﬁne-grain to coarse-grain as the
+relative distance increases. The farther the context
+information is, the coarser its representation is.
+BPT can be regard as graph neural network, whose
+nodes are the multi-scale spans. A token node
+can attend the smaller-scale span for the closer
+context and the larger-scale span for the longer-
+
+distance context. The representations of nodes
+are updated with Graph Self-Attention (Velickovic
+et al., 2018).
+
+Moreover, to better represent the position infor-
+mation of the span nodes and token nodes, we gen-
+eralize the notion of relative position (Shaw et al.,
+2018) from sequences to trees and show that it bet-
+ter captures position bias.
+
+Thus, BPT incorporates the advantages of both
+hierarchical and lightweight Transformerss: (1) it
+models the long-range context in an hierarchical
+fashion, (2) reduces computation cost with fewer
+edges, and ﬁnally, (3) introduces coarse-to-ﬁne
+connections to approximate the reasonable induc-
+tive bias of language, with a net effect of making
+BPT easier to train.
+
+We evaluate BPT on a variety of Sentence-Level
+and Document-Level NLP tasks: language mod-
+eling, machine translation and text classiﬁcation.
+The experiment results show that BPT consistently
+outperforms previous self-attention based models.
+We also show that the inductive bias of BPT works
+nicely on short text and can scale to large datasets.
+Finally, we show BPT is faster and more mem-
+ory efﬁcient than vanilla Transformer when deal-
+ing with long sequence.
+
+2 Related Work
+
+2.1 Recap: Transformer
+
+Given a sentence with n input tokens, the Trans-
+former model iteratively computes at layer t the
+d-dimensional representations of each input token
+Ht ∈ Rn×d, where H0 represents the initial to-
+ken embeddings. The core of a Transformer step
+is Multi-head Self-Attention (MSA), which can be
+formulated as follows:
+
+MSA(H) = [head1, · · · , headh]W O,
+
+headi = softmax
+
+(cid:19)
+
+(cid:18) QiKT
+i√
+d
+
+Vi,
+
+Qi = HWQ
+
+i , Ki = HWK
+
+i , Vi = HWV
+i ,
+(1)
+i , WK
+i ,
+
+where h is the number of heads, and WQ
+WV
+
+i , WO are learnable parameters.
+Transformer then computes Ht+1 from Ht:
+
+Zt = norm(Ht + MSA(Ht)),
+Ht+1 = norm(Zt + FFN(Zt)),
+
+(2)
+
+(3)
+
+where norm represents the layer normalization (Ba
+et al., 2016) and FFN stands for the Position-wise
+
+Feed-Forward Network in (Vaswani et al., 2017).
+Note that each step t has its own parameters.
+
+2.2 Hierarchical Attention
+
+Some previous work has explored the direction
+of applying self-attention on hierarchical fea-
+tures: HAN (Yang et al., 2016) exploits a two-
+level attention mechanism that ﬁrst applies self-
+attention on word features to get a sentence rep-
+resentation, then uses self-attention on sentence
+level features to get a document level features.
+Shen et al. (2018) proposed a network struc-
+tured called “bi-directional block self-attention
+network(Bi-BloSAN)” that divides a sequence
+into blocks, and sequentially applies intra-block
+attention and inter-block attention inside a layer.
+Miculicich et al. (2018) uses a HAN structure
+to get sentence-level feature in Transformers for
+Document-Level Machine Translation. Different
+from them, our model updates hierarchical fea-
+tures synchronously inside a layer, and update
+them iteratively by stacking layers.
+
+2.3 Lightweight Self-Attention
+
+√
+
+√
+
+√
+
+Recently there has also been several works focus-
+ing on reducing the computational cost of Self-
+Attention in Transformers: T-DMCA (Liu et al.,
+2018) reduced the memory usage by ﬁrst divid-
+ing the sequence tokens into blocks with simi-
+lar length and performing attention inside each
+block independently. Sparse Transformer (Child
+et al., 2019) decomposes attention into two cate-
+gories: for a sequence with length n, we divide it
+n equal-sized blocks. Each token attends
+into
+n block it lies
+to its previous tokens inside a
+n previous blocks. Compared to our
+in, and to
+model, the Sparse Transformer does not maintain
+the representations of hierarchical features, and
+the computational cost of Sparse Transformer is
+O(n
+n) while ours is O(n log n). Transformer-
+XL (Dai et al., 2019) introduces the notion of
+It divides the in-
+recurrence into Transformer.
+put sequence into multiple segments and recur-
+rently attends to the hidden states of the previous
+segments. They achieved state-of-the-art on sev-
+eral language modeling benchmarks. Compared
+to our model, Transformer-XL could only model
+sequences in one direction, making it hard to deal
+with tasks where bi-directional information is re-
+quired. Sukhbaatar et al. (2019) proposed a adap-
+tive mechanism to learn optimal context length in
+transformers for each head per layer, thus reducing
+
+√
+
+the total computational and memory cost of trans-
+formers. Guo et al. (2019) suggest that the fully-
+connected nature of self-attention in Transformer
+is not a good inductive bias, they proposed Star-
+Transformer which links adjacency words coupled
+with a central relay node to capture both local and
+global dependencies, with such reduction, Star-
+Transformer achieved signiﬁcant
+improvements
+against standard Transformer on moderate sized
+datasets. However, Star-Transformer is not suit-
+able for auto-regressive models in which each
+word should only be conditioned on its previous
+words, while the relay node in Star-Transformer
+summarizes the whole sequence.
+
+3 Proposed Model
+
+In this paper, we balance the model capability and
+computation complexity by incorporating the in-
+ductive bias. The key insight is that not every
+token needs to be attended to for context rep-
+resentation.
+Instead, for an given input token,
+we can group its context into different-scale non-
+overlapping spans, and the scale of a span in-
+creases with its relative distance. That is, instead
+attending to every token, the input token attends
+to different spans away from it in a ﬁne-to-coarse
+fashion.
+
+We now describe our model as graph neural net-
+
+work and detail it in the following sections.
+
+3.1 Transformer as Graph Neural Networks
+
+A valid perspective is to view information fus-
+ing with self-attention in Transformer as message
+passing on a fully-connected graph, with input to-
+kens as nodes and attentions between nodes as
+edges (Battaglia et al., 2018). In particular, such
+a process is very similar to Graph Attention Net-
+work (Velickovic et al., 2018). Thus, different
+graph structure encodes different inductive bias of
+attention and results in different time/space com-
+plexity.
+
+To describe Transformer in GNN framework,
+we ﬁrst construct a fully-connected graph G, in
+which each node is a token of the input sequence.
+All nodes in G are interconnected and each node
+has a self-loop edge.
+
+to graph,
+
+We extend the self-attention mechanism of
+called Graph Self-
+Transformer
+Attention (GSA). For a given node u, we up-
+date its representation according to its neighbour
+nodes, formulated as hu ← GSA(G, hu).
+
+Let A(u) denote the set of the neighbour nodes
+
+of u in G, GSA(G, hu) is detailed as follows:
+
+Au = concat({hv | v ∈ A(u)}),
+i = AuWK
+
+i ,Vu
+
+i ,Ku
+
+i = HkWQ
+
+Qu
+
+i = AuWV
+i ,
+(5)
+
+headu
+
+i = softmax
+
+GSA(G, hu) = [headu
+
+T
+
+(cid:19)
+
+(cid:18) Qu
+i Ku
+i
+√
+d
+1 , · · · , headu
+
+Vu
+i ,
+
+h]WO,
+
+(4)
+
+(6)
+
+(7)
+
+the
+
+d
+where
+is
+WQ
+i , WV
+i , WK
+i
+the i-th attention head.
+
+dimension
+
+and
+are trainable parameters of
+
+of h,
+
+3.2 Graph Construction
+
+3.2.1 Node Construction
+To achieve the effect of ﬁne-to-coarse attention,
+we partition a sequence into multi-granular spans
+via binary partitioning (BP).
+
+Binary partitioning is a generic process of re-
+cursively dividing a sequence into two until the
+partitioning satisﬁes one or more requirements. In
+this paper, we use a simple rule to stop subdivid-
+ing when a partition just contains a single token.
+For a sequence with length n, there are 2n − 1 par-
+titions. Figure 1 illustrates the process of binary
+partitioning over a sequence. Each partition can
+be regarded as a node in GNN and its representa-
+tion is computed according to its contained tokens.
+
+Figure 2: Binary partitioning of a sequence.
+
+The binary partitioning of a sequence constructs
+a perfect binary tree in which all internal nodes
+have two children and all leaf nodes have the same
+depth. Each leaf node corresponds to an input to-
+ken in the sequence.
+
+We simply divide the nodes into two types, to-
+ken and span, both of which are used as nodes in
+our GNN construction:
+
+Token nodes the leaf nodes in the binary partition
+
+tree.
+
+Figure 3: The ﬁgure illustrates how to build the graph: nodes at different levels are colored differently, dashed lines
+are edges connects token nodes to span nodes; solid lines are edges connect to token nodes. The r∗
+∗ are relative
+positions assigned to edges.
+
+Span nodes the internal node of the tree, each has
+
+at least two child nodes.
+
+3.2.2 Edge Construction
+
+The binary partitioning generating a binary tree.
+For a sequence with n tokens, we have n token
+nodes and n − 1 span nodes. Formally, let ul,m de-
+note the m-th node at level l. The level increases in
+bottom-up fashion. The level of token nodes is set
+to 0. A span node ul,m represents a partition con-
+sisting of token nodes u0,2l∗m+1, · · · , u0,2l∗(m+1).
+To reduce the distance of information transmis-
+sion, we do not directly use the tree structure to
+construct the edges in graph since the path is long
+for two long-distance tokens in the tree structure.
+
+We construct two kinds of edges:
+
+Afﬁliated Edges Given a span node ul,m, we
+add a directed edge from each of its contained to-
+ken nodes u0,2l∗m+1, · · · , u0,2l∗(m+1). There are
+2l edges u0,2l∗m+i → ul,m(1 ≤ i ≤ 2l).
+
+The role of afﬁliated edges is to shorten the path
+between a span node and its corresponding token
+nodes. With the afﬁliated edges, the representation
+of a span node is computed by directly aggregating
+the information from its contained token nodes.
+
+Although we do not adopt the tree structure, the
+afﬁliated edges still can incorporate the inductive
+bias of the hierarchical linguistic structure within
+the sentence.
+
+Contextual Edges The power of Transformer
+comes from relating every pair of tokens. To
+reduce the computation complexity while retain-
+ing the ability to capture long-range context, we
+model the context with a ﬁne-to-coarse strategy.
+
+For a leaf node, to model its local context, we con-
+nect it to neighbor token nodes or lower-level span
+nodes. Similarly, we connect it to higher-level
+span nodes for long-range context.
+
+In detail, for a leaf node u0,i, we add the in-
+coming edges from the different granularity. For
+simplicity, we describe the process of construct-
+ing edges from its right context of node u0,i. The
+edges from the left context is conducted similarly.
+We use a hyper-parameter k to determine the
+connection density of the graph. We add k edges
+per level to capture the information from the right
+context.
+
+For node u0,i, its contextual nodes are
+
+u0,p0, · · · , u0,p0+k−1,
+u1,p1, · · · , u1,p1+k−1,
+
+ul,pl, · · · , u1,pl+k−1,
+
+· · ·
+
+· · · ,
+
+(8)
+
+(9)
+
+(10)
+
+(11)
+
+(12)
+
+where pl is the start index at level l and can be
+computed recursively: pl = parent(pl−1 + k) and
+p0 = i + 1.
+
+For the sake of computation efﬁciency, when
+the index pl+k−1 is odd, we also add its next node
+in the same layer as the contextual nodes. Thus,
+the start index at next level is pl+1 = parent(pl +
+k + 1).
+
+In practice,
+
+it is easy to ﬁnd the contextual
+nodes in a recursive fashion. Given a leaf node u,
+the whole procedure is described in Algorithm 1.
+After collect all the contextual nodes, we add a
+directed edge from each contextual node to node
+u0,i.
+
+Algorithm 1 Finding contextual nodes
+
+Algorithm 2 The update of graph
+
+function NEIGHBORS(u, k)
+
+N ← {u}, l ← left(u), r ← right(u)
+repeat
+
+for i ← 1 to k do
+
+N ← N ∪ {l, r}
+l ← left(l)
+r ← right(r)
+
+end for
+l ← parent(l)
+r ← parent(r)
+
+until l and r reach the boundary
+return N
+end function
+
+Finally, for a sequence with length n, we can
+construct a directed graph G. The number of nodes
+is O(2n), the number of edges is O(kn log n/k).
+We can see that the distances between any two to-
+ken nodes are no greater than 2 in graph G. This
+property enables our model to learn long-term de-
+pendencies easily.
+
+3.3 Graph Update
+
+After graph G being constructed, we update rep-
+resentations of all nodes via Graph Self-Attention
+(GSA) described in Section 3.1.
+
+Since G is a directed graph, for a given node
+u, its neighbours A(u) is set to all its predecessor
+nodes in G. If we set A(u) to all the token nodes,
+we recover the model to the vanilla Transformer.
+
+Recall that the predecessors of a token node is
+the multi-scale spans it attending to, while the pre-
+decessors of a span node are all its contained token
+nodes, as illustrated in Figure 3. Therefore, BPT
+connected each two tokens via at most two edges.
+In our experiments, we update all nodes syn-
+chronously within the graph layer. The representa-
+tions of span nodes are initialized with all zeroes,
+while the representations of token nodes are ini-
+tialized with the corresponding word embeddings.
+We can stack multiple graph layers as in vanilla
+Transformer, where each layer gets its own W·
+·
+and WO. Algorithm 2 demonstrates the overall
+update algorithm.
+
+Depending on the downstream tasks, we either
+take as output of representation of the root node
+in the ﬁnal layer (e.g.
+in text classiﬁcation and
+natural language inference), or the representations
+of all the token nodes in the ﬁnal layer (e.g.
+in
+language modeling and machine translation).
+
+Require: G = (V, E) the underlying graph, N the
+number of layers, H0 initial hidden states
+
+1: for i := 1 to N do:
+2:
+
+Zi ← norm
+
+(cid:16)
+
+Hi ← norm
+
+3:
+4: end for
+5: return HN
+
+Hi−1 + GSA(i) (cid:0)G, Hi−1(cid:1)(cid:17)
+Zi + FFN(i) (cid:0)Zi(cid:1)(cid:17)
+(cid:16)
+
+3.4 Relative Positional Encoding on Tree
+
+As in (Shaw et al., 2018), introducing the relative
+distances between words in computing the self-
+attention helps encode the relative order among to-
+kens. Here we draw a similar analogy on the tree.
+For each node v in A(u), we consider the relative
+positional difference on the tree between u and v,
+and assign a latent representation rv,u of such dif-
+ference:
+
+• rv,u = rself if v = u.
+
+j,i
+
+• rv,u = rleft
+
+j,i or rright
+
+, if v is the i-th left/right
+node to join the neighborhood set of u at the
+j-th level in Algorithm 1 of ﬁnding top-down
+context nodes.
+
+• rv,u = ranc
+
+j
+
+tree at level j.
+
+, if u is the ancestor of v in the
+
+All the rself, rleft
+
+j,i , rright
+
+j,i and ranc
+
+j
+
+are trainable pa-
+
+Then, we modify Eq. (6) to include positional
+
+rameters.
+
+representations:
+
+Ru = concat({rv,u | v ∈ A(u)}),
+(cid:18) Qu
+(cid:19)
+
+i + Ru)T
+i (Ku
+√
+
+i = softmax
+
+headu
+
+Vu
+i .
+
+(13)
+
+d
+
+Note that the relative positional representations are
+shared across attention heads, which is the same as
+in (Shaw et al., 2018), and each layer gets its own
+set of positional representations.
+
+When k is set to be larger then the sentence
+length, our model degenerates to Vanilla Trans-
+former with positional encodings. In the follow-
+ing section we will show that a small k (e.g. 4) is
+enough for achieving good performance in word
+level NLP tasks.
+
+4 Experiments
+
+We measure the performance of BPT on variety of
+tasks at both sentence level and document level.
+
+On document level tasks, we achieved state-of-
+the-art performance on language modeling, ma-
+chine translation and text classiﬁcation. For sen-
+tence level tasks, BPT performs consistently bet-
+ter then vanilla Transformer and Star Transformer,
+suggesting the inductive bias encoded by BPT is
+reasonable and effective for natural language. The
+experimental results show the superior ability of
+BPT in modeling the long-range context.
+
+4.1 Text Classiﬁcation
+
+We use SST-5 dataset (Socher et al., 2013) and
+IMDB dataset (Maas et al., 2011) to measure the
+performance of our model on classiﬁcation for
+short and long text. The former has ﬁne-grained
+labels with 215,154 phrases in 11,855 sentences
+with average length of 19, and the latter has pos-
+itive/negative labels on 50,000 multi-sentence re-
+views with average length 294. We use pre-trained
+GloVe embedding (Pennington et al., 2014) as in-
+put features and ﬁxed them during training. The
+hidden size of all our models are set to 300. For
+IMDB, we apply the same training/validation set
+split ratio (0.9) as in McCann et al. (2017).
+
+Model
+
+BPT
+Star Transformer
+Transformer
+Bi-LSTM (Li et al., 2015)
+Tree-LSTM (Socher et al., 2013)
+QRNN (Bradbury et al., 2017)
+
+BCN+Char+CoVe (McCann et al.,
+2017)
+
+SST-5
+
+IMDB
+
+52.71(0.32) 92.12(0.11)
+
+52.9
+50.4
+49.8
+51.0
+-
+
+53.7
+
+90.50
+89.24
+-
+-
+91.4
+
+91.8
+
+Table 1: Test accuracy on SST-5 and IMDB. In BPT,
+k = 2 and k = 4 for SST and IMDB respectively.
+The last model used word embeddings pretrained with
+translation and additional character-level embeddings.
+
+We report the average test accuracy of BPT of
+10 runs in Table 1, the value inside brackets in-
+dicates standard derivation. On SST-5, our model
+outperforms Transformer and LSTM based mod-
+els. On IMDB, our proposed model outperforms
+a bidirectional LSTM initialized with pre-trained
+character embedding and CoVe embedding (Mc-
+Cann et al., 2017).
+
+On IMDB, our model outperforms Vanilla
+Transformer and Star Transformer by a large mar-
+gin: 1.62 and 2.88 respectively. To study the
+effect of k on ﬁnal accuracy, we tried different
+k ∈ {1, 2, 4, 8, 16, 32, 64}. Figure 4 shows a large
+k does not bring beneﬁts, though it increases the
+
+graph density and time/memory cost of BPT. The
+best performance was obtained at k = 2 and k = 4
+for SST and IMDB respectively, which is a small
+value.
+
+92.12
+
+52.71
+
+y
+c
+a
+r
+u
+c
+c
+a
+
+t
+s
+e
+t
+
+T
+S
+S
+
+56
+
+54
+
+52
+
+50
+
+y
+c
+a
+r
+u
+c
+c
+a
+
+t
+s
+e
+t
+
+B
+D
+M
+
+I
+
+92
+
+90
+
+88
+
+86
+
+2
+
+4
+
+16
+
+32
+
+64
+
+8
+
+k
+
+Figure 4: Effects of hyperparameter k.
+
+4.1.1 Sensitivity to Sequence Shift
+
+Since BPT divide sequence in binary fashion, a
+concern is whether a shift in sequence affects its
+performance. To measure if the output of BPT
+is sensitive to shift, we take the model trained
+on SST with best validation loss and evaluate it
+in a setting different from training: we append n
+placeholder symbols in the front of each sentence,
+and initialize their embedding with all zeros. We
+varies n from 0 to 7 and found out the test accuracy
+changes very little as shown in Table 2, suggesting
+our model is robust towards shift.
+
+Shift Offset Test Accuracy Shift Offset Test Accuracy
+
+0
+1
+2
+3
+
+52.71(0.32)
+52.50(0.29)
+52.81(0.18)
+52.56(0.22)
+
+4
+5
+6
+7
+
+52.18(0.22)
+51.90(0.16)
+51.85(0.35)
+51.55(0.29)
+
+Table 2: Accuracy with different sequence shift on
+SST-5.
+
+4.2 Language Modeling
+
+To see how BPT exploits with long-term depen-
+dencies, we evaluate our model on Character Level
+Language Modeling datasets of moderate size:
+Enwiki8 (LLC., 2009) and Text8 (LLC., 2009).
+We use bits-per-character(bpc for short, the lower
+the better) to measure the performance of our
+model.
+
+Character level tasks require more ﬁne-grained
+interactions between characters, we select a much
+
+larger k = 64 for such tasks. The baseline mod-
+els we select are multi-scale RNN based models
+(Chung et al., 2017; Zilly et al., 2017; Krause
+et al., 2016) and Transformer-based models (Al-
+Rfou et al., 2018; Dai et al., 2019; Sukhbaatar
+et al., 2019). All Transformers use the same base
+setting (12 layers, d = 512, df f = 2048) for fair
+comparison.
+
+Model
+
+HM-LSTM (Chung et al., 2017)
+Recurrent Highway (Zilly et al.,
+2017)
+mLSTM (Krause et al., 2016)
+
+Transformer (Al-Rfou et al., 2018)
+Transformer-XL (Dai et al., 2019)
+Adaptive Span (Sukhbaatar et al.,
+2019)
+
+Enwiki8 Text8 Params
+
+-
+-
+
+1.29
+1.27
+
+35M
+45M
+
+1.24
+
+1.11
+1.06
+1.02
+
+1.27
+
+45M
+
+1.18
+-
+1.11
+
+44M
+41M
+39M
+
+BPT (k = 64, l = 8192)
+
+1.02
+
+1.11
+
+38M
+
+Table 3: Test BPC on Enwiki8/Text8. Note that
+Transformer-XL can be only used for language mod-
+eling. l denotes the context length.
+
+In Table 3, we show that BPT can achieve state-
+of-the-art performance on both datasets with a
+small number of parameters.
+
+To compare different sparse attention patterns,
+l = 512 and see
+we ﬁx the context length:
+how the performance of different models varies
+as we change the attention degree (the num-
+ber of incoming edges of each token in the
+context of viewing Transformer as Graph Neu-
+ral Networks).
+For BPT, we select different
+k ∈ {1, 2, 4, 8, 16, 32, 64, 128}, for Sparse Trans-
+former (Child et al., 2019), we use the default set-
+ting described in the paper (c = 8, stride = 128);
+for Restricted Transformer (Vaswani et al., 2017)
+(restrict self-attention to a neighborhood window
+of size w), we select w ∈ {32, 64, 128, 256, 512}.
+
+Figure 5 suggests that BPT’s ﬁne-to-coarse
+sparse attention is more effective than Restricted
+Transformer and Sparse Transformer: with the
+same attention degree, BPT always gets better per-
+formance.
+
+To see how BPT exploits long-term depen-
+dency, we ﬁxed k to 64 and varies context length
+in {512, 1024, 2048, 4096, 8192}. We do not try
+context length longer than 8192 because its ex-
+ceeds the average article length in Enwik8 and
+Text8. As shown in Table 4, the performance in-
+creases with the context length.
+
+BPT
+Restricted Attention
+Sparse Transformer
+
+1.3
+
+1.2
+
+1.1
+
+)
+
+C
+P
+B
+
+(
+
+r
+e
+t
+c
+a
+r
+a
+h
+c
+
+r
+e
+p
+
+s
+t
+i
+b
+
+100
+
+300
+
+200
+Attention Degree
+
+400
+
+500
+
+Figure 5: Test BPC on Enwiki8 with different k.
+
+Context Length
+
+Enwik8
+
+Text8
+
+512
+1024
+2048
+4096
+8192
+
+1.07
+1.05
+1.03
+1.02
+1.02
+
+1.16
+1.14
+1.13
+1.12
+1.11
+
+Table 4: Test BPC on Enwiki8/Text8 with different
+context lengths.
+
+4.3 Machine Translation
+
+BPT can also be applied to Encoder-Decoder
+frameworks by replacing backbone network in
+Vaswani et al. (2017) from Transformer to BPT.
+
+In this section we evaluate two settings:
+Document-Level and Sentence-Level Machine
+Translation. In Document-Level Machine Trans-
+lation tasks, the self-attention in both encoder and
+decoder are applied at document level, while the
+attention between encoder and decoder are applied
+between aligned sentences. For a mini-batch of
+sentence pairs with source sentences of lengths
+{ni} and target sentences of lengths {mi}, the
+number of connections are (cid:80)
+i kni log((cid:80)
+i ni/k)
+for encoder, (cid:80)
+i kmi log((cid:80)
+i mi/k) for decoder,
+and (cid:80)
+i ni · mi for attention between encoder and
+decoder.
+
+4.3.1 Document Level Machine Translation
+
+We conduct experiments with TED Talks Chinese-
+to-English(Zh-En) dataset from IWSLT 2014 and
+2015 (Cettolo et al., 2012, 2016), the average doc-
+ument length is 120 (in sentences). For each
+sentence, we take its preceding context of ﬁxed
+length, and their corresponding translations as a
+single sample.
+
+The baseline models are HAN-NMT (Miculi-
+
+cich et al., 2018) and Transformer+cache (Tu
+et al., 2018). We follow the setting of Miculicich
+et al. (2018) with a vocabulary size of 30k for both
+Chinese and English, and use dev2010 for devel-
+opment and tst2010-2013 for testing. Unlike pre-
+vious models, our model is trained from scratch
+and do not require pre-training on sentence-level
+translation tasks.
+
+Model
+
+Transformer (Vaswani et al., 2017)
+Transformer+cache (Tu et al., 2018)
+HAN-NMT (Miculicich et al., 2018)
+
+Transformer (ours, single sentence)
+BPT (k = 4, single sentence)
+BPT (k = 4, l = 64)
+
+BLEU
+
+16.87
+17.32
+17.78
+
+18.91
+19.19
+19.84
+
+coder with a BPT encoder/decoder. The number of
+parameters remains the same. The baseline model
+we select is Transformer(base). We trained the
+network for 40 epochs and take the average of last
+10 checkpoint for decoding, the beam size is set to
+5.
+
+Model
+
+ByteNet (Kalchbrenner et al., 2016)
+GNMT+RL (Wu et al., 2016)
+ConvS2S (Gehring et al., 2017)
+Transformer (Vaswani et al., 2017)
+
+Transformer (our implementation)
+BPT (k = 1)
+BPT (k = 2)
+BPT (k = 4)
+BPT (k = 8)
+
+BLEU
+
+23.75
+24.6
+25.16
+27.3
+
+27.2
+26.9
+27.4
+27.6
+26.7
+
+Table 5: BLEU score on IWSLT 2015 Zh-En
+
+Table 7: BLEU score on newstest 2014
+
+In Table 5 we show that with careful selec-
+tion of hyper-parameters, Transformer trained at
+sentence-level could beat reported results of pre-
+vious Document-Level models. BPT with k = 4
+and context length of 32 could further improve the
+baseline result by 0.93 in terms of BLEU score,
+which is a signiﬁcant margin.
+
+We also examine the effect of context length
+and k on ﬁnal BLEU scores, the results are shown
+in Table 6. Similar to Tu et al. (2018) and Mi-
+culicich et al. (2018), we found a small context
+length is enough for achieving good performance
+on IWSLT for Document-Level Translation. How-
+ever, as we increases context size, the performance
+of BPT does not get worse as these models and
+Transformers, suggesting the inductive bias en-
+coded by BPT makes the model less likely to over-
+ﬁt.
+
+Context length
+
+0
+
+32
+
+64
+
+Transformer
+BPT (k=4)
+BPT (k=8)
+
+18.85
+19.19
+19.13
+
+18.66
+19.84
+19.59
+
+17.59
+19.71
+19.78
+
+128
+
+15.55
+19.84
+19.60
+
+Table 6: BLEU score vs context length on different
+models
+
+4.3.2 Sentence Level Machine Translation
+
+IWSLT is a relatively small dataset with 0.21M
+sentence pairs,
+to see if BPT scales to large
+dataset, we train a BPT on WMT14 English-to-
+German dataset with 4.5M sentence pairs.
+
+We follow the same setting as (Vaswani et al.,
+2017), but to replace the Transformer encoder/de-
+
+Table 7 report the de-tokenized SacreBLEU
+score 2 (Post, 2018) of BPT and Vanilla Trans-
+former on test set: newstest 2014. In the setting
+of k = 2 and k = 4, BPT outperforms Vanilla
+Transformer with the same number of parameters
+and a sparse attention pattern.
+
+The best setting of BPT on WMT14 is k = 4,
+the same as the best setting of BPT on Document-
+Level Machine Translation(IWSLT) and Text
+Classiﬁcation(IMDB), suggesting k = 4 a general
+setting for word-level NLP tasks, on both small
+and large datasets.
+
+4.4 Throughput and GPU Memory Footprint
+
+BPT improves the time/space complexity of
+Transformer models from O(d · n2) to O(d ·
+k · n log n/k) in theory, such speedup cannot be
+achieved by tensor-based attention operators. To
+address this problem, we designed a set of CUDA
+kernels for sparse attentions3.
+
+We compare the GPU memory footprint and
+throughput of BPT and vanilla Transformer dur-
+ing inference under the same setting4 for language
+modeling. The k is set to 1, 4, 16, 64 respectively,
+covering best settings for word-based tasks(k = 4)
+and character-based tasks(k = 64). We ﬁx the
+number of tokens to 8192 each batch and varies
+the sequence length. Figure 6 and 7 depicts how
+the GPU memory and speed varies as we increases
+
+2Setting: BLEU+c.mixed+l.en-de+#.1+s.exp+t
+
+.wmt14+tok.intl+v.1.4.1
+
+3the speed of BPT could be further improved with better
+
+optimized kernels
+
+4N = 6, d = 512, df f = 2048, h = 8
+
+sequence length.
+
+efﬁciency.
+
+Transformer
+BPT(k = 1)
+BPT(k = 4)
+BPT(k = 16)
+BPT(k = 64)
+
+This work can be extended in a number of inter-
+esting ways. The representations have not yet nat-
+urally captured syntactic and semantic meanings.
+Instead of only using the root and the token repre-
+sentations, other intermediate representations can
+be more directly exposed.
+
+)
+
+B
+G
+(
+y
+r
+o
+m
+e
+M
+U
+P
+G
+
+10
+
+8
+
+6
+
+4
+
+2
+
+)
+s
+/
+s
+n
+e
+k
+o
+t
+(
+
+t
+u
+p
+h
+g
+u
+o
+r
+h
+T
+
+1
+
+0.5
+
+2,000
+
+4,000
+
+6,000
+
+8,000
+
+length of sequence
+
+Figure 6: GPU memory cost vs sequence lengh
+
+·105
+
+Transformer
+BPT(k = 1)
+BPT(k = 4)
+BPT(k = 16)
+BPT(k = 64)
+
+2,000
+
+4,000
+
+6,000
+
+8,000
+
+length of sequence
+
+Figure 7: Throughput vs sequence length
+
+We show that BPT consistently utilizes less
+GPU memory compared to Transformer, making
+it possible to be applied on tasks that require long
+sequence modeling such as time-series prediction.
+As for speed, BPT increases the number of
+nodes from n to 2n which brings additional over-
+head linear to sequence length, rendering BPT not
+as fast as Transformer when dealing with short
+text. However, as the sequence length grows, the
+speed of BPT is steady while Transformer become
+too slow for practical use.
+
+5 Conclusion and Future Work
+
+This paper introduces a hierarchical ﬁne-to-coarse
+self-attention based model that is versatile and
+ﬂexible for a variety of natural language process-
+ing tasks. By imposing structural inductive bias
+this way we are able to strike a balance between
+the power of the model and training/computational
+
+References
+
+Rami Al-Rfou, Dokook Choe, Noah Constant, Mandy
+Guo, and Llion Jones. 2018. Character-level lan-
+guage modeling with deeper self-attention. arXiv
+preprint arXiv:1808.04444.
+
+Jimmy Lei Ba, Jamie Ryan Kiros, and Geoffrey E Hin-
+arXiv preprint
+
+ton. 2016. Layer normalization.
+arXiv:1607.06450.
+
+Peter W Battaglia, Jessica B Hamrick, Victor Bapst,
+Alvaro Sanchez-Gonzalez, Vinicius Zambaldi, Ma-
+teusz Malinowski, Andrea Tacchetti, David Raposo,
+Adam Santoro, Ryan Faulkner, et al. 2018. Rela-
+tional inductive biases, deep learning, and graph net-
+works. arXiv preprint arXiv:1806.01261.
+
+James Bradbury, Stephen Merity, Caiming Xiong, and
+Richard Socher. 2017. Quasi-recurrent neural net-
+works. In 5th International Conference on Learning
+Representations, ICLR 2017, Toulon, France, April
+24-26, 2017, Conference Track Proceedings.
+
+Mauro Cettolo, Christian Girardi, and Marcello Fed-
+erico. 2012. Wit3: Web inventory of transcribed and
+translated talks. In Conference of European Associ-
+ation for Machine Translation, pages 261–268.
+
+Mauro Cettolo, Niehues Jan, St¨uker Sebastian, Luisa
+Bentivogli, Roldano Cattoni, and Marcello Federico.
+2016. The iwslt 2016 evaluation campaign. In In-
+ternational Workshop on Spoken Language Transla-
+tion.
+
+Rewon Child, Scott Gray, Alec Radford,
+
+Ilya Sutskever. 2019.
+quences with
+sparse
+https://openai.com/blog/sparse-transformers.
+
+transformers.
+
+and
+Generating long se-
+URL
+
+Junyoung Chung, Sungjin Ahn, and Yoshua Bengio.
+2017. Hierarchical multiscale recurrent neural net-
+works. In 5th International Conference on Learning
+Representations, ICLR 2017, Toulon, France, April
+24-26, 2017, Conference Track Proceedings.
+
+Zihang Dai, Zhilin Yang, Yiming Yang, William W
+Cohen, Jaime Carbonell, Quoc V Le, and Ruslan
+Salakhutdinov. 2019. Transformer-xl: Attentive lan-
+guage models beyond a ﬁxed-length context. arXiv
+preprint arXiv:1901.02860.
+
+Jacob Devlin, Ming-Wei Chang, Kenton Lee, and
+Kristina Toutanova. 2018. Bert: Pre-training of deep
+bidirectional transformers for language understand-
+ing. arXiv preprint arXiv:1810.04805.
+
+Jonas Gehring, Michael Auli, David Grangier, De-
+nis Yarats, and Yann N. Dauphin. 2017. Convo-
+In Pro-
+lutional sequence to sequence learning.
+ceedings of the 34th International Conference on
+Machine Learning, ICML 2017, Sydney, NSW, Aus-
+tralia, 6-11 August 2017, pages 1243–1252.
+
+Qipeng Guo, Xipeng Qiu, Pengfei Liu, Yunfan Shao,
+Xiangyang Xue, and Zheng Zhang. 2019. Star-
+transformer. arXiv preprint arXiv:1902.09113.
+
+Nal Kalchbrenner, Lasse Espeholt, Karen Simonyan,
+Aaron van den Oord, Alex Graves, and Koray
+Kavukcuoglu. 2016. Neural machine translation in
+linear time. arXiv preprint arXiv:1610.10099.
+
+Ben Krause, Liang Lu, Iain Murray, and Steve Renals.
+2016. Multiplicative lstm for sequence modelling.
+arXiv preprint arXiv:1609.07959.
+
+Jiwei Li, Minh-Thang Luong, Dan Jurafsky, and Eu-
+dard Hovy. 2015. When are tree structures necessary
+for deep learning of representations? arXiv preprint
+arXiv:1503.00185.
+
+Peter J. Liu, Mohammad Saleh, Etienne Pot, Ben
+Goodrich, Ryan Sepassi, Lukasz Kaiser, and Noam
+Shazeer. 2018. Generating wikipedia by summariz-
+ing long sequences. In 6th International Conference
+on Learning Representations, ICLR 2018, Vancou-
+ver, BC, Canada, April 30 - May 3, 2018, Confer-
+ence Track Proceedings.
+
+Yang Liu and Mirella Lapata. 2019. Hierarchical trans-
+formers for multi-document summarization. arXiv
+preprint arXiv:1905.13164.
+
+MultiMedia LLC. 2009.
+
+Large text compression
+
+benchmark.
+
+Andrew L Maas, Raymond E Daly, Peter T Pham, Dan
+Huang, Andrew Y Ng, and Christopher Potts. 2011.
+Learning word vectors for sentiment analysis.
+In
+Proceedings of the 49th annual meeting of the as-
+sociation for computational linguistics: Human lan-
+guage technologies-volume 1, pages 142–150. Asso-
+ciation for Computational Linguistics.
+
+Bryan McCann, James Bradbury, Caiming Xiong, and
+Richard Socher. 2017. Learned in translation: Con-
+textualized word vectors. In Advances in Neural In-
+formation Processing Systems, pages 6294–6305.
+
+Lesly Miculicich, Dhananjay Ram, Nikolaos Pappas,
+and James Henderson. 2018. Document-level neural
+machine translation with hierarchical attention net-
+In Proceedings of the 2018 Conference on
+works.
+Empirical Methods in Natural Language Process-
+ing, pages 2947–2954, Brussels, Belgium. Associ-
+ation for Computational Linguistics.
+
+Jeffrey Pennington, Richard Socher, and Christopher
+Manning. 2014. Glove: Global vectors for word
+representation. In Proceedings of the 2014 confer-
+ence on empirical methods in natural language pro-
+cessing (EMNLP), pages 1532–1543.
+
+Matt Post. 2018. A call for clarity in reporting BLEU
+scores. In Proceedings of the Third Conference on
+Machine Translation: Research Papers, pages 186–
+191, Belgium, Brussels. Association for Computa-
+tional Linguistics.
+
+Alec Radford, Karthik Narasimhan, Tim Salimans, and
+Ilya Sutskever. 2018.
+Improving language under-
+standing by generative pre-training. URL https://s3-
+us-west-2. amazonaws. com/openai-assets/research-
+under-
+covers/languageunsupervised/language
+standing paper. pdf.
+
+Peter Shaw, Jakob Uszkoreit, and Ashish Vaswani.
+2018. Self-attention with relative position represen-
+In Proceedings of the 2018 Conference of
+tations.
+the North American Chapter of the Association for
+Computational Linguistics: Human Language Tech-
+nologies, NAACL-HLT, New Orleans, Louisiana,
+USA, June 1-6, 2018, Volume 2 (Short Papers),
+pages 464–468.
+
+Tao Shen, Tianyi Zhou, Guodong Long, Jing Jiang,
+and Chengqi Zhang. 2018. Bi-directional block self-
+attention for fast and memory-efﬁcient sequence
+In 6th International Conference on
+modeling.
+Learning Representations, ICLR 2018, Vancouver,
+BC, Canada, April 30 - May 3, 2018, Conference
+Track Proceedings.
+
+Richard Socher, Alex Perelygin, Jean Wu, Jason
+Chuang, Christopher D Manning, Andrew Ng, and
+Christopher Potts. 2013. Recursive deep models
+for semantic compositionality over a sentiment tree-
+In Proceedings of the 2013 conference on
+bank.
+empirical methods in natural language processing,
+pages 1631–1642.
+
+Sainbayar Sukhbaatar, Edouard Grave, Piotr Bo-
+janowski, and Armand Joulin. 2019. Adaptive
+arXiv preprint
+attention span in transformers.
+arXiv:1905.07799.
+
+Zhaopeng Tu, Yang Liu, Shuming Shi, and Tong
+Zhang. 2018. Learning to remember translation his-
+tory with a continuous cache. Transactions of the
+Association for Computational Linguistics, 6:407–
+420.
+
+Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob
+Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz
+Kaiser, and Illia Polosukhin. 2017. Attention is all
+you need. In Advances in Neural Information Pro-
+cessing Systems, pages 5998–6008.
+
+Petar Velickovic, Guillem Cucurull, Arantxa Casanova,
+Adriana Romero, Pietro Li`o, and Yoshua Bengio.
+In 6th Inter-
+2018. Graph attention networks.
+national Conference on Learning Representations,
+ICLR 2018, Vancouver, BC, Canada, April 30 - May
+3, 2018, Conference Track Proceedings.
+
+Minjie Wang, Lingfan Yu, Da Zheng, Quan Gan,
+Yu Gai, Zihao Ye, Mufei Li, Jinjing Zhou, Qi Huang,
+Chao Ma, Ziyue Huang, Qipeng Guo, Hao Zhang,
+
+Haibin Lin, Junbo Zhao, Jinyang Li, Alexander J.
+Smola, and Zheng Zhang. 2019. Deep graph li-
+brary: Towards efﬁcient and scalable deep learning
+on graphs. CoRR, abs/1909.01315.
+
+Yonghui Wu, Mike Schuster, Zhifeng Chen, Quoc V
+Le, Mohammad Norouzi, Wolfgang Macherey,
+Maxim Krikun, Yuan Cao, Qin Gao, Klaus
+Macherey, et al. 2016.
+Google’s neural ma-
+chine translation system: Bridging the gap between
+arXiv preprint
+human and machine translation.
+arXiv:1609.08144.
+
+Zichao Yang, Diyi Yang, Chris Dyer, Xiaodong He,
+Alex Smola, and Eduard Hovy. 2016. Hierarchi-
+cal attention networks for document classiﬁcation.
+In Proceedings of the 2016 Conference of the North
+American Chapter of the Association for Computa-
+tional Linguistics: Human Language Technologies,
+pages 1480–1489.
+
+Julian Georg Zilly, Rupesh Kumar Srivastava, Jan
+Koutn´ık, and J¨urgen Schmidhuber. 2017. Recurrent
+In Proceedings of the 34th In-
+highway networks.
+ternational Conference on Machine Learning, ICML
+2017, Sydney, NSW, Australia, 6-11 August 2017,
+pages 4189–4198.
+
+A Appendix
+
+A.1
+
+Implementation Details
+
+We use Deep Graph Library (Wang et al., 2019)
+for building Binary Partition graphs.
+
+The following table summarizes the hyper-
+
+parameters used in BPT.
+
+notation meaning
+
+Btok
+Bsent
+N
+M
+h
+k
+demb
+d
+df f
+pi
+ph
+pa
+pc
+avg
+steps
+epochs
+
+number of tokens in a batch
+number of sentences in a batch
+number of (encoder) layers.
+number of (decoder) layers.
+number of heads.
+connection density in BPT
+embedding size
+hidden size of the model
+ﬁlter size in FFN sublayer
+dropout rate on embedding layer
+dropout rate on hidden layers
+dropout rate on attention weight
+dropout rate before classiﬁer
+model average checkpoints
+training steps
+training epochs
+
+Table 8: Hyper-parameters for Text Classiﬁcation
+
+Table 9: Hyper-parameters for Language Modeling
+
+SST
+
+IMDB
+
+N
+demb
+d
+df f
+h
+pi
+ph
+pa
+pc
+Bsent
+epochs
+
+4
+300
+300
+600
+6
+0.4
+0.1
+0.3
+0.4
+1024
+40
+
+5
+300
+300
+600
+6
+0.5
+0.1
+0.3
+0.5
+32
+40
+
+enwik8
+
+text8
+
+12
+512
+512
+2048
+8
+0.1
+0.1
+0.1
+0.1
+32768
+400000
+
+12
+512
+512
+2048
+8
+0.1
+0.1
+0.1
+0.1
+32768
+600000
+
+N
+demb
+d
+df f
+h
+pi
+ph
+pa
+pc
+Btok
+steps
+
+IWSLT WMT
+
+N
+M
+demb
+d
+df f
+h
+pi
+ph
+pa
+pc
+Bsent
+avg
+epochs
+
+6
+6
+512
+512
+2048
+8
+0.1
+0.1
+0.1
+0.1
+128
+10
+40
+
+6
+6
+512
+512
+2048
+8
+0.1
+0.1
+0.1
+0.1
+1024
+10
+40
+
+Table 10: Hyper-parameters for Machine Translation
+
+Table 8, 9 and 10 lists the hyper-parameters we
+use in Text Classiﬁcation, language Modeling and
+Machine Translation respectively.
+
+For full details please refer to the conﬁgurations
+in our source code: https://github.com/
+yzh119/BPT/tree/master/configs.
+

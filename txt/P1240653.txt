@@ -3852,3 +3852,3857 @@ viewed in color). The network is shown as graph together with information about 
 
 8
 
+8
+1
+0
+2
+ 
+v
+o
+N
+ 
+2
+ 
+ 
+]
+L
+M
+
+.
+t
+a
+t
+s
+[
+ 
+ 
+2
+v
+5
+6
+9
+4
+0
+.
+6
+0
+8
+1
+:
+v
+i
+X
+r
+a
+
+The streaming rollout of deep networks - towards
+fully model-parallel execution
+
+Volker Fischer
+Bosch Center for Artiﬁcial Intelligence
+Renningen, Germany
+volker.fischer@de.bosch.com
+
+Jan Köhler
+Bosch Center for Artiﬁcial Intelligence
+Renningen, Germany
+jan.koehler@de.bosch.com
+
+Thomas Pfeil
+Bosch Center for Artiﬁcial Intelligence
+Renningen, Germany
+thomas.pfeil@de.bosch.com
+
+Abstract
+
+Deep neural networks, and in particular recurrent networks, are promising can-
+didates to control autonomous agents that interact in real-time with the physical
+world. However, this requires a seamless integration of temporal features into the
+network’s architecture. For the training of and inference with recurrent neural
+networks, they are usually rolled out over time, and different rollouts exist. Con-
+ventionally during inference, the layers of a network are computed in a sequential
+manner resulting in sparse temporal integration of information and long response
+times. In this study, we present a theoretical framework to describe rollouts, the
+level of model-parallelization they induce, and demonstrate differences in solving
+speciﬁc tasks. We prove that certain rollouts, also for networks with only skip and
+no recurrent connections, enable earlier and more frequent responses, and show
+empirically that these early responses have better performance. The streaming
+rollout maximizes these properties and enables a fully parallel execution of the
+network reducing runtime on massively parallel devices. Finally, we provide an
+open-source toolbox to design, train, evaluate, and interact with streaming rollouts.
+
+1
+
+Introduction
+
+Over the last years, the combination of newly available large datasets, parallel computing power, and
+new techniques to implement and train deep neural networks has led to signiﬁcant improvements
+in the ﬁelds of vision [1], speech [2], and reinforcement learning [3]. In the context of autonomous
+tasks, neural networks usually interact with the physical world in real-time which renders it essential
+to integrate the processing of temporal information into the network’s design.
+
+Recurrent neural networks (RNNs) are one common approach to leverage temporal context and have
+gained increasing interest not only for speech [4] but also for vision tasks [5]. RNNs use neural
+activations to inform future computations, hence introducing a recursive dependency between neuron
+activations. This augments the network with a memory mechanism and allows it, unlike feed-forward
+neural networks, to exhibit dynamic behavior integrating a stream or sequence of inputs. For training
+and inference, backpropagation through time (BPTT) [6] or its truncated version [6, 7] are used,
+where the RNN is rolled out (or unrolled) through time disentangling the recursive dependencies and
+transforming the recurrent network into a feed-forward network.
+
+32nd Conference on Neural Information Processing Systems (NIPS 2018), Montréal, Canada.
+
+Since unrolling a cyclic graph is not well-deﬁned [8], different possible rollouts exist for the same
+neural network. This is due to the rollout process itself, as there are several ways to unroll cycles with
+length greater 1 (larger cycles than recurrent self-connections). More general, there are two ways
+to unroll every edge (cf. Fig. 1): having the edge connect its source and target nodes at the same
+point in time (see, e.g., vertical edges in Fig. 1b) or bridging time steps (see, e.g., Fig. 1c). Bridging
+is especially necessary for self-recurrent edges or larger cycles in the network, so that the rollout
+in fact becomes a feed-forward network. In a rollout, conventionally most edges are applied in the
+intra-frame non-bridging manner and bridge time steps only if necessary [9, 10, 11, 12]. We refer to
+these rollouts as sequential rollouts throughout this work. One contribution of this study is the proof
+that the number of rollouts increases exponentially with network complexity.
+
+a)
+
+b)
+
+c)
+
+d)
+
+The main focus of this work is that different rollouts
+induce different levels of model-parallelism and dif-
+ferent behaviors for an unrolled network. In rollouts
+inducing complete model-parallelism, which we call
+streaming, nodes of a certain time step in the unrolled
+network become computationally disentangled and
+can be computed in parallel (see Fig. 1c). This idea is
+not restricted to recurrent networks, but generalizes
+to a large variety of network architectures covered by
+the presented graph-theoretical framework in Sec. 3.
+In Sec. 4, we show experimental results that empha-
+size the difference of rollouts for both, networks with
+recurrent and skip, and only skip connections. In this
+study, we are not concerned comparing performances
+between networks, but between different rollouts of
+a given network (e.g., Fig. 1b vs. c).
+
+Our theoretical and empirical ﬁndings show that
+streaming rollouts enable fully model-parallel infer-
+ence achieving low-latency and high-frequency re-
+sponses. These features are particularly important for
+real-time applications such as autonomous cars [13]
+or UAV systems [14] in which the neural networks
+have to make complex decisions on high dimensional
+and frequent input signals within a short time.
+
+sequential
+rollout
+
+streaming
+rollout
+
+hybrid
+rollout
+
+Figure 1: (best viewed in color) a: Neural
+network with skip and recurrent connections
+(SR) and different rollouts: b: the sequential
+rollout, c: the streaming rollout and d: a hy-
+brid rollout. Nodes represent layers, edges
+represent transformations, e.g., convolutions.
+Only one rollout step is shown and each col-
+umn in (b-d) is one frame within the rollout.
+
+To the best of our knowledge, up to this study, no general theory exists that compares different rollouts
+and our contributions can be summarized as follows:
+
+• We provide a theoretical framework to describe rollouts of deep neural networks and show
+that, and in some cases how, different rollouts lead to different levels of model-parallelism
+and network behavior.
+
+• We formally introduce streaming rollouts enabling fully model-parallel network execution,
+and mathematically prove that streaming rollouts have the shortest response time to and
+highest sampling frequency of inputs.
+
+• We empirically give examples underlining the theoretical statements and show that streaming
+rollouts can further outperform other rollouts by yielding better early and late performance.
+
+• We provide an open-source toolbox speciﬁcally designed to study streaming rollouts of deep
+
+neural networks.
+
+2 Related work
+
+The idea of RNNs dates back to the mid-70s [15] and was popularized by [16]. RNNs and their
+variants, especially Long Short-Term Memory networks (LSTM) [17], considerably improved perfor-
+mance in different domains such as speech recognition [4], handwriting recognition [5], machine
+translation [18], optical character recognition (OCR) [19], text-to-speech synthesis [20], social signal
+classiﬁcation [21], or online multi-target tracking [22]. The review [23] gives an overview of the
+history and benchmark records set by DNNs and RNNs.
+
+2
+
+Variants of RNNs: There are several variants of RNN architectures using different mechanisms
+to memorize and integrate temporal information. These include LSTM networks [17] and related
+architectures like Gated Recurrent Unit (GRU) networks [24] or recurrent highway networks [25].
+Neural Turing Machines (NTM) [26] and Differentiable Neural Computers (DNC) [27] extend
+RNNs by an addressable external memory. Bi-directional RNNs (BRNNs) [28] incorporate the
+ability to model the dependency on future information. Numerous works extend and improve these
+RNN variants creating architectures with advantages for training or certain data domains (e.g.,
+[29, 30, 31, 32]).
+
+Response time: While RNNs are the main reason to use network rollouts, in this work we also
+investigate rollouts for non-recurrent networks. Theoretical and experimental results suggest that
+different rollout types yield different behavior especially for networks containing skip connections.
+The rollout pattern inﬂuences the response time of a network which is the duration between input
+(stimulus) onset and network output (response).
+
+Shortcut or skip connections can play an important role to decrease response times. Shortcut
+branches attached to intermediate layers allow earlier predictions (e.g., BranchyNet [33]) and iterative
+predictions reﬁne from early and coarse to late and ﬁne class predictions (e.g., feedback networks
+[12]). In [34], the authors show that identity skip connections, as used in Residual Networks (ResNet)
+[1], can be interpreted as local network rollouts acting as ﬁlters, which could also be achieved through
+recurrent self-connections. The good performance of ResNets underlines the importance of local
+recurrent ﬁlters. The runtime of inference and training for the same network can also be reduced by
+network compression [35, 36] or optimization of computational implementations [37, 38].
+
+Rollouts: To train RNNs, different rollouts are applied in the literature, though lacking a theoretically
+founded background. One of the ﬁrst to describe the transformation of a recurrent MLP into an
+equivalent feed-forward network and depicting it in a streaming rollout fashion was [39, ch. 9.4]. The
+most common way in literature to unroll networks over time is to duplicate the model for each time
+step as depicted in Fig. 1b [ch. 10.1 in 40, 9, 10, 11, 12, 41]. However, as we will show in this work,
+this rollout pattern is neither the only way to unroll a network nor the most efﬁcient.
+
+The recent work of Carreira et al. [42] also addresses the idea of model-parallelization through
+dedicated network rollouts to reduce latency between input and network output by distributing
+computations over multiple GPUs. While their work shows promising empirical ﬁndings in the ﬁeld
+of video processing, our work provides a theoretical formulation for a more general class of networks
+and their rollouts. Our work also differs in the way the delay between input and output, and network
+training is addressed.
+
+Besides the chosen rollout, other methods exist, that modify the integration of temporal information:
+for example, temporal stacking (convolution over time), which imposes a ﬁxed temporal receptive
+ﬁeld (e.g., [43, 44]), clocks, where different parts of the network have different update frequencies,
+(e.g., [45, 46, 47, 48, 49]) or predictive states, which try to compensate temporal delays between
+different network parts (e.g., [42]). For more details, please see also Sec. 5.
+
+3 Graph representations of network rollouts
+
+We describe dependencies inside a neural network N as a directed graph N = (V, E). The nodes
+v ∈ V represent different layers and the edges e ∈ E ⊂ V × V represent transformations introducing
+direct dependencies between layers. We allow self-connections (v, v) ∈ E and larger cycles in
+a network. Before stating the central deﬁnitions and propositions, we introduce notations used
+throughout this section and for the proofs in the appendix.
+
+Let G = (V, E) be a directed graph with vertices (or nodes) v ∈ V and edges e = (esrc, etgt) ∈
+E ⊂ V × V . Since neural networks process input data, we denote the input of the graph as set IG,
+consisting of all nodes without incoming edges:
+
+IG
+
+..= {v ∈ V | (cid:64)u ∈ V : (u, v) ∈ E}.
+
+(1)
+
+A path in G is a mapping p : {1, . . . , L} → E with p(i)tgt = p(i+1)src for i ∈ {1, . . . , L−1} where
+L ∈ N is the length of p. We denote the length of a path p also as |p| and the number of elements in
+a set A as |A|. A path p is called loop or cycle iff p(|p|)tgt = p(1)src and it is called minimal iff p is
+injective. The set of all cycles is denoted as CG. Two paths are called non-overlapping iff they share
+
+3
+
+no edges. We say a graph is input-connected iff for every node v exists a path p with p(|p|)tgt = v
+and p(1)src ∈ IG. Now we proceed with our deﬁnition of a (neural) network.
+
+Deﬁnition (network): A network is a directed and input-connected graph N = (V, E) for which
+0 < |E| < ∞.
+
+For our claims, this abstract formulation is sufﬁcient and, while excluding certain artiﬁcial cases, it
+ensures that a huge variety of neural network types is covered (see Fig. A1 for network examples).
+For deep neural networks, we give an explicit formulation of this abstraction in Sec. A1.2, which
+we also use for our experiments. Important concepts introduced here are illustrated in Fig. 2. In this
+work, we separate the concept of network rollouts into two parts: The temporal propagation scheme
+which we call rollout pattern and its associated rollout windows (see also Fig. 1 and Fig. 2):
+
+Deﬁnition (rollout pattern and window): Let N = (V, E) be a network. We call a mapping
+R : E → {0, 1} a rollout pattern of N . For a rollout pattern R, the rollout window of size W ∈ N
+is the directed graph RW = (VW , EW ) with:
+
+VW
+EW
+
+..= {0, . . . , W } × V, v = (i, v) ∈ VW
+..= {((i, u), (j, v)) ∈ VW × VW | (u, v) ∈ E ∧ j = i + R((u, v))}.
+
+(2)
+
+Edges e ∈ E with R(e) = 1 enable information to directly stream through time. In contrast,
+edges with R(e) = 0 cause information to be processed within frames, thus introducing sequential
+dependencies upon nodes inside a frame. We dropped the dependency of EW on the rollout pattern
+R in the notation. A rollout pattern and its rollout windows are called valid iff RW is acyclic for one
+and hence for all W ∈ N. We denote the set of all valid rollout patterns as RN and the rollout pattern
+R ≡ 1 the streaming rollout Rstream ∈ RN . We say two rollout patterns R and R(cid:48) are equally
+model-parallel iff they are equal (R(e) = R(cid:48)(e)) for all edges e = (u, v) ∈ E, not originating in the
+network’s input (u /∈ IN ). For i ∈ {0, . . . , W }, the subset {i} × V ⊂ VW is called the i-th frame.
+
+Proof: In Sec. A1.3, we prove that the deﬁnition of valid rollout patterns is well-deﬁned and is
+consistent with intuitions about rollouts, such as consistency over time. We also prove that the
+streaming rollout exists for every network and is always valid.
+
+The most non-streaming rollout pattern R ≡ 0 is not necessarily valid, because if N contains loops
+then R ≡ 0 does not yield acyclic rollout windows. Commonly, recurrent networks are unrolled
+such that most edges operate inside the same frame (R(e) = 0), and only when necessary (e.g., for
+recurrent or top-down) connections are unrolled (R(e) = 1). In contrast to this sequential rollout, the
+streaming rollout pattern unrolls all edges with R(e) = 1 (cf. top and third row in Fig. 2).
+
+Lemma 1: Let N = (V, E) be a network. The number of valid rollout patterns |RN | is bounded
+by:
+
+1 ≤ n ≤ |RN | ≤ 2|E|−|Erec|,
+
+(3)
+
+where Erec is the set of all self-connecting edges Erec
+
+..= {(u, v) ∈ E | u = v}, and n either:
+
+• n = 2|Eforward|, with Eforward being the set of edges not contained in any cycle of N , or
+• n = (cid:81)
+p∈C
+Proof: See appendix Sec. A1.4.
+
+(2|p| − 1), C ⊂ CN being any set of minimal and pair-wise non-overlapping cycles.
+
+Lemma 1 shows that the number of valid rollout patterns increases exponentially with network
+complexity. Inference of a rollout window is conducted in a sequential manner. This means, the state
+of all nodes in the rollout window is successively computed depending on the availability of already
+computed source nodes1. The chosen rollout pattern determines the mathematical function this rollout
+represents, which may be different between rollouts, e.g., for skip connections. In addition, the
+chosen rollout pattern also determines the order in which nodes can be computed leading to different
+runtimes to compute the full state of a rollout window.
+
+We now introduce tools to compare these addressed differences between rollouts. States of the rollout
+window encode, which nodes have been computed so far and update steps determine the next state
+
+1given the state of all input nodes at all frames and initial states for all nodes at the zero-th frame
+
+4
+
+network
+N
+
+rollout
+pattern R
+
+rollout window R3
+0 1 2 3
+0 1 2 3
+
+update states & inference tableaus
+U (Sinit)
+
+U n(Sinit)
+
+Sinit
+
+a)
+
+b)
+
+c)
+
+d)
+
+v
+e
+
+u
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+(0, v)
+
+(3, u)
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+1
+
+0
+
+1
+
+1
+
+0
+
+1
+
+1
+
+1
+
+0
+
+1
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+3
+
+2
+
+1
+
+0
+
+2
+
+1
+
+1
+
+0
+
+1
+
+1
+
+1
+
+0
+
+3
+
+2
+
+1
+
+0
+
+4
+
+3
+
+2
+
+0
+
+3
+
+2
+
+2
+
+0
+
+2
+
+2
+
+2
+
+0
+
+6
+
+5
+
+4
+
+0
+
+5 = n
+
+4
+
+3
+
+0
+
+3
+
+3
+
+0
+
+3
+
+3
+
+0
+
+8
+
+7
+
+0
+
+4 = n
+
+3 = n
+
+9 = n
+
+0
+
+0
+
+0
+
+0
+
+0
+
+Figure 2: (best viewed in color) a: Two different networks. b: Different rollout patterns R : E →
+{0, 1} for the two networks. Sequential (R(e) = 0) and streaming (R(e) = 1) edges are indicated
+with blue dotted and red solid arrows respectively. For the ﬁrst network (top to bottom), the most
+sequential, one hybrid, and the streaming rollout patterns are shown. For the second network, one
+out of its 3 most sequential rollout patterns is shown (either of the three edges of the cycle could
+be unrolled). c: Rollout windows of size W = 3. By deﬁnition (Eq. (2)), sequential and streaming
+edges propagate information within and to the next frames respectively. d: States S(v) and inference
+tableau values T (v). The state S(v) of a node is indicated with black (already known) or white
+(not yet computed). From left to right: initial state Sinit, state after ﬁrst update step U (Sinit), full
+state U n(Sinit) = Sfull. The number of update steps n to reach the full state differs between rollouts.
+Numbers inside nodes v indicate values of the inference tableau (T (v)). Inference factors F (R) are
+indicated with square instead of circular nodes in the ﬁrst frame of the full states.
+
+based on the previous state. Update tableaus list after how many update steps nodes in the rollout
+window are computed. Update states, update steps, and inference tableaus are shown for example
+networks and rollouts in Fig. 2.
+
+Deﬁnition (update state, update step, tableau, and factor): Let R be a valid rollout pattern of a
+network N = (V, E). A state of the rollout window RW is any mapping S : VW → {0, 1}. Let ΣW
+denote the set of all possible states. We deﬁne the full state Sfull and initial state Sinit as:
+
+Sfull ≡ 1;
+
+Sinit((i, v)) = 1 ⇐⇒ v ∈ IN ∨ i = 0.
+
+Further, we deﬁne the update step U which updates states S. Because the updated state U (S) is
+again a state and hence a mapping, we deﬁne U by specifying the mapping U (S):
+
+(4)
+
+(5)
+
+U : ΣW → ΣW ;
+(cid:26) 1
+0
+
+U (S)(v) ..=
+
+if S(v) = 1 or if for all (u, v) ∈ EW : S(u) = 1
+otherwise
+
+U (S) : VW → {0, 1}
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+5
+
+We call the mapping T : VW → N the inference tableau:
+
+T (v) ..= max
+p∈Pv
+
+|p| = argmin
+
+{U n(Sinit)(v) = 1}
+
+n∈N
+
+where U n is the n-th recursive application of U and for v ∈ VW , Pv denotes the set of all paths in
+RW that end at v (i.e., p(|p|)tgt = v) and for which their ﬁrst edge may start but not end in the 0-th
+frame, p(1)tgt /∈ {0} × V . Hereby, we exclude edges (computational dependencies) which never
+have to be computed, because all nodes in the 0-th frame are initialized from start. We dropped the
+dependencies of U and T on the rollout window RW in the notation and if needed we will express
+them with URW and TRW . Further, we call the maximal value of T over the rollout window of size 1
+the rollout pattern’s inference factor:
+
+(6)
+
+(7)
+
+F (R) ..= max
+v∈V1
+
+TR1(v).
+
+Proof: In Sec. A1.6 we prove Eq. (6).
+
+We also want to note that all rollout windows of a certain window size W have the same number
+of edges W ∗ |E|, independent of the chosen rollout pattern (ignoring edges inside the 0-th frame,
+because these are not used for updates). However, maximal path lengths in the rollout windows differ
+between different rollout patterns (cf. Eq. (6) and its proof, as well as tableau values in Fig. 2).
+
+Inference of rollout windows starts with the initial state Sinit. Successive applications of the update
+step U updates all nodes until the fully updated state Sfull is reached (cf. Fig. 2 and see Sec. A1.5
+for a proof). For a certain window size W , the number of operations to compute the full state is
+independent of the rollout pattern, but which updates can be done in parallel heavily depends on the
+chosen rollout pattern. We will use the number of required update steps to measure computation time.
+This number differs between different rollout patterns (e.g., F (R) in Fig. 2). In practice, the time
+needed for the update U (S) of a certain state S depends on S (i.e., which nodes can be updated next).
+For now, we will assume independence, but will address this issue in the discussion (Sec. 5).
+
+Theorem 1: Let R be a valid rollout pattern for a network N = (V, E) then the following
+statements are equivalent:
+
+a) R and the streaming rollout pattern Rstream are equally model-parallel.
+b) The ﬁrst frame is updated entirely after the ﬁrst update step: F (R) = 1.
+c) For W ∈ N, the i-th frame of RW is updated at the i-th update step:
+
+∀(i, v) ∈ VW : T ((i, v)) ≤ i.
+
+d) For W ∈ N, the inference tableau of RW is minimal everywhere and over all rollout patterns.
+
+In other words, responses are earliest and most frequent:
+
+∀v ∈ VW : TRW (v) = min
+R(cid:48)∈RN
+
+TR(cid:48)
+
+W
+
+(v).
+
+Proof: See appendix Sec. A1.7.
+
+4 Experiments
+
+To demonstrate the signiﬁcance of the chosen rollouts w.r.t. the runtime for inference and achieved
+accuracy, we compare the two extreme rollouts: the most model-parallel, i.e., streaming rollout
+(R ≡ 1, results in red in Fig. 3), and the most sequential rollout2 (R(e) = 0 for maximal number of
+edges, results in blue in Fig. 3).
+
+In all experiments, we consider a response time task, in which the input is a sequence of images and
+the networks have to respond as quickly as possible with the correct class. We want to restate that we
+do not compare performances between networks but between rollout patterns of the same network.
+
+For all experiments and rollout patterns under consideration, we conduct inference on shallow rollouts
+(W = 1) and initialize the zero-th frame of the next rollout window with the last (i.e., 1.) frame of
+
+2Here, the most sequential rollout is unique since the used networks do not contain cycles of length greater 1.
+
+For sequential rollouts that are ambiguous see bottom row of Fig. 2.
+
+6
+
+Figure 3: (best viewed in color) Classiﬁcation accuracy for sequential (in dashed blue), streaming
+(in solid red), and one hybrid (violet; only for SR network in a) rollout on MNIST, CIFAR10, and
+GTSRB (for networks and data see Figs. 1, 3d, A3, and A2). a-c: Average classiﬁcation results
+on MNIST over computation time measured in the number of update steps of networks with skip
++ recurrent (SR, a), with skip (S, b), and only feed-forward (FF, c) connections. In a), scaling of
+the abscissa changes at the vertical dashed line for illustration purposes. d: The input (top row) is
+composed of digits (bottom row) and noise (middle row). Note that the input is aligned to the time
+axis in (a). Red diamonds and blue stars indicate inputs sampled by streaming and sequential rollouts,
+respectively. e: Classiﬁcation results of the network DSR2 on CIFAR10. f: Accuracies at time of
+ﬁrst output of sequential rollout (see (V) in e) over networks DSR0 - DSR6 (red and blue curves; left
+axis). Differences of ﬁrst response times between streaming and sequential rollouts (see (IV) in e;
+black dotted curve; right axis). g: Average accuracies on GTSRB sequences starting at index 0 of the
+original sequences. h: Final classiﬁcation accuracies (see (VI) in g) over the start index of the input
+sequence. Standard errors are shown in all plots except e and f and are too small to be visible in (a-c).
+
+the preceding rollout window (see discussion Sec. 5). Hence, the inference factor of a rollout pattern
+is used to determine the number of update steps between responses (see F (Rstr), F (Rseq) in Fig. 3a).
+
+Datasets: Rollout patterns are evaluated on three datasets: MNIST [50], CIFAR10 [51], and the
+German trafﬁc sign recognition benchmark (GTSRB) [52]. To highlight the differences between
+different rollout patterns, we apply noise (different sample for each frame) to the data (see Fig. 3d
+and Fig. A3b, c). In contrast to data without noise, a single image is now not sufﬁcient for a good
+classiﬁcation performance anymore and temporal integration is necessary. In case of GTSRB, this
+noise can be seen as noise induced by the sensor as predominant under poor lighting conditions.
+GTSRB contains tracks of 30 frames from which sections are used as input sequences.
+
+Networks: We compare the behavior of streaming and sequential rollout patterns on MNIST for
+three different networks with two hidden layers (FF, S, SR; see Fig. 1 and Fig. A2). For evaluation on
+CIFAR10, we generate a sequence of 7 incrementally deeper networks (DSR0 - DSR6, see Fig. A3a)
+by adding layers to the blocks of a recurrent network with skip connections in a dense fashion (details
+in Fig. A3a). For evaluation on GTSRB, we used DSR4 leaving out the recurrent connection. Details
+about data, preprocessing, network architectures, and the training process are given in Sec. A2.
+
+Results: Rollouts are compared on the basis of their test accuracies over the duration (measured in
+update steps) needed to achieve these accuracies (Fig. 3a-c, e, and g).
+
+We show behavioral differences between streaming and sequential rollouts for increasingly complex
+networks on the MNIST dataset. In the case of neither recurrent, nor skip connections (see FF in
+
+7
+
+Fig. A2), the streaming rollout is mathematically identical to the sequential rollout. Neither rollout
+can integrate information over time and, hence, both perform classiﬁcation on single images with the
+same response time for the ﬁrst input image and same accuracy (see Fig. 3c). However, due to the
+pipelined structure of computations in the streaming case, outputs are more frequent.
+
+For networks with skip, but without recurrent connections (see S in Fig. A2), the behavioral difference
+between streaming and sequential rollouts can be shown best. While the sequential rollout still only
+performs classiﬁcation on single images, the streaming rollout can integrate over two input images
+due to the skip connection that bridges time (see Fig. 3b).
+
+In the streaming case, skip connections cause shallow shortcuts in time that can result in earlier
+(see (I) in Fig. 3a), but initially worse performance than for deep sequential rollouts. The streaming
+rollout responds 1 update step earlier than the sequential rollout since its shortest path is shorter by 1
+(see Fig. 2). These early ﬁrst estimations are later reﬁned when longer paths and ﬁnally the longest
+path from input to output contribute to classiﬁcation. For example, after 3 time steps in Fig. 3a, the
+streaming rollout uses the full network. This also applies to the sequential rollout, but instead of
+integrating over two images (frames 0 and 1), only the image of a single frame (frame 1) is used (cf.
+blue to red arrows connecting Fig. 3d and a).
+
+Due to parallel computation of the entire frame in the streaming case, the sampling frequency of
+input images (every time step; see red diamonds in Fig. 3d) is maximal (F (Rstr) = 1 in Fig. 3a; see
+d in Theorem 1 in Sec. 3). In contrast, the sampling frequency of the sequential rollout decreases
+linearly with the length of the longest path (F (Rseq) = 3 in Fig. 3a; blue stars in Fig. 3d).
+
+High sampling frequencies and shallow shortcuts via skip connections establish a high degree of
+temporal integration early on and result in better early performance (see (II) in Fig. 3a). In the long
+run, however, classiﬁcation performances are comparable between streaming and sequential rollouts
+and the same number of input images is integrated over (see (III) in Fig. 3a).
+
+We repeat similar experiments for the CIFAR10 dataset to demonstrate the increasing advantages of
+the streaming over sequential rollouts for deeper and more complex networks. For the network DSR2
+with the shortest path of length 4 and longest path of length 6, the ﬁrst response of the streaming
+rollout is 2 update steps earlier than for the sequential rollout (see (IV) in Fig. 3e) and shows better
+early performance (see (V) in Fig. 3e). With increasing depth (length of the longest path) over the
+sequence of networks DSR0 - DSR6 (see Fig. A3a), the time to ﬁrst response stays constant for
+streaming, but linearly grows with the depth for sequential rollouts (see Fig. 3f black curve). The
+difference of early performance (see (V) in Fig. 3e) widens with deeper networks (Fig. 3f).
+
+For evaluation of rollouts on GTSRB, we considere the DSR4 network. Self-recurrence is omitted
+since the required short response times of this task cannot be achieved with sequential rollouts
+due to the very small sampling frequencies. Consequently, for fair comparison, we calculate the
+classiﬁcations of the ﬁrst 8 images in parallel for the sequential case. In this case, where both rollouts
+use the same amount of computations, performance for the sequential rollout increases over time due
+to less blurry input images, while the streaming rollout in addition performs temporal integration
+using skip connections and yields better performance (see (VI) in Fig. 3g). This results in better
+performance of streaming compared to sequential rollouts for more distant objects (Fig. 3h).
+
+5 Discussion and Conclusion
+
+The presented theory for network rollouts is generically applicable to a vast variety of deep neural
+networks (see Sec. A1.2) and is not constrained to recurrent networks but could be used on forward
+(e.g., VGG [53], AlexNet [54]) or skipping networks (e.g., ResNet [1], DenseNet [55]). We restricted
+rollout patterns to have values R(e) ∈ {0, 1} and did neither allow edges to bridge more than 1 frame
+R(e) > 1 nor pointing backwards in time R(e) < 0. The ﬁrst case is subsumed under the presented
+theory using copy-nodes for longer forward connections, and for R(e) < 0 rollouts with backward
+connections loose the real-time capability, because information from future frames would be used.
+
+In this work, we primarily investigated differences between rollout patterns in terms of the level of
+parallelization they induce in their rollout windows. But using different rollout patterns is not a mere
+implementation issue. For some networks, all rollout patterns yield the same mathematical behavior
+(e.g., mere feed-forward networks without any skip or recurrent connections, cf. Fig. 3c). For other
+networks, different rollout patterns (see Sec. 3) may lead to differences in the behavior of their rollout
+
+8
+
+windows (e.g., Fig. 3b). Hence, parameters between different rollout patterns might be incompatible.
+The theoretical analysis of behavioral equivalency of rollout patterns is a topic for future work.
+
+One disadvantage of the streaming rollout pattern seems to be that deeper networks also require
+deeper rollout windows. Rollout windows should be at least as long as the longest minimal path
+connecting input to output, i.e., all paths have appeared at least once in the rollout window. For
+sequential rollout patterns this is not the case, since, e.g., for a feed-forward network the longest
+minimal path is already contained in the ﬁrst frame. However, for inference with streaming rollouts
+instead of using deep rollouts we propose to use shallow rollouts (e.g., W = 1) and to initialize
+the zero-th frame of the next rollout window with the last (i.e., ﬁrst) frame of the preceding rollout
+window. This enables a potentially inﬁnite memory for recurrent networks and minimizes the memory
+footprint of the rollout window during inference.
+
+Throughout the experimental section, we measured runtime by the number of necessary update
+steps assuming equal update time for every single node update. Without this assumption and given
+fully parallel hardware, streaming rollouts still manifest the best case scenario in terms of maximal
+parallelization and the inference of a single frame would take the runtime of the computationally most
+expensive node update. However, sequential rollouts would not beneﬁt from the assumed parallelism
+of such hardware and inference of a single frame takes the summed up runtime of all necessary node
+updates. The streaming rollout favors network architectures with many nodes of approximately equal
+update times. In this case, the above assumtion approximately holds.
+
+The difference in runtime between rollout patterns depends on the hardware used for execution.
+Although commonly used GPUs provide sufﬁcient parallelism to speed up calculations of activations
+within a layer, they are often not parallel enough to enable the parallel computation of multiple
+layers. Novel massively parallel hardware architectures such as the TrueNorth chip [56, 57] allow to
+store and run the full network rollouts on-chip reducing runtime of rollouts drastically and therefore
+making streaming rollouts highly attractive. The limited access to massively parallel hardware may
+be one reason, why streaming rollouts have not been thoroughly discussed, yet.
+
+Furthermore, not only the hardware, but also the software frameworks must support the parallelization
+of independent nodes in their computation graph to exploit the advantages of streaming rollouts. This
+is usually not the case and by default sequential rollouts are used. For the experiments presented here,
+we use the Keras toolbox to compare different rollout patterns. To realize arbitrary rollout patterns in
+Keras, instead of using Keras’ build-in RNN functionalities, we created a dedicated model builder
+which explicitly generates the rollout windows. Additionally, we implemented an experimental
+toolbox (Tensorﬂow and Theano backends) to study (deﬁne, train, evaluate, and visualize) networks
+using the streaming rollout pattern (see Sec. A3). Both are available as open-source code3.
+
+Similar to biological brains, synchronization of layers (nodes) plays an important role for the
+streaming rollout pattern. At a particular time (frame), different nodes may carry differently delayed
+information with respect to the input. In this work, we evaluate network accuracy dependent on the
+delayed response. An interesting area for future research is the exploration of mechanisms to guide
+and control information ﬂow in the context of the streaming rollout patterns, e.g., through gated skips
+(bottom-up) and recurrent (top-down) connections. New sensory information should be distributed
+quickly into deeper layers. and high-level representations and knowledge of the network about its
+current task could stabilize, predict, and constrain lower-level representations.
+
+A related concept to layer synchronization is that of clocks, where different layers, or more generally
+different parts of a network, are updated with different frequencies. In this work, all layers are
+updated equally often. In general, it is an open research question to which extend clocking and more
+generally synchronization mechanisms should be implicit parts of the network and hence learnable or
+formulated as explicit a-priory constraints.
+
+Conclusion: We presented a theoretical framework for network rollouts and investigated differences
+in behavior and model-parallelism between different rollouts. We especially analysed the streaming
+rollout, which fully disentangles computational dependencies between nodes and hence enables
+full model-parallel inference. We empirically demonstrated the superiority of the streaming over
+non-streaming rollouts for different image datasets due to faster ﬁrst responses to and higher sampling
+of inputs. We hope our work will encourage the scientiﬁc community to further study the advantages
+and behavioral differences of streaming rollouts in preparation to future massively parallel hardware.
+
+3https://github.com/boschresearch/statestream
+
+9
+
+The authors would like to thank Bastian Bischoff, Dan Zhang, Jan-Hendrik Metzen, and Jörg Wagner
+for their valuable remarks and discussions.
+
+Acknowledgments
+
+References
+
+[1] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition.
+In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pages
+770–778, 2016.
+
+[2] Dario Amodei, Sundaram Ananthanarayanan, Rishita Anubhai, Jingliang Bai, Eric Battenberg, Carl Case,
+Jared Casper, Bryan Catanzaro, Qiang Cheng, Guoliang Chen, et al. Deep speech 2: End-to-end speech
+recognition in english and mandarin. In International Conference on Machine Learning (ICML), pages
+173–182, 2016.
+
+[3] Yan Duan, Xi Chen, Rein Houthooft, John Schulman, and Pieter Abbeel. Benchmarking deep reinforcement
+learning for continuous control. In International Conference on Machine Learning (ICML), pages 1329–
+1338, 2016.
+
+[4] Santiago Fernández, Alex Graves, and Jürgen Schmidhuber. An application of recurrent neural networks
+to discriminative keyword spotting. In International Conference on Artiﬁcial Neural Networks, pages
+220–229, 2007.
+
+[5] Alex Graves and Jürgen Schmidhuber. Ofﬂine handwriting recognition with multidimensional recurrent
+
+neural networks. In Advances in Neural Information Processing Systems (NIPS), pages 545–552, 2009.
+
+[6] Paul J Werbos. Generalization of backpropagation with application to a recurrent gas market model. Neural
+
+networks, 1(4):339–356, 1988.
+
+[7] Ronald J Williams and David Zipser. Gradient-based learning algorithms for recurrent networks and their
+computational complexity. Backpropagation: Theory, architectures, and applications, 1:433–486, 1995.
+
+[8] Qianli Liao and Tomaso Poggio. Bridging the gaps between residual learning, recurrent neural networks
+
+and visual cortex. arXiv:1604.03640, 2016.
+
+[9] Razvan Pascanu, Tomas Mikolov, and Yoshua Bengio. On the difﬁculty of training recurrent neural
+
+networks. In International Conference on Machine Learning (ICML), pages 1310–1318, 2013.
+
+[10] Ming Liang and Xiaolin Hu. Recurrent convolutional neural network for object recognition. In Proceedings
+
+of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pages 3367–3375, 2015.
+
+[11] Zhiheng Huang, Wei Xu, and Kai Yu. Bidirectional LSTM-CRF models for sequence tagging.
+
+arXiv:1508.01991, 2015.
+
+1612.09508, 2016.
+
+[12] A. R. Zamir, T.-L. Wu, L. Sun, W. Shen, B. E. Shi, J. Malik, and S. Savarese. Feedback Networks. arXiv
+
+[13] Huazhe Xu, Yang Gao, Fisher Yu, and Trevor Darrell. End-to-end learning of driving models from large-
+scale video datasets. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition
+(CVPR), pages 3530–3538, 2017.
+
+[14] Chih-Min Lin, Ching-Fu Tai, and Chang-Chih Chung. Intelligent control system design for uav using a
+
+recurrent wavelet neural network. Neural Computing & Applications, 24(2):487–496, 2014.
+
+[15] William A Little. The existence of persistent states in the brain. In From High-Temperature Superconduc-
+
+tivity to Microminiature Refrigeration, pages 145–164. Springer, 1974.
+
+[16] John J Hopﬁeld. Neural networks and physical systems with emergent collective computational abilities.
+
+Proceedings of the national academy of sciences, 79(8):2554–2558, 1982.
+
+[17] Sepp Hochreiter and Jürgen Schmidhuber. Long short-term memory. Neural computation, 9(8):1735–1780,
+
+1997.
+
+[18] Ilya Sutskever, Oriol Vinyals, and Quoc V Le. Sequence to sequence learning with neural networks. In
+
+Advances in Neural Information Processing Systems (NIPS), pages 3104–3112, 2014.
+
+[19] Thomas M Breuel, Adnan Ul-Hasan, Mayce Ali Al-Azawi, and Faisal Shafait. High-performance OCR for
+printed English and Fraktur using LSTM networks. In International Conference on Document Analysis
+and Recognition (ICDAR), pages 683–687, 2013.
+
+[20] Yuchen Fan, Yao Qian, Feng-Long Xie, and Frank K Soong. TTS synthesis with bidirectional LSTM based
+recurrent neural networks. In Fifteenth Annual Conference of the International Speech Communication
+Association, 2014.
+
+10
+
+[21] Raymond Brueckner and Bjorn Schulter. Social signal classiﬁcation using deep BLSTM recurrent neural
+networks. In IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP), pages
+4823–4827, 2014.
+
+[22] Anton Milan, Seyed Hamid Rezatoﬁghi, Anthony R Dick, Ian D Reid, and Konrad Schindler. Online
+multi-target tracking using recurrent neural networks. In Proceedings of the AAAI Conference on Artiﬁcial
+Intelligence (AAAI), pages 4225–4232, 2017.
+
+[23] Jürgen Schmidhuber. Deep learning in neural networks: An overview. Neural networks, 61:85–117, 2015.
+
+[24] Kyunghyun Cho, Bart Van Merriënboer, Dzmitry Bahdanau, and Yoshua Bengio. On the properties of
+
+neural machine translation: Encoder-decoder approaches. arXiv:1409.1259, 2014.
+
+[25] Julian Georg Zilly, Rupesh Kumar Srivastava, Jan Koutník, and Jürgen Schmidhuber. Recurrent highway
+
+networks. arXiv:1607.03474, 2016.
+
+[26] Alex Graves, Greg Wayne, and Ivo Danihelka. Neural turing machines. arXiv:1410.5401, 2014.
+
+[27] Alex Graves, Greg Wayne, Malcolm Reynolds, Tim Harley, Ivo Danihelka, Agnieszka Grabska-Barwi´nska,
+Sergio Gómez Colmenarejo, Edward Grefenstette, Tiago Ramalho, John Agapiou, et al. Hybrid computing
+using a neural network with dynamic external memory. Nature, 538:471–476, 2016.
+
+[28] Mike Schuster and Kuldip K Paliwal. Bidirectional recurrent neural networks. IEEE Transactions on
+
+Signal Processing, 45(11):2673–2681, 1997.
+
+[29] Víctor Campos, Brendan Jou, Xavier Giró-i Nieto, Jordi Torres, and Shih-Fu Chang. Skip RNN: Learning
+to skip state updates in recurrent neural networks. In International Conference on Learning Representations
+(ICLR), 2018.
+
+[30] Golan Pundak and Tara N Sainath. Highway-LSTM and recurrent highway networks for speech recognition.
+
+In Proceedings of Interspeech, 2017.
+
+[31] Razvan Pascanu, Caglar Gulcehre, Kyunghyun Cho, and Yoshua Bengio. How to construct deep recurrent
+
+neural networks. arXiv:1312.6026, 2013.
+
+[32] Junyoung Chung, Sungjin Ahn, and Yoshua Bengio. Hierarchical multiscale recurrent neural networks. In
+
+International Conference on Learning Representations (ICLR), 2017.
+
+[33] Surat Teerapittayanon, Bradley McDanel, and H.T. Kung. BranchyNet: Fast inference via early exiting
+
+from deep neural networks. In International Conference on Pattern Recognition (ICPR), 2016.
+
+[34] Klaus Greff, Rupesh K. Srivastava, and Jürgen Schmidhuber. Highway and residual networks learn unrolled
+
+iterative estimation. In International Conference on Learning Representations (ICLR), 2017.
+
+[35] Song Han, Huizi Mao, and William J Dally. Deep compression: Compressing deep neural networks with
+pruning, trained quantization and huffman coding. In International Conference on Learning Representa-
+tions (ICLR), 2016.
+
+[36] Yong-Deok Kim, Eunhyeok Park, Sungjoo Yoo, Taelim Choi, Lu Yang, and Dongjun Shin. Compression
+of deep convolutional neural networks for fast and low power mobile applications. arXiv:1511.06530,
+2015.
+
+[37] Andrew Lavin and Scott Gray. Fast algorithms for convolutional neural networks. In Proceedings of the
+IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pages 4013–4021, 2016.
+
+[38] Michael Mathieu, Mikael Henaff, and Yann LeCun. Fast training of convolutional networks through ffts.
+
+In International Conference on Learning Representations (ICLR), 2014.
+
+[39] Marvin Minsky and Seymour A. Papert. Perceptrons: An introduction to computational geometry. MIT
+
+press, 1969. retrieved from the 1988 reissue.
+
+[40] Ian Goodfellow, Yoshua Bengio, and Aaron Courville. Deep learning. MIT press Cambridge, 2016.
+[41] Karol Gregor and Yann LeCun. Learning fast approximations of sparse coding. International Conference
+
+on Machine Learning (ICML), pages 399–406, 2010.
+
+[42] Joao Carreira, Viorica Patraucean, Laurent Mazare, Andrew Zisserman, and Simon Osindero. Massively
+parallel video networks. Proceedings of the European Conference on Computer Vision (ECCV), pages
+649–666, 2018.
+
+[43] Du Tran, Lubomir Bourdev, Rob Fergus, Lorenzo Torresani, and Manohar Paluri. Learning spatiotemporal
+features with 3d convolutional networks. Proceedings of the IEEE International Conference on Computer
+Vision (ICCV), pages 4489–4497, 2015.
+
+[44] Fabian Caba Heilbron, Victor Escorcia, Bernard Ghanem, and Juan Carlos Niebles. Activitynet: A
+large-scale video benchmark for human activity understanding. Proceedings of the IEEE Conference on
+Computer Vision and Pattern Recognition (CVPR), pages 961–970, 2015.
+
+[45] Jan Koutnik, Klaus Greff, Faustino Gomez, and Jürgen Schmidhuber. A clockwork rnn. Proceedings of
+
+the 31st International Conference on Machine Learning PMLR, pages 1863–1871, 2014.
+
+11
+
+[46] Alexander Sasha Vezhnevets, Simon Osindero, Tom Schaul, Nicolas Heess, Max Jaderberg, David Silver,
+and Koray Kavukcuoglu. Feudal networks for hierarchical reinforcement learning. International Conference
+on Machine Learning (ICML), 2017.
+
+[47] Evan Shelhamer, Kate Rakelly, Judy Hoffman, and Trevor Darrell. Clockwork convnets for video semantic
+
+segmentation. ECCV Workshop, 2016.
+
+[48] Michael Figurnov, Maxwell D. Collins, Yukun Zhu, Li Zhang, Jonathan Huang, Dmitry Vetrov, and Ruslan
+Salakhutdinov. Spatially adaptive computation time for residual networks. Proceedings of the IEEE
+Conference on Computer Vision and Pattern Recognition (CVPR), 2017.
+
+[49] Daniel Neil, Michael Pfeiffer, and Shih-Chii Liu. Phased LSTM: Accelerating recurrent network training
+
+for long or event-based sequences. Advances in Neural Information Processing Systems (NIPS), 2016.
+
+[50] Yann LeCun, Léon Bottou, Yoshua Bengio, and Patrick Haffner. Gradient-based learning applied to
+
+document recognition. Proceedings of the IEEE, 86(11):2278–2324, 1998.
+
+[51] Alex Krizhevsky and Geoffrey E. Hinton. Learning multiple layers of features from tiny images. Technical
+
+report, University of Toronto, 2009.
+
+[52] Johannes Stallkamp, Marc Schlipsing, Jan Salmen, and Christian Igel. The german trafﬁc sign recognition
+benchmark: a multi-class classiﬁcation competition. In International Joint Conference on Neural Networks
+(IJCNN), pages 1453–1460. IEEE, 2011.
+
+[53] Karen Simonyan and Andrew Zisserman. Very deep convolutional networks for large-scale image recogni-
+
+tion. arXiv:1409.1556, 2014.
+
+[54] Alex Krizhevsky, Ilya Sutskever, and Geoffrey E Hinton. Imagenet classiﬁcation with deep convolutional
+neural networks. In Advances in Neural Information Processing Systems (NIPS), pages 1097–1105, 2012.
+
+[55] Gao Huang, Zhuang Liu, Kilian Q Weinberger, and Laurens van der Maaten. Densely connected convo-
+lutional networks. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition
+(CVPR), pages 2261–2269, 2017.
+
+[56] Paul A. Merolla, John V. Arthur, Rodrigo Alvarez-Icaza, Andrew S. Cassidy, Jun Sawada, Filipp Akopyan,
+Bryan L. Jackson, Nabil Imam, Chen Guo, Yutaka Nakamura, Bernard Brezzo, Ivan Vo, Steven K. Esser,
+Rathinakumar Appuswamy, Brian Taba, Arnon Amir, Myron D. Flickner, William P. Risk, Rajit Manohar,
+and Dharmendra S. Modha. A million spiking-neuron integrated circuit with a scalable communication
+network and interface. Science, 345(6197):668–673, 2014.
+
+[57] Steven K. Esser, Paul A. Merolla, John V. Arthur, Andrew S. Cassidy, Rathinakumar Appuswamy, Alexan-
+der Andreopoulos, David J. Berg, Jeffrey L. McKinstry, Timothy Melano, Davis R. Barch, Carmelo
+di Nolfo, Pallab Datta, Arnon Amir, Brian Taba, Myron D. Flickner, and Dharmendra S. Modha. Convolu-
+tional networks for fast, energy-efﬁcient neuromorphic computing. Proceedings of the National Academy
+of Sciences, 113(41):11441–11446, 2016.
+
+[58] Tijmen Tieleman and Geoffrey Hinton. Lecture 6.5-rmsprop: Divide the gradient by a running average of
+
+its recent magnitude. COURSERA: Neural Networks for Machine Learning 4, 2012.
+
+[59] Theano Development Team. Theano: A Python framework for fast computation of mathematical expres-
+
+sions. arXiv:1605.02688, 2016.
+
+[60] Martín Abadi, Ashish Agarwal, Paul Barham, Eugene Brevdo, Zhifeng Chen, Craig Citro, Greg S.
+Corrado, Andy Davis, Jeffrey Dean, Matthieu Devin, Sanjay Ghemawat, Ian Goodfellow, Andrew Harp,
+Geoffrey Irving, Michael Isard, Yangqing Jia, Rafal Jozefowicz, Lukasz Kaiser, Manjunath Kudlur, Josh
+Levenberg, Dandelion Mané, Rajat Monga, Sherry Moore, Derek Murray, Chris Olah, Mike Schuster,
+Jonathon Shlens, Benoit Steiner, Ilya Sutskever, Kunal Talwar, Paul Tucker, Vincent Vanhoucke, Vijay
+Vasudevan, Fernanda Viégas, Oriol Vinyals, Pete Warden, Martin Wattenberg, Martin Wicke, Yuan Yu,
+and Xiaoqiang Zheng. TensorFlow: Large-scale machine learning on heterogeneous systems, 2015. URL
+https://www.tensorflow.org/. Software available from tensorﬂow.org.
+
+12
+
+The streaming rollout of deep networks - towards fully model-parallel
+execution
+Supplementary material
+
+A1 Proofs and notes for theory chapter
+
+To improve readability, we will restate certain parts of the theory chapter from the main text.
+
+A1.1 Examples for networks following our deﬁnition in Sec. 3
+
+Figure A1: Examples of networks covered by the presented theory in Sec. 3. The crossed-out network
+has no input and is consequently not a network by our deﬁnition.
+
+A1.2 Note: Connecting the theory of networks with deep neural networks
+
+For deep networks, nodes v correspond to layers and edges e to transformations between layers, such
+as convolutions (e.g., see networks in Fig. A1 and Fig. A2). To a node v a state xv ∈ RDv is assigned,
+e.g. an image with Dv = 32 × 32 × 3. Let denote ye the result of the transformation fe which is
+speciﬁed by an edge e = (u, v):
+
+ye = fe(θe, xu),
+
+where θe are parameters of the edge e, e.g. a weight kernel.
+
+For the node v, let SRCv denote the set of all edges targeting v. Ignoring the temporal dimension, a
+node’s state is then computed as:
+
+xv = fv(ϑv, ye1
+
+, . . . , ye|SRCv |
+
+v
+
+),
+
+v
+
+where ϑv are parameters of the vertex v (e.g., biases), and the mapping fv specifying how the sources
+are combined (e.g., addition and/or multiplication). Most architectures and network designs can be
+subsumed under this deﬁnition of a network, because we do not impose any constraints on the node
+and edge mappings fv, fe.
+
+For the experiments in this work, for every node v all results of incoming transformations were
+summed up:
+
+xv = fv(b, ye1
+
+, . . . , ye|SRCv |
+
+v
+
+v
+
+) = σ
+
+b +
+
+(cid:32)
+
+(cid:33)
+
+ye
+
+,
+
+(cid:88)
+
+e∈SRCv
+
+where σ is some activation function, b is a channel-wise bias and the edge transformations fe were
+convolutions with suitable stride to provide compatible dimensions for summation.
+
+A1.3 Proofs for deﬁnition (rollout) in Sec. 3
+
+Let N = (V, E) be a network. We call a mapping R : E → {0, 1} a rollout pattern of N . For a
+rollout pattern R, the rollout window of size W ∈ N is the directed graph RW = (VW , EW ) with:
+
+VW
+EW
+
+..= {0, . . . , W } × V, v = (i, v) ∈ VW
+..= {((i, u), (j, v)) ∈ VW × VW | (u, v) ∈ E ∧ j = i + R((u, v))}.
+
+(8)
+
+1
+
+We dropped the dependency of especially EW on the rollout pattern R in the notation. A rollout
+pattern and its rollout windows are called valid iff RW is acyclic for one and hence for all W ∈ N.
+We denote the set of all valid rollout patterns as RN , and the rollout pattern for which R ≡ 1 the
+streaming rollout Rstream ∈ RN . We say two rollout patterns R and R(cid:48) are equally model-parallel
+iff for all edges e = (u, v) ∈ E not originating in the network’s input u /∈ IN are equal R(e) = R(cid:48)(e).
+For i ∈ {0, . . . , W }, the subset {i} × V ⊂ VW is called the i-th frame.
+
+Note (interpretation): Here, we show how this deﬁnition reﬂects the intuition, that a rollout should
+be consistent with the network in the sense that it should contain all edges / nodes of the network
+and should not add new edges / nodes, which are not present in the network. Further, we show that
+this deﬁnition yields rollout windows which are temporally consistent and that rollout windows are
+consistent with regards to each other:
+
+• Rollout windows cannot add new edges / nodes: By this, we mean, that a rollout window
+only contains derived nodes and edges from the original network and for example cannot
+introduce edges between nodes in the rollout window, which were not already present in the
+network. This follows directly from the deﬁnition of EW .
+
+• Edges / nodes of the network are contained in a rollout window: For vertices this is
+
+trivial and for edges e = (u, v) ∈ E always ((0, u), (R(e), v)) ∈ EW .
+
+• Rollout windows contain no temporal backward edges: A backward edge is an edge
+
+((i, u), (j, v)) ∈ EW with j < i. But we know for all edges that j = i + R((u, v)).
+
+• Temporal consistency: Temporal consistency means that for an edge ((i, u), (j, v)) ∈ EW
+and a second edge between the same nodes ((i(cid:63), u), (j(cid:63), v)) ∈ EW the temporal gap is the
+same j − i = j(cid:63) − i(cid:63). By deﬁnition, both are equal to R((u, v)).
+
+• Rollout windows are compatible with each other: We show that RW is a sub-graph of
+RW +1, in the sense that VW ⊂ VW +1 and EW ⊂ EW +1: From the deﬁnition, this is
+obvious for the set of vertices and edges, but nevertheless we will state it for edges anyway:
+Let e ∈ EW with e = ((i, u), (j, v)). Then by deﬁnition (u, v) ∈ E and j = i + R((u, v)).
+Hence, e ∈ RW +1.
+
+Proof (deﬁnition of valid rollout pattern is well-deﬁned): For a rollout pattern, we prove that if
+the rollout window of a certain size W is valid, then the rollout window for any size is valid: Let R be
+a rollout pattern for a network N and RW be a valid rollout window. Because RW hence contains no
+cycles, also RW (cid:48) for W (cid:48) < W contains no cycles (see statement about rollout window compatibility
+from above). Using induction, it is sufﬁcient to show that RW +1 is valid. Assuming it is not, let p be
+a cycle in RW +1. Because there are no temporal backward edges (see above) p has to be contained in
+the last, the (W + 1)-th frame. Because of the temporal consistency of rollout windows (see above),
+there are now cycles in all previous frames which contradicts the validity of RW .
+
+Proof (streaming rollout exists and is valid): The streaming rollout pattern Rstream ≡ 1 always
+exists, because according to our network deﬁnition, E is not empty. Further, the streaming rollout
+pattern is always valid: Assuming that this is not the case, let Rstream
+W be a rollout window of size
+W which is not acyclic and let p be a cycle in Rstream
+W . Because there are no backward edges
+e = ((i, u), (j, v)) ∈ EW with j < i, all edges of the cycle must be inside a single frame, which is in
+contradiction to Rstream ≡ 1.
+
+Note (streaming rollout is un-ambiguous): Considering the sets of all most streaming and most
+non-streaming rollout patterns
+
+(cid:26)
+
+(cid:26)
+
+Rstreaming =
+
+R ∈ RN
+
+|R−1(1)| = max
+R(cid:63)∈RN
+
+|R−1
+
+(cid:63) (1)|
+
+Rnon-streaming =
+
+R ∈ RN
+
+|R−1(0)| = max
+R(cid:63)∈RN
+
+|R−1
+
+(cid:63) (0)|
+
+(cid:27)
+
+(cid:27)
+
+we have shown above that |Rstreaming| = 1 and this is exactly the streaming rollout. In contrast,
+|Rnon-streaming| ≥ 1 especially for networks containing cycles with length greater 1. In this sense, the
+streaming rollout is un-ambiguous because it always uniquely exists while the most-sequential rollout
+is ambiguous.
+
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+
+2
+
+A1.4 Proof for Lemma 1 in Sec. 3
+
+Lemma 1: Let N = (V, E) be a network. The number of valid rollout patterns |RN | is bounded
+by:
+
+1 ≤ n ≤ |RN | ≤ 2|E|−|Erec|,
+
+(9)
+
+where Erec is the set of all self-connecting edges Erec
+
+..= {(u, v) ∈ E | u = v}, and n either:
+
+• n = 2|Eforward|, with Eforward being the set of edges not contained in any cycle of N , or
+• n = (cid:81)
+p∈C
+
+(2|p| − 1), C ⊂ CN being any set of minimal and pair-wise non-overlapping cycles.
+
+Proof |RN | ≤ 2|E|−|Erec|: The number of all (valid and invalid) rollout patterns is 2|E|, because
+the pattern can assign 0 or 1 to every edge. In order to be valid (acyclic rollout windows), the pattern
+has to assign 1 at least to every self-connecting edge.
+
+Proof 1 ≤ n: Concerning the forward case: According to the deﬁnition of a network, IN is not
+empty and hence there always exists at least one forward edge |Eforward| > 0. Concerning the
+recurrent case: It is easy to see that n is greater than 0, increases with |C| and that C has to be at
+least the empty set.
+
+Proof n ≤ |RN | forward case: Considering the streaming rollout pattern Rstream ≡ 1 which
+always exists and is always valid (see above), we combinatorically can construct 2|Eforward| different
+valid rollout patterns on the basis of the streaming rollout pattern by combinatorically changing R(e)
+for all forward edges e ∈ Eforward.
+
+Proof n ≤ |RN | recurrent case: W.l.o.g. in case CN = ∅ we set n = 1. Otherwise let C ⊂ CN
+be any set of minimal and pair-wise non-overlapping cycles. Based on the streaming rollout pattern
+we will again construct the speciﬁed number of rollout patterns. The idea is that every cycle p ∈ C
+gives rise to 2|p| − 1 different rollout patterns by varying the streaming rollout Rstream(E) ≡ 1 on
+all edges in p and we have to subtract the one rollout for which R(p) ≡ 0, because for this speciﬁc
+rollout pattern, the cycle p does not get unrolled. Because the cycle is minimal, those 2|p| − 1 patterns
+are different from one another. Because all cycles in C are disjunct we can combinatorically use this
+construction across all cycles of C and constructed (cid:81)
+p∈C
+
+(2|p| − 1) valid rollouts.
+
+A1.5 Proof update steps convergence to full state in Sec. 3
+
+Let RW be a rollout window for a valid rollout pattern R of the network N = (V, E). Then, starting
+from the initial state Sinit and successively applying update steps U , converges always to the full state
+Sfull:
+
+∃n ∈ N : U n(Sinit) = Sfull
+
+Proof: Using induction, we show this without loss of generality for R1. Assuming that this is not
+the case, then there exists a state S ∈ Σ1, such that
+
+∀n ∈ N : U n(S) = S, and ∃v = (1, v) ∈ V1 : S(v) = 0
+But being unable to update v means, that there is another node that is input to v which is also not
+updated yet (1, v1) ∈ V1 and S((1, v1)) = 0. Because there are no loops in R1 these nodes are not
+the same v (cid:54)= v1. This line of argument can now also be applied to v1 leading to a third node (1, v2)
+with S((1, v2)) = 0 and v (cid:54)= v1 (cid:54)= v2 and so on. Because we only consider networks with |V | < ∞
+this leads to a contradiction.
+
+A1.6 Proof Deﬁnition of inference tableau in Sec. 3
+
+For a valid rollout pattern R and a rollout window RW , we deﬁned the inference tableau as the
+mapping T : VW → N with:
+
+T (v) ..= max
+p∈Pv
+
+|p| = argmin
+
+{U n(Sinit)(v) = 1}
+
+For this, we have to show, that the equation holds.
+
+n∈N
+
+3
+
+Proof: We denote:
+
+T max(v) ..= max
+p∈Pv
+
+|p|
+
+T min(v) ..= argmin
+
+{U n(Sinit)(v) = 1}
+
+n∈N
+
+and have to show T min ≡ T max. The proof is divided into two parts, ﬁrst showing that the number of
+necessary update steps to update a certain node v is higher or equal the length of any path p ∈ Pv
+and hence T min ≥ T max. In the second part of the proof, we show that maximal paths p ∈ Pv get
+successively updated at every update step.
+
+In the ﬁrst part, we will prove the following statement: For every v ∈ VW and p ∈ Pv:
+
+T min(v) ≥ T min(p(1)src) + |p|.
+Here, we denoted again the edges of the path as p(i) = (p(i)src, p(i)tgt) ∈ EW . In words this means,
+that for every path in a valid rollout window, the tableau values of the paths ﬁrst p(1)src and last
+v = p(|p|)tgt node differ at least about the length of the path. This is clear for paths of length one
+|p| = 1, because p(1)tgt can neither be updated before nor at the same update step as p(1)src, because
+p(1)src is an input of p(1)tgt. Using induction and the same argument for paths of greater lengths
+|p| = n proves (10) and therefore also T min ≥ T max.
+
+(10)
+
+In the second part of the proof, we will show that for all v ∈ VW all paths p ∈ Pv of maximal length
+get updated node by node in each update step:
+
+U i−1(Sinit)(p(i)tgt) = 0
+U i(Sinit)(p(i)tgt) = 1
+
+for i ∈ {1, . . . , |p|}.
+
+We will prove this via induction over maximal path lengths. For v ∈ VW for which the maximum
+length of a path p ∈ Pv is zero |p| = 0 and hence Pv = ∅ we know by deﬁnition of Pv and because
+the rollout window is connected to the initial state (see Sec. A1.5) that U 0(Sinit)(v) = Sinit(v) = 1.
+This proves the second part for v with maximum path length zero. Now we consider v ∈ VW for
+which the maximum length of a path p ∈ Pv is one |p| = 1. Because p is maximal, its ﬁrst node is
+in the initial state Sinit(p(1)src) = 1 and due to the deﬁnition of Pv it is Sinit(p(1)tgt) = 0. Further,
+because p is maximal and of length 1, the initial state of all inputs to p(1)tgt is 1 and hence p(1)tgt
+can be updated in the ﬁrst update step U (Sinit)(p(1)tgt) = 1. This proves the second part for v with
+maximum path length one.
+
+Let now be n ≥ 2, and we assume that the statement is true for nodes v for which maximal paths
+p ∈ Pv have length n. Be v now a node in VW for which the maximal length of a path p ∈ Pv is n + 1.
+If the end node of a maximal path p ∈ Pv cannot be updated U n+1(Sinit)(p(n + 1)tgt) = 0, then one
+of this end node’s inputs vinput ∈ VW was not yet updated U n(Sinit)(vinput) = 0. But because p is
+maximal and of length n + 1, and vinput is input to v, the maximum length of paths in Pvinput is n.
+Hence U n(Sinit)(vinput) = 1 contradicting that vinput was not yet updated and therefore proving the
+second part of the proof. This proves T min ≡ T max and hence both can be used to deﬁne the inference
+tableau.
+
+A1.7 Proof for Theorem 1 in Sec. 3
+
+Theorem 1: Let R be a valid rollout pattern for the network N = (V, E) then the following
+statements are equivalent:
+
+a) R and the streaming rollout pattern Rstream are equally model-parallel.
+b) The ﬁrst frame is updated entirely after the ﬁrst update step: F (R) = 1.
+c) For W ∈ N, the i-th frame of RW is updated at the i-th update step:
+
+∀(i, v) ∈ VW : T ((i, v)) ≤ i.
+
+d) For W ∈ N, the inference tableau of RW is minimal everywhere and over all rollout patterns
+
+(most frequent responses & earliest response):
+
+∀v ∈ VW : TRW (v) = min
+R(cid:48)∈RN
+
+TR(cid:48)
+
+W
+
+(v).
+
+4
+
+Proof: Equivalency of statements a) - d) will be shown via a series of implications connecting all
+statements:
+
+a) =⇒ b): Assuming there is a v = (1, v) which cannot be updated with the ﬁrst update step,
+then there has to be an input (1, vinput) of v for which Sinit((1, vinput)) = 0 which contradicts that R is
+equally model-parallel to the streaming rollout.
+
+b) =⇒ a): Assuming R(e) = 0 for an edge e = (u, v) ∈ E with u /∈ IN , would yield a
+dependency of (1, v) on (1, u). Because u /∈ IN , (1, u) is not updated at the beginning Sinit((1, u)) =
+0 and therefore U 1(Sinit)((1, v)) = 0 and hence T ((1, v)) ≥ 2 which contradicts b).
+
+c) =⇒ b): Trivial.
+
+a) =⇒ c): Let v = (i, v) ∈ VW . First we note, that every maximal path p ∈ Pv has to start in the
+initial state Sinit(p(1)src) = 1, otherwise we can extend p to a longer path. We will use the deﬁnition
+of T over maximum path lengths to prove c). Let R be equally model-parallel to the streaming rollout
+and p ∈ Pv a path of maximal length. We know Sinit(p(1)src) = 1 and hence either p(1)src ∈ {0} × V
+or p(1)src ∈ {0, . . . , W } × IN . For the ﬁrst case, it is easy to see that |p| = i, because R is equally
+model-parallel to the streaming rollout and hence one frame is bridged R(e) = 1 for every edge e in
+p. For the second case p(1)src ∈ {0, . . . , W } × IN , it follows from the same argument as before that
+|p| = i − isrc with p(1)src = (isrc, vsrc) which proves c).
+
+a) =⇒ d): For this proof we introduce induced paths: Let R be a valid rollout pattern, v =
+(i, v) ∈ RW and pR ∈ P RW
+(same as Pv from rollout deﬁnition but now expressing the dependency
+on the rollout window RW ):
+
+v
+
+pR(k) = ek
+
+= (cid:0)(jk
+= (cid:0)(jk
+
+src, ek
+src, ek
+
+src), (jk
+src), (jk
+
+tgt)(cid:1)
+tgt, ek
+src + R(ek), ek
+
+for k ∈ {1, . . . , |pR|} and ek = (ek
+denote n = |pR|. Notice that (jn
+tgt, en
+the path also ending at v ∈ R(cid:48)
+pattern R(cid:48). We deﬁne this induced path pR(cid:48) ∈ P R(cid:48)
+of pR, as the end of the following sequence of paths, starting with the path:
+
+tgt)(cid:1) ,
+tgt) ∈ E. Let R(cid:48) be a second valid rollout pattern and let
+src, ek
+tgt) = (i, v). We want to deﬁne the induced path pR(cid:48) ∈ P R(cid:48)
+as
+W , backwards using the same edges as pR and respecting the rollout
+of pR recursively, beginning with the last edge
+
+W
+
+W
+
+v
+
+v
+
+pR(cid:48),1 : {1} → ER(cid:48)
+
+W
+
+pR(cid:48),1(1) = ((i − R(cid:48)(en), en
+
+src), (i, en
+
+tgt))
+
+Recursively we deﬁne:
+
+pR(cid:48),m : {1, . . . , m} → ER(cid:48)
+
+W
+
+pR(cid:48),m(k) = pR(cid:48),m−1(k − 1), k ∈ {2, . . . , m}
+pR(cid:48),m(1) = ((i − sR(cid:48),pR (m), vn−m+1
+
+src
+
+), (i − sR(cid:48),pR (m − 1), vn−m+1
+
+tgt
+
+))
+
+m
+(cid:80)
+k=1
+
+R(cid:48)(en−k+1). In words, sR(cid:48),pR (m) is the frame length of the last m edges
+with sR(cid:48),pR (m) =
+of the path pR under the rollout pattern R(cid:48). The sequence stops at a certain m, either if no edges
+are left in pR: m = n or at the ﬁrst time the source of the path’s ﬁrst edge reaches the 0-th frame:
+i − sR(cid:48),pR (m) = 0. With this deﬁnition we can proceed in the prove of a) =⇒ d):
+Let R be equally model-parallel to the streaming rollout pattern, W ∈ N, and v ∈ VW . Let further be
+pR ∈ P RW
+a path of maximal length, R(cid:48) be any valid rollout pattern, and pR(cid:48) be the induced path of
+pR. We want to show that |pR| = |pR(cid:48)|.
+
+v
+
+If both rollouts are equally model-parallel on the edges of the path {e1, . . . , e|pR|} (this means
+R(ek) = R(cid:48)(ek) for k ∈ {1, . . . , |pR|} if e1 does not originate in the input e1
+src /∈ IN , and for
+
+5
+
+k ∈ {2, . . . , |pR|} if e1 does originate in the input), the path pR and its induced path pR(cid:48) are the same
+up to their ﬁrst edge which might or might not bridge a frame, but in both cases |pR| = |pR(cid:48)|.
+
+If the rollouts are not model-parallel on the edges of the path and hence differ on at least one edge
+ek which does not originate in the input, and because R is equally model-parallel to the streaming
+rollout, it is:
+
+Because the induced path using the same rollout cannot loose length, we also know:
+
+sR,pR (|pR|) > sR(cid:48),pR (|pR(cid:48)|).
+
+i − sR,pR (|pR|) ≥ 0.
+
+(11)
+
+(12)
+
+Greater than zero would be the case for pR originating in the input pR(1)src ∈ {1, . . . , W } × IN .
+Combining (11) and (12) yields:
+
+i − sR(cid:48),pR (|pR(cid:48)|) > 0.
+Considering the two stopping criteria from the sequence of paths used to deﬁne the induced path
+from above, this proves |pR| = |pR(cid:48)|.
+
+We now have proven that the induced path pR(cid:48) from a maximal path pR in a rollout window from
+a rollout pattern R which is equally model-parallel to the streaming rollout is never shorter than
+pR (especially for highly sequential R(cid:48), most pR(cid:48) are not of maximal length). This means, that the
+maximal length of paths in P R(cid:48)
+which by
+deﬁnition of the inference tableau proves a) =⇒ d).
+
+is at least as large as the maximal length of paths in P RW
+
+W
+
+v
+
+v
+
+d) =⇒ b): Trivial.
+
+A2 Details about networks, data, and training
+
+In the depiction of network architectures (Fig. 1, Fig. A3, and Fig. A2), connections between
+nodes are always realized as convolutional or fully connected layers. In case a node (layer) is the
+target of several connections, its activation is always computed as the sum over outputs of these
+connections. This is mathematically equivalent to concatenating all inputs of the layer and applying a
+single convolution on the concatenation.
+
+FF
+
+S
+
+a)
+
+b)
+
+c)
+
+d)
+
+e)
+
+f)
+
+O
+
+H2
+
+H1
+
+I
+
+Figure A2: Neural networks (gray boxes) used for MNIST (Fig. 3a-c) with different rollouts.
+Schematics of a feed-forward network (FF, a, green) with its corresponding sequential (b, blue) and
+streaming (c, red) rollouts. Nodes represent layers, edges represent transformations, e.g. convolutions.
+Only one rollout step is shown and each column in (b) and (c) is one frame within the rollout. Rollouts
+are also shown for networks with an additional skip connection (S, d-f). Node labels on the left are
+referred to in Sec. A2.
+
+MNIST The network designs are shown in Fig. 1 and Fig. A2. The size of the layers (pixels, pixels,
+features) are: input image I with (28, 28, 1), hidden layer H1 with (7, 7, 16), hidden layer H2 with (1,
+1, 128) and output layer O with (1, 1, 10).
+
+The following network design speciﬁcations were applied with A-B meaning the edge between layer
+A and layer B. Some of these edges only exist in the networks with skip connection (S) or with skip
+and self-recurrent connections (SR). For node labels see Fig. A2:
+
+• I-H1: a convolution with receptive ﬁeld 7 and stride 4
+
+6
+
+• H1-H2 and H2-O: fully connected layers
+• H1-O: a fully connected layer
+• H1-H1-recurrence: a convolution with receptive ﬁeld 3 and stride 1
+
+DSR0
+
+DSR1
+
+DSR2
+
+DSR4
+
+DSR6
+
+a)
+
+b)
+
+c)
+
+O
+
+HD
+
+H23
+
+H22
+
+H21
+
+H2
+
+H13
+
+H12
+
+H11
+
+H1
+
+I
+
+Figure A3: a: A selection of the sequence of networks evaluated on CIFAR10 (for details see Sec. A2).
+For evaluating the GTSRB dataset the network DSR4 is used, but without the self-connection of node
+H1. The input of the networks are images with added Gaussian noise as shown in b: for CIFAR10
+and c: for GTSRB (for details see Table A1).
+
+CIFAR10 The network design is shown in Fig. A3a. We used a sequence of 7 increasingly deep
+network architectures with the ﬁrst network DSR0 being a simple (3 hidden layers) forward design
+and the ﬁrst hidden layer having a self-recurrent connection. We added additional hidden layers to
+generate the next networks in the following way: H11 to DSR0, H21 to DSR2, H12 to DSR3, ...,
+H23 to DSR6. Note that every network is a sub-network of its successor. Hence, the length of the
+shortest path is always 4, while the length of the longest path increases from 4 to 11 by 1 for every
+consecutive network.
+
+The size of the layers (pixels, pixels, features) are: input image I with (32, 32, 3) and hidden layers
+H1, H11, H12, H13 with (32, 32, 32) and H2, H21, H22, H23 with (16, 16, 64), fully connected layer
+HD with (4, 4, 512) and output layer O with (1, 1, 10).
+
+The following network design speciﬁcations were applied:
+
+• I-H1: a convolution with receptive ﬁeld 5 and stride 1
+• H1-H11, H11-H12, H12-H13: a convolution with receptive ﬁeld 3 and stride 1
+• H2-H21, H21-H22, H22-H23: a convolution with receptive ﬁeld 3 and stride 1
+• H13-H2: convolutions with receptive ﬁeld 3 and stride 2
+• H23-HD: convolutions with receptive ﬁeld 3 and stride 4
+• H1-H1-recurrence: a convolution with receptive ﬁeld 3 and stride 1
+• skip connections H1-H12, H1-H13, H1-H2, H11-H13, H11-H2, H12-H2 and H2-H22,
+H2-H23, H2-HD, H21-H23, H21-HD, H22-HD: convolution with receptive ﬁeld 3 and stride
+input size
+output size
+
+GTSRB For the experiments, the network DSR4 shown in Fig. A3a was used without the self-
+recurrence H1-H1 connection. Design speciﬁcations are adapted from the CIFAR10 networks with
+input image I with (32, 32, 3) and output layer O with (1, 1, 43). For each repetition, 80% of the data
+was randomly taken for training, 10% for validation, and 10% for testing.
+
+7
+
+Training details To train networks, we used RMSprop ([58]) with an initial learning rate of 10−4
+and an exponential decay of 10−6. All networks were trained for 100 epochs. A dropout rate of 0.25
+was used for all but the last hidden layer, for which a rate of 0.5 was used. The loss for the rolled-out
+networks is always the mean over the single-frame prediction losses, for which we used cross-entropy.
+At the zero-th frame, states of all but the input layers were initialized with zero.
+
+Details about experimental setups and data processing are given in Table A1.
+
+Data
+
+Noisy
+MNIST
+
+value
+range
+
+[0,1]
+
+CIFAR10
+
+[0,1]
+
+1. N (σ = 2.0);
+2. clipped to [0,1]
+
+1. N (σ = 1.0);
+2. clipped to [0,1]
+3. mean subtracted
+
+perturbation
+
+augmentation
+
+training /
+val. / test size
+
+None
+
+50k / 10k / 10k
+
+batch
+size
+
+128
+
+reps
+
+6
+
+1
+
+40k / 10k / 10k
+
+64
+
+GTRSB
+
+[0,1]
+
+1. N (σ = 0.5);
+2. clipped to [0,1]
+3. resized to 32 × 32 pixels
+
+80% / 10% / 10% of
+1305 tracks
+(30 frames each)
+
+16
+
+12
+
+Table A1: Experimental setups for the data sets: Image pixels were scaled (value range); then each
+frame was perturbed adding Gaussian noise with a standard deviation of σ, clipped back into the
+value range and for CIFAR10 the channel-wise mean over all training images was subtracted. For
+GTRSB images of different size were resized. Data augmentation was conducted for training and the
+number of images for training, validation, and testing (training / val. / test size) and the batch sizes
+are listed. Experiments were repeated (reps) times.
+
+horizontal
+ﬂipping
+
+None
+
+A3 Toolbox for streaming rollouts
+
+One of the contributions of this work is to provide an open-source toolbox (https://github.
+com/boschresearch/statestream) to design, train, evaluate, and interact with the streaming
+rollout of deep networks. An example screenshot of the provided user interface is shown in Fig. A4.
+
+Networks are speciﬁed in a text ﬁle, and a core process distributes the network elements onto separate
+processes on CPUs and/or GPUs. Network elements are executed with alternating read and write
+phases, synchronized via a core process, and operate on a shared representation of the network. The
+toolbox is written in Python and uses the Theano [59] or TensorFlow [60] backend. The shared
+representation enables parallelization of operations across multiple processes and GPUs on a single
+machine and enables online interaction.
+
+Figure A4: Visualization example of a simple classiﬁcation network using the provided toolbox (best
+viewed in color). The network is shown as graph together with information about the network.
+
+8
+
+8
+1
+0
+2
+ 
+v
+o
+N
+ 
+2
+ 
+ 
+]
+L
+M
+
+.
+t
+a
+t
+s
+[
+ 
+ 
+2
+v
+5
+6
+9
+4
+0
+.
+6
+0
+8
+1
+:
+v
+i
+X
+r
+a
+
+The streaming rollout of deep networks - towards
+fully model-parallel execution
+
+Volker Fischer
+Bosch Center for Artiﬁcial Intelligence
+Renningen, Germany
+volker.fischer@de.bosch.com
+
+Jan Köhler
+Bosch Center for Artiﬁcial Intelligence
+Renningen, Germany
+jan.koehler@de.bosch.com
+
+Thomas Pfeil
+Bosch Center for Artiﬁcial Intelligence
+Renningen, Germany
+thomas.pfeil@de.bosch.com
+
+Abstract
+
+Deep neural networks, and in particular recurrent networks, are promising can-
+didates to control autonomous agents that interact in real-time with the physical
+world. However, this requires a seamless integration of temporal features into the
+network’s architecture. For the training of and inference with recurrent neural
+networks, they are usually rolled out over time, and different rollouts exist. Con-
+ventionally during inference, the layers of a network are computed in a sequential
+manner resulting in sparse temporal integration of information and long response
+times. In this study, we present a theoretical framework to describe rollouts, the
+level of model-parallelization they induce, and demonstrate differences in solving
+speciﬁc tasks. We prove that certain rollouts, also for networks with only skip and
+no recurrent connections, enable earlier and more frequent responses, and show
+empirically that these early responses have better performance. The streaming
+rollout maximizes these properties and enables a fully parallel execution of the
+network reducing runtime on massively parallel devices. Finally, we provide an
+open-source toolbox to design, train, evaluate, and interact with streaming rollouts.
+
+1
+
+Introduction
+
+Over the last years, the combination of newly available large datasets, parallel computing power, and
+new techniques to implement and train deep neural networks has led to signiﬁcant improvements
+in the ﬁelds of vision [1], speech [2], and reinforcement learning [3]. In the context of autonomous
+tasks, neural networks usually interact with the physical world in real-time which renders it essential
+to integrate the processing of temporal information into the network’s design.
+
+Recurrent neural networks (RNNs) are one common approach to leverage temporal context and have
+gained increasing interest not only for speech [4] but also for vision tasks [5]. RNNs use neural
+activations to inform future computations, hence introducing a recursive dependency between neuron
+activations. This augments the network with a memory mechanism and allows it, unlike feed-forward
+neural networks, to exhibit dynamic behavior integrating a stream or sequence of inputs. For training
+and inference, backpropagation through time (BPTT) [6] or its truncated version [6, 7] are used,
+where the RNN is rolled out (or unrolled) through time disentangling the recursive dependencies and
+transforming the recurrent network into a feed-forward network.
+
+32nd Conference on Neural Information Processing Systems (NIPS 2018), Montréal, Canada.
+
+Since unrolling a cyclic graph is not well-deﬁned [8], different possible rollouts exist for the same
+neural network. This is due to the rollout process itself, as there are several ways to unroll cycles with
+length greater 1 (larger cycles than recurrent self-connections). More general, there are two ways
+to unroll every edge (cf. Fig. 1): having the edge connect its source and target nodes at the same
+point in time (see, e.g., vertical edges in Fig. 1b) or bridging time steps (see, e.g., Fig. 1c). Bridging
+is especially necessary for self-recurrent edges or larger cycles in the network, so that the rollout
+in fact becomes a feed-forward network. In a rollout, conventionally most edges are applied in the
+intra-frame non-bridging manner and bridge time steps only if necessary [9, 10, 11, 12]. We refer to
+these rollouts as sequential rollouts throughout this work. One contribution of this study is the proof
+that the number of rollouts increases exponentially with network complexity.
+
+a)
+
+b)
+
+c)
+
+d)
+
+The main focus of this work is that different rollouts
+induce different levels of model-parallelism and dif-
+ferent behaviors for an unrolled network. In rollouts
+inducing complete model-parallelism, which we call
+streaming, nodes of a certain time step in the unrolled
+network become computationally disentangled and
+can be computed in parallel (see Fig. 1c). This idea is
+not restricted to recurrent networks, but generalizes
+to a large variety of network architectures covered by
+the presented graph-theoretical framework in Sec. 3.
+In Sec. 4, we show experimental results that empha-
+size the difference of rollouts for both, networks with
+recurrent and skip, and only skip connections. In this
+study, we are not concerned comparing performances
+between networks, but between different rollouts of
+a given network (e.g., Fig. 1b vs. c).
+
+Our theoretical and empirical ﬁndings show that
+streaming rollouts enable fully model-parallel infer-
+ence achieving low-latency and high-frequency re-
+sponses. These features are particularly important for
+real-time applications such as autonomous cars [13]
+or UAV systems [14] in which the neural networks
+have to make complex decisions on high dimensional
+and frequent input signals within a short time.
+
+sequential
+rollout
+
+streaming
+rollout
+
+hybrid
+rollout
+
+Figure 1: (best viewed in color) a: Neural
+network with skip and recurrent connections
+(SR) and different rollouts: b: the sequential
+rollout, c: the streaming rollout and d: a hy-
+brid rollout. Nodes represent layers, edges
+represent transformations, e.g., convolutions.
+Only one rollout step is shown and each col-
+umn in (b-d) is one frame within the rollout.
+
+To the best of our knowledge, up to this study, no general theory exists that compares different rollouts
+and our contributions can be summarized as follows:
+
+• We provide a theoretical framework to describe rollouts of deep neural networks and show
+that, and in some cases how, different rollouts lead to different levels of model-parallelism
+and network behavior.
+
+• We formally introduce streaming rollouts enabling fully model-parallel network execution,
+and mathematically prove that streaming rollouts have the shortest response time to and
+highest sampling frequency of inputs.
+
+• We empirically give examples underlining the theoretical statements and show that streaming
+rollouts can further outperform other rollouts by yielding better early and late performance.
+
+• We provide an open-source toolbox speciﬁcally designed to study streaming rollouts of deep
+
+neural networks.
+
+2 Related work
+
+The idea of RNNs dates back to the mid-70s [15] and was popularized by [16]. RNNs and their
+variants, especially Long Short-Term Memory networks (LSTM) [17], considerably improved perfor-
+mance in different domains such as speech recognition [4], handwriting recognition [5], machine
+translation [18], optical character recognition (OCR) [19], text-to-speech synthesis [20], social signal
+classiﬁcation [21], or online multi-target tracking [22]. The review [23] gives an overview of the
+history and benchmark records set by DNNs and RNNs.
+
+2
+
+Variants of RNNs: There are several variants of RNN architectures using different mechanisms
+to memorize and integrate temporal information. These include LSTM networks [17] and related
+architectures like Gated Recurrent Unit (GRU) networks [24] or recurrent highway networks [25].
+Neural Turing Machines (NTM) [26] and Differentiable Neural Computers (DNC) [27] extend
+RNNs by an addressable external memory. Bi-directional RNNs (BRNNs) [28] incorporate the
+ability to model the dependency on future information. Numerous works extend and improve these
+RNN variants creating architectures with advantages for training or certain data domains (e.g.,
+[29, 30, 31, 32]).
+
+Response time: While RNNs are the main reason to use network rollouts, in this work we also
+investigate rollouts for non-recurrent networks. Theoretical and experimental results suggest that
+different rollout types yield different behavior especially for networks containing skip connections.
+The rollout pattern inﬂuences the response time of a network which is the duration between input
+(stimulus) onset and network output (response).
+
+Shortcut or skip connections can play an important role to decrease response times. Shortcut
+branches attached to intermediate layers allow earlier predictions (e.g., BranchyNet [33]) and iterative
+predictions reﬁne from early and coarse to late and ﬁne class predictions (e.g., feedback networks
+[12]). In [34], the authors show that identity skip connections, as used in Residual Networks (ResNet)
+[1], can be interpreted as local network rollouts acting as ﬁlters, which could also be achieved through
+recurrent self-connections. The good performance of ResNets underlines the importance of local
+recurrent ﬁlters. The runtime of inference and training for the same network can also be reduced by
+network compression [35, 36] or optimization of computational implementations [37, 38].
+
+Rollouts: To train RNNs, different rollouts are applied in the literature, though lacking a theoretically
+founded background. One of the ﬁrst to describe the transformation of a recurrent MLP into an
+equivalent feed-forward network and depicting it in a streaming rollout fashion was [39, ch. 9.4]. The
+most common way in literature to unroll networks over time is to duplicate the model for each time
+step as depicted in Fig. 1b [ch. 10.1 in 40, 9, 10, 11, 12, 41]. However, as we will show in this work,
+this rollout pattern is neither the only way to unroll a network nor the most efﬁcient.
+
+The recent work of Carreira et al. [42] also addresses the idea of model-parallelization through
+dedicated network rollouts to reduce latency between input and network output by distributing
+computations over multiple GPUs. While their work shows promising empirical ﬁndings in the ﬁeld
+of video processing, our work provides a theoretical formulation for a more general class of networks
+and their rollouts. Our work also differs in the way the delay between input and output, and network
+training is addressed.
+
+Besides the chosen rollout, other methods exist, that modify the integration of temporal information:
+for example, temporal stacking (convolution over time), which imposes a ﬁxed temporal receptive
+ﬁeld (e.g., [43, 44]), clocks, where different parts of the network have different update frequencies,
+(e.g., [45, 46, 47, 48, 49]) or predictive states, which try to compensate temporal delays between
+different network parts (e.g., [42]). For more details, please see also Sec. 5.
+
+3 Graph representations of network rollouts
+
+We describe dependencies inside a neural network N as a directed graph N = (V, E). The nodes
+v ∈ V represent different layers and the edges e ∈ E ⊂ V × V represent transformations introducing
+direct dependencies between layers. We allow self-connections (v, v) ∈ E and larger cycles in
+a network. Before stating the central deﬁnitions and propositions, we introduce notations used
+throughout this section and for the proofs in the appendix.
+
+Let G = (V, E) be a directed graph with vertices (or nodes) v ∈ V and edges e = (esrc, etgt) ∈
+E ⊂ V × V . Since neural networks process input data, we denote the input of the graph as set IG,
+consisting of all nodes without incoming edges:
+
+IG
+
+..= {v ∈ V | (cid:64)u ∈ V : (u, v) ∈ E}.
+
+(1)
+
+A path in G is a mapping p : {1, . . . , L} → E with p(i)tgt = p(i+1)src for i ∈ {1, . . . , L−1} where
+L ∈ N is the length of p. We denote the length of a path p also as |p| and the number of elements in
+a set A as |A|. A path p is called loop or cycle iff p(|p|)tgt = p(1)src and it is called minimal iff p is
+injective. The set of all cycles is denoted as CG. Two paths are called non-overlapping iff they share
+
+3
+
+no edges. We say a graph is input-connected iff for every node v exists a path p with p(|p|)tgt = v
+and p(1)src ∈ IG. Now we proceed with our deﬁnition of a (neural) network.
+
+Deﬁnition (network): A network is a directed and input-connected graph N = (V, E) for which
+0 < |E| < ∞.
+
+For our claims, this abstract formulation is sufﬁcient and, while excluding certain artiﬁcial cases, it
+ensures that a huge variety of neural network types is covered (see Fig. A1 for network examples).
+For deep neural networks, we give an explicit formulation of this abstraction in Sec. A1.2, which
+we also use for our experiments. Important concepts introduced here are illustrated in Fig. 2. In this
+work, we separate the concept of network rollouts into two parts: The temporal propagation scheme
+which we call rollout pattern and its associated rollout windows (see also Fig. 1 and Fig. 2):
+
+Deﬁnition (rollout pattern and window): Let N = (V, E) be a network. We call a mapping
+R : E → {0, 1} a rollout pattern of N . For a rollout pattern R, the rollout window of size W ∈ N
+is the directed graph RW = (VW , EW ) with:
+
+VW
+EW
+
+..= {0, . . . , W } × V, v = (i, v) ∈ VW
+..= {((i, u), (j, v)) ∈ VW × VW | (u, v) ∈ E ∧ j = i + R((u, v))}.
+
+(2)
+
+Edges e ∈ E with R(e) = 1 enable information to directly stream through time. In contrast,
+edges with R(e) = 0 cause information to be processed within frames, thus introducing sequential
+dependencies upon nodes inside a frame. We dropped the dependency of EW on the rollout pattern
+R in the notation. A rollout pattern and its rollout windows are called valid iff RW is acyclic for one
+and hence for all W ∈ N. We denote the set of all valid rollout patterns as RN and the rollout pattern
+R ≡ 1 the streaming rollout Rstream ∈ RN . We say two rollout patterns R and R(cid:48) are equally
+model-parallel iff they are equal (R(e) = R(cid:48)(e)) for all edges e = (u, v) ∈ E, not originating in the
+network’s input (u /∈ IN ). For i ∈ {0, . . . , W }, the subset {i} × V ⊂ VW is called the i-th frame.
+
+Proof: In Sec. A1.3, we prove that the deﬁnition of valid rollout patterns is well-deﬁned and is
+consistent with intuitions about rollouts, such as consistency over time. We also prove that the
+streaming rollout exists for every network and is always valid.
+
+The most non-streaming rollout pattern R ≡ 0 is not necessarily valid, because if N contains loops
+then R ≡ 0 does not yield acyclic rollout windows. Commonly, recurrent networks are unrolled
+such that most edges operate inside the same frame (R(e) = 0), and only when necessary (e.g., for
+recurrent or top-down) connections are unrolled (R(e) = 1). In contrast to this sequential rollout, the
+streaming rollout pattern unrolls all edges with R(e) = 1 (cf. top and third row in Fig. 2).
+
+Lemma 1: Let N = (V, E) be a network. The number of valid rollout patterns |RN | is bounded
+by:
+
+1 ≤ n ≤ |RN | ≤ 2|E|−|Erec|,
+
+(3)
+
+where Erec is the set of all self-connecting edges Erec
+
+..= {(u, v) ∈ E | u = v}, and n either:
+
+• n = 2|Eforward|, with Eforward being the set of edges not contained in any cycle of N , or
+• n = (cid:81)
+p∈C
+Proof: See appendix Sec. A1.4.
+
+(2|p| − 1), C ⊂ CN being any set of minimal and pair-wise non-overlapping cycles.
+
+Lemma 1 shows that the number of valid rollout patterns increases exponentially with network
+complexity. Inference of a rollout window is conducted in a sequential manner. This means, the state
+of all nodes in the rollout window is successively computed depending on the availability of already
+computed source nodes1. The chosen rollout pattern determines the mathematical function this rollout
+represents, which may be different between rollouts, e.g., for skip connections. In addition, the
+chosen rollout pattern also determines the order in which nodes can be computed leading to different
+runtimes to compute the full state of a rollout window.
+
+We now introduce tools to compare these addressed differences between rollouts. States of the rollout
+window encode, which nodes have been computed so far and update steps determine the next state
+
+1given the state of all input nodes at all frames and initial states for all nodes at the zero-th frame
+
+4
+
+network
+N
+
+rollout
+pattern R
+
+rollout window R3
+0 1 2 3
+0 1 2 3
+
+update states & inference tableaus
+U (Sinit)
+
+U n(Sinit)
+
+Sinit
+
+a)
+
+b)
+
+c)
+
+d)
+
+v
+e
+
+u
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+(0, v)
+
+(3, u)
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+1
+
+0
+
+1
+
+1
+
+0
+
+1
+
+1
+
+1
+
+0
+
+1
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+3
+
+2
+
+1
+
+0
+
+2
+
+1
+
+1
+
+0
+
+1
+
+1
+
+1
+
+0
+
+3
+
+2
+
+1
+
+0
+
+4
+
+3
+
+2
+
+0
+
+3
+
+2
+
+2
+
+0
+
+2
+
+2
+
+2
+
+0
+
+6
+
+5
+
+4
+
+0
+
+5 = n
+
+4
+
+3
+
+0
+
+3
+
+3
+
+0
+
+3
+
+3
+
+0
+
+8
+
+7
+
+0
+
+4 = n
+
+3 = n
+
+9 = n
+
+0
+
+0
+
+0
+
+0
+
+0
+
+Figure 2: (best viewed in color) a: Two different networks. b: Different rollout patterns R : E →
+{0, 1} for the two networks. Sequential (R(e) = 0) and streaming (R(e) = 1) edges are indicated
+with blue dotted and red solid arrows respectively. For the ﬁrst network (top to bottom), the most
+sequential, one hybrid, and the streaming rollout patterns are shown. For the second network, one
+out of its 3 most sequential rollout patterns is shown (either of the three edges of the cycle could
+be unrolled). c: Rollout windows of size W = 3. By deﬁnition (Eq. (2)), sequential and streaming
+edges propagate information within and to the next frames respectively. d: States S(v) and inference
+tableau values T (v). The state S(v) of a node is indicated with black (already known) or white
+(not yet computed). From left to right: initial state Sinit, state after ﬁrst update step U (Sinit), full
+state U n(Sinit) = Sfull. The number of update steps n to reach the full state differs between rollouts.
+Numbers inside nodes v indicate values of the inference tableau (T (v)). Inference factors F (R) are
+indicated with square instead of circular nodes in the ﬁrst frame of the full states.
+
+based on the previous state. Update tableaus list after how many update steps nodes in the rollout
+window are computed. Update states, update steps, and inference tableaus are shown for example
+networks and rollouts in Fig. 2.
+
+Deﬁnition (update state, update step, tableau, and factor): Let R be a valid rollout pattern of a
+network N = (V, E). A state of the rollout window RW is any mapping S : VW → {0, 1}. Let ΣW
+denote the set of all possible states. We deﬁne the full state Sfull and initial state Sinit as:
+
+Sfull ≡ 1;
+
+Sinit((i, v)) = 1 ⇐⇒ v ∈ IN ∨ i = 0.
+
+Further, we deﬁne the update step U which updates states S. Because the updated state U (S) is
+again a state and hence a mapping, we deﬁne U by specifying the mapping U (S):
+
+(4)
+
+(5)
+
+U : ΣW → ΣW ;
+(cid:26) 1
+0
+
+U (S)(v) ..=
+
+if S(v) = 1 or if for all (u, v) ∈ EW : S(u) = 1
+otherwise
+
+U (S) : VW → {0, 1}
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+0
+
+5
+
+We call the mapping T : VW → N the inference tableau:
+
+T (v) ..= max
+p∈Pv
+
+|p| = argmin
+
+{U n(Sinit)(v) = 1}
+
+n∈N
+
+where U n is the n-th recursive application of U and for v ∈ VW , Pv denotes the set of all paths in
+RW that end at v (i.e., p(|p|)tgt = v) and for which their ﬁrst edge may start but not end in the 0-th
+frame, p(1)tgt /∈ {0} × V . Hereby, we exclude edges (computational dependencies) which never
+have to be computed, because all nodes in the 0-th frame are initialized from start. We dropped the
+dependencies of U and T on the rollout window RW in the notation and if needed we will express
+them with URW and TRW . Further, we call the maximal value of T over the rollout window of size 1
+the rollout pattern’s inference factor:
+
+(6)
+
+(7)
+
+F (R) ..= max
+v∈V1
+
+TR1(v).
+
+Proof: In Sec. A1.6 we prove Eq. (6).
+
+We also want to note that all rollout windows of a certain window size W have the same number
+of edges W ∗ |E|, independent of the chosen rollout pattern (ignoring edges inside the 0-th frame,
+because these are not used for updates). However, maximal path lengths in the rollout windows differ
+between different rollout patterns (cf. Eq. (6) and its proof, as well as tableau values in Fig. 2).
+
+Inference of rollout windows starts with the initial state Sinit. Successive applications of the update
+step U updates all nodes until the fully updated state Sfull is reached (cf. Fig. 2 and see Sec. A1.5
+for a proof). For a certain window size W , the number of operations to compute the full state is
+independent of the rollout pattern, but which updates can be done in parallel heavily depends on the
+chosen rollout pattern. We will use the number of required update steps to measure computation time.
+This number differs between different rollout patterns (e.g., F (R) in Fig. 2). In practice, the time
+needed for the update U (S) of a certain state S depends on S (i.e., which nodes can be updated next).
+For now, we will assume independence, but will address this issue in the discussion (Sec. 5).
+
+Theorem 1: Let R be a valid rollout pattern for a network N = (V, E) then the following
+statements are equivalent:
+
+a) R and the streaming rollout pattern Rstream are equally model-parallel.
+b) The ﬁrst frame is updated entirely after the ﬁrst update step: F (R) = 1.
+c) For W ∈ N, the i-th frame of RW is updated at the i-th update step:
+
+∀(i, v) ∈ VW : T ((i, v)) ≤ i.
+
+d) For W ∈ N, the inference tableau of RW is minimal everywhere and over all rollout patterns.
+
+In other words, responses are earliest and most frequent:
+
+∀v ∈ VW : TRW (v) = min
+R(cid:48)∈RN
+
+TR(cid:48)
+
+W
+
+(v).
+
+Proof: See appendix Sec. A1.7.
+
+4 Experiments
+
+To demonstrate the signiﬁcance of the chosen rollouts w.r.t. the runtime for inference and achieved
+accuracy, we compare the two extreme rollouts: the most model-parallel, i.e., streaming rollout
+(R ≡ 1, results in red in Fig. 3), and the most sequential rollout2 (R(e) = 0 for maximal number of
+edges, results in blue in Fig. 3).
+
+In all experiments, we consider a response time task, in which the input is a sequence of images and
+the networks have to respond as quickly as possible with the correct class. We want to restate that we
+do not compare performances between networks but between rollout patterns of the same network.
+
+For all experiments and rollout patterns under consideration, we conduct inference on shallow rollouts
+(W = 1) and initialize the zero-th frame of the next rollout window with the last (i.e., 1.) frame of
+
+2Here, the most sequential rollout is unique since the used networks do not contain cycles of length greater 1.
+
+For sequential rollouts that are ambiguous see bottom row of Fig. 2.
+
+6
+
+Figure 3: (best viewed in color) Classiﬁcation accuracy for sequential (in dashed blue), streaming
+(in solid red), and one hybrid (violet; only for SR network in a) rollout on MNIST, CIFAR10, and
+GTSRB (for networks and data see Figs. 1, 3d, A3, and A2). a-c: Average classiﬁcation results
+on MNIST over computation time measured in the number of update steps of networks with skip
++ recurrent (SR, a), with skip (S, b), and only feed-forward (FF, c) connections. In a), scaling of
+the abscissa changes at the vertical dashed line for illustration purposes. d: The input (top row) is
+composed of digits (bottom row) and noise (middle row). Note that the input is aligned to the time
+axis in (a). Red diamonds and blue stars indicate inputs sampled by streaming and sequential rollouts,
+respectively. e: Classiﬁcation results of the network DSR2 on CIFAR10. f: Accuracies at time of
+ﬁrst output of sequential rollout (see (V) in e) over networks DSR0 - DSR6 (red and blue curves; left
+axis). Differences of ﬁrst response times between streaming and sequential rollouts (see (IV) in e;
+black dotted curve; right axis). g: Average accuracies on GTSRB sequences starting at index 0 of the
+original sequences. h: Final classiﬁcation accuracies (see (VI) in g) over the start index of the input
+sequence. Standard errors are shown in all plots except e and f and are too small to be visible in (a-c).
+
+the preceding rollout window (see discussion Sec. 5). Hence, the inference factor of a rollout pattern
+is used to determine the number of update steps between responses (see F (Rstr), F (Rseq) in Fig. 3a).
+
+Datasets: Rollout patterns are evaluated on three datasets: MNIST [50], CIFAR10 [51], and the
+German trafﬁc sign recognition benchmark (GTSRB) [52]. To highlight the differences between
+different rollout patterns, we apply noise (different sample for each frame) to the data (see Fig. 3d
+and Fig. A3b, c). In contrast to data without noise, a single image is now not sufﬁcient for a good
+classiﬁcation performance anymore and temporal integration is necessary. In case of GTSRB, this
+noise can be seen as noise induced by the sensor as predominant under poor lighting conditions.
+GTSRB contains tracks of 30 frames from which sections are used as input sequences.
+
+Networks: We compare the behavior of streaming and sequential rollout patterns on MNIST for
+three different networks with two hidden layers (FF, S, SR; see Fig. 1 and Fig. A2). For evaluation on
+CIFAR10, we generate a sequence of 7 incrementally deeper networks (DSR0 - DSR6, see Fig. A3a)
+by adding layers to the blocks of a recurrent network with skip connections in a dense fashion (details
+in Fig. A3a). For evaluation on GTSRB, we used DSR4 leaving out the recurrent connection. Details
+about data, preprocessing, network architectures, and the training process are given in Sec. A2.
+
+Results: Rollouts are compared on the basis of their test accuracies over the duration (measured in
+update steps) needed to achieve these accuracies (Fig. 3a-c, e, and g).
+
+We show behavioral differences between streaming and sequential rollouts for increasingly complex
+networks on the MNIST dataset. In the case of neither recurrent, nor skip connections (see FF in
+
+7
+
+Fig. A2), the streaming rollout is mathematically identical to the sequential rollout. Neither rollout
+can integrate information over time and, hence, both perform classiﬁcation on single images with the
+same response time for the ﬁrst input image and same accuracy (see Fig. 3c). However, due to the
+pipelined structure of computations in the streaming case, outputs are more frequent.
+
+For networks with skip, but without recurrent connections (see S in Fig. A2), the behavioral difference
+between streaming and sequential rollouts can be shown best. While the sequential rollout still only
+performs classiﬁcation on single images, the streaming rollout can integrate over two input images
+due to the skip connection that bridges time (see Fig. 3b).
+
+In the streaming case, skip connections cause shallow shortcuts in time that can result in earlier
+(see (I) in Fig. 3a), but initially worse performance than for deep sequential rollouts. The streaming
+rollout responds 1 update step earlier than the sequential rollout since its shortest path is shorter by 1
+(see Fig. 2). These early ﬁrst estimations are later reﬁned when longer paths and ﬁnally the longest
+path from input to output contribute to classiﬁcation. For example, after 3 time steps in Fig. 3a, the
+streaming rollout uses the full network. This also applies to the sequential rollout, but instead of
+integrating over two images (frames 0 and 1), only the image of a single frame (frame 1) is used (cf.
+blue to red arrows connecting Fig. 3d and a).
+
+Due to parallel computation of the entire frame in the streaming case, the sampling frequency of
+input images (every time step; see red diamonds in Fig. 3d) is maximal (F (Rstr) = 1 in Fig. 3a; see
+d in Theorem 1 in Sec. 3). In contrast, the sampling frequency of the sequential rollout decreases
+linearly with the length of the longest path (F (Rseq) = 3 in Fig. 3a; blue stars in Fig. 3d).
+
+High sampling frequencies and shallow shortcuts via skip connections establish a high degree of
+temporal integration early on and result in better early performance (see (II) in Fig. 3a). In the long
+run, however, classiﬁcation performances are comparable between streaming and sequential rollouts
+and the same number of input images is integrated over (see (III) in Fig. 3a).
+
+We repeat similar experiments for the CIFAR10 dataset to demonstrate the increasing advantages of
+the streaming over sequential rollouts for deeper and more complex networks. For the network DSR2
+with the shortest path of length 4 and longest path of length 6, the ﬁrst response of the streaming
+rollout is 2 update steps earlier than for the sequential rollout (see (IV) in Fig. 3e) and shows better
+early performance (see (V) in Fig. 3e). With increasing depth (length of the longest path) over the
+sequence of networks DSR0 - DSR6 (see Fig. A3a), the time to ﬁrst response stays constant for
+streaming, but linearly grows with the depth for sequential rollouts (see Fig. 3f black curve). The
+difference of early performance (see (V) in Fig. 3e) widens with deeper networks (Fig. 3f).
+
+For evaluation of rollouts on GTSRB, we considere the DSR4 network. Self-recurrence is omitted
+since the required short response times of this task cannot be achieved with sequential rollouts
+due to the very small sampling frequencies. Consequently, for fair comparison, we calculate the
+classiﬁcations of the ﬁrst 8 images in parallel for the sequential case. In this case, where both rollouts
+use the same amount of computations, performance for the sequential rollout increases over time due
+to less blurry input images, while the streaming rollout in addition performs temporal integration
+using skip connections and yields better performance (see (VI) in Fig. 3g). This results in better
+performance of streaming compared to sequential rollouts for more distant objects (Fig. 3h).
+
+5 Discussion and Conclusion
+
+The presented theory for network rollouts is generically applicable to a vast variety of deep neural
+networks (see Sec. A1.2) and is not constrained to recurrent networks but could be used on forward
+(e.g., VGG [53], AlexNet [54]) or skipping networks (e.g., ResNet [1], DenseNet [55]). We restricted
+rollout patterns to have values R(e) ∈ {0, 1} and did neither allow edges to bridge more than 1 frame
+R(e) > 1 nor pointing backwards in time R(e) < 0. The ﬁrst case is subsumed under the presented
+theory using copy-nodes for longer forward connections, and for R(e) < 0 rollouts with backward
+connections loose the real-time capability, because information from future frames would be used.
+
+In this work, we primarily investigated differences between rollout patterns in terms of the level of
+parallelization they induce in their rollout windows. But using different rollout patterns is not a mere
+implementation issue. For some networks, all rollout patterns yield the same mathematical behavior
+(e.g., mere feed-forward networks without any skip or recurrent connections, cf. Fig. 3c). For other
+networks, different rollout patterns (see Sec. 3) may lead to differences in the behavior of their rollout
+
+8
+
+windows (e.g., Fig. 3b). Hence, parameters between different rollout patterns might be incompatible.
+The theoretical analysis of behavioral equivalency of rollout patterns is a topic for future work.
+
+One disadvantage of the streaming rollout pattern seems to be that deeper networks also require
+deeper rollout windows. Rollout windows should be at least as long as the longest minimal path
+connecting input to output, i.e., all paths have appeared at least once in the rollout window. For
+sequential rollout patterns this is not the case, since, e.g., for a feed-forward network the longest
+minimal path is already contained in the ﬁrst frame. However, for inference with streaming rollouts
+instead of using deep rollouts we propose to use shallow rollouts (e.g., W = 1) and to initialize
+the zero-th frame of the next rollout window with the last (i.e., ﬁrst) frame of the preceding rollout
+window. This enables a potentially inﬁnite memory for recurrent networks and minimizes the memory
+footprint of the rollout window during inference.
+
+Throughout the experimental section, we measured runtime by the number of necessary update
+steps assuming equal update time for every single node update. Without this assumption and given
+fully parallel hardware, streaming rollouts still manifest the best case scenario in terms of maximal
+parallelization and the inference of a single frame would take the runtime of the computationally most
+expensive node update. However, sequential rollouts would not beneﬁt from the assumed parallelism
+of such hardware and inference of a single frame takes the summed up runtime of all necessary node
+updates. The streaming rollout favors network architectures with many nodes of approximately equal
+update times. In this case, the above assumtion approximately holds.
+
+The difference in runtime between rollout patterns depends on the hardware used for execution.
+Although commonly used GPUs provide sufﬁcient parallelism to speed up calculations of activations
+within a layer, they are often not parallel enough to enable the parallel computation of multiple
+layers. Novel massively parallel hardware architectures such as the TrueNorth chip [56, 57] allow to
+store and run the full network rollouts on-chip reducing runtime of rollouts drastically and therefore
+making streaming rollouts highly attractive. The limited access to massively parallel hardware may
+be one reason, why streaming rollouts have not been thoroughly discussed, yet.
+
+Furthermore, not only the hardware, but also the software frameworks must support the parallelization
+of independent nodes in their computation graph to exploit the advantages of streaming rollouts. This
+is usually not the case and by default sequential rollouts are used. For the experiments presented here,
+we use the Keras toolbox to compare different rollout patterns. To realize arbitrary rollout patterns in
+Keras, instead of using Keras’ build-in RNN functionalities, we created a dedicated model builder
+which explicitly generates the rollout windows. Additionally, we implemented an experimental
+toolbox (Tensorﬂow and Theano backends) to study (deﬁne, train, evaluate, and visualize) networks
+using the streaming rollout pattern (see Sec. A3). Both are available as open-source code3.
+
+Similar to biological brains, synchronization of layers (nodes) plays an important role for the
+streaming rollout pattern. At a particular time (frame), different nodes may carry differently delayed
+information with respect to the input. In this work, we evaluate network accuracy dependent on the
+delayed response. An interesting area for future research is the exploration of mechanisms to guide
+and control information ﬂow in the context of the streaming rollout patterns, e.g., through gated skips
+(bottom-up) and recurrent (top-down) connections. New sensory information should be distributed
+quickly into deeper layers. and high-level representations and knowledge of the network about its
+current task could stabilize, predict, and constrain lower-level representations.
+
+A related concept to layer synchronization is that of clocks, where different layers, or more generally
+different parts of a network, are updated with different frequencies. In this work, all layers are
+updated equally often. In general, it is an open research question to which extend clocking and more
+generally synchronization mechanisms should be implicit parts of the network and hence learnable or
+formulated as explicit a-priory constraints.
+
+Conclusion: We presented a theoretical framework for network rollouts and investigated differences
+in behavior and model-parallelism between different rollouts. We especially analysed the streaming
+rollout, which fully disentangles computational dependencies between nodes and hence enables
+full model-parallel inference. We empirically demonstrated the superiority of the streaming over
+non-streaming rollouts for different image datasets due to faster ﬁrst responses to and higher sampling
+of inputs. We hope our work will encourage the scientiﬁc community to further study the advantages
+and behavioral differences of streaming rollouts in preparation to future massively parallel hardware.
+
+3https://github.com/boschresearch/statestream
+
+9
+
+The authors would like to thank Bastian Bischoff, Dan Zhang, Jan-Hendrik Metzen, and Jörg Wagner
+for their valuable remarks and discussions.
+
+Acknowledgments
+
+References
+
+[1] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun. Deep residual learning for image recognition.
+In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pages
+770–778, 2016.
+
+[2] Dario Amodei, Sundaram Ananthanarayanan, Rishita Anubhai, Jingliang Bai, Eric Battenberg, Carl Case,
+Jared Casper, Bryan Catanzaro, Qiang Cheng, Guoliang Chen, et al. Deep speech 2: End-to-end speech
+recognition in english and mandarin. In International Conference on Machine Learning (ICML), pages
+173–182, 2016.
+
+[3] Yan Duan, Xi Chen, Rein Houthooft, John Schulman, and Pieter Abbeel. Benchmarking deep reinforcement
+learning for continuous control. In International Conference on Machine Learning (ICML), pages 1329–
+1338, 2016.
+
+[4] Santiago Fernández, Alex Graves, and Jürgen Schmidhuber. An application of recurrent neural networks
+to discriminative keyword spotting. In International Conference on Artiﬁcial Neural Networks, pages
+220–229, 2007.
+
+[5] Alex Graves and Jürgen Schmidhuber. Ofﬂine handwriting recognition with multidimensional recurrent
+
+neural networks. In Advances in Neural Information Processing Systems (NIPS), pages 545–552, 2009.
+
+[6] Paul J Werbos. Generalization of backpropagation with application to a recurrent gas market model. Neural
+
+networks, 1(4):339–356, 1988.
+
+[7] Ronald J Williams and David Zipser. Gradient-based learning algorithms for recurrent networks and their
+computational complexity. Backpropagation: Theory, architectures, and applications, 1:433–486, 1995.
+
+[8] Qianli Liao and Tomaso Poggio. Bridging the gaps between residual learning, recurrent neural networks
+
+and visual cortex. arXiv:1604.03640, 2016.
+
+[9] Razvan Pascanu, Tomas Mikolov, and Yoshua Bengio. On the difﬁculty of training recurrent neural
+
+networks. In International Conference on Machine Learning (ICML), pages 1310–1318, 2013.
+
+[10] Ming Liang and Xiaolin Hu. Recurrent convolutional neural network for object recognition. In Proceedings
+
+of the IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pages 3367–3375, 2015.
+
+[11] Zhiheng Huang, Wei Xu, and Kai Yu. Bidirectional LSTM-CRF models for sequence tagging.
+
+arXiv:1508.01991, 2015.
+
+1612.09508, 2016.
+
+[12] A. R. Zamir, T.-L. Wu, L. Sun, W. Shen, B. E. Shi, J. Malik, and S. Savarese. Feedback Networks. arXiv
+
+[13] Huazhe Xu, Yang Gao, Fisher Yu, and Trevor Darrell. End-to-end learning of driving models from large-
+scale video datasets. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition
+(CVPR), pages 3530–3538, 2017.
+
+[14] Chih-Min Lin, Ching-Fu Tai, and Chang-Chih Chung. Intelligent control system design for uav using a
+
+recurrent wavelet neural network. Neural Computing & Applications, 24(2):487–496, 2014.
+
+[15] William A Little. The existence of persistent states in the brain. In From High-Temperature Superconduc-
+
+tivity to Microminiature Refrigeration, pages 145–164. Springer, 1974.
+
+[16] John J Hopﬁeld. Neural networks and physical systems with emergent collective computational abilities.
+
+Proceedings of the national academy of sciences, 79(8):2554–2558, 1982.
+
+[17] Sepp Hochreiter and Jürgen Schmidhuber. Long short-term memory. Neural computation, 9(8):1735–1780,
+
+1997.
+
+[18] Ilya Sutskever, Oriol Vinyals, and Quoc V Le. Sequence to sequence learning with neural networks. In
+
+Advances in Neural Information Processing Systems (NIPS), pages 3104–3112, 2014.
+
+[19] Thomas M Breuel, Adnan Ul-Hasan, Mayce Ali Al-Azawi, and Faisal Shafait. High-performance OCR for
+printed English and Fraktur using LSTM networks. In International Conference on Document Analysis
+and Recognition (ICDAR), pages 683–687, 2013.
+
+[20] Yuchen Fan, Yao Qian, Feng-Long Xie, and Frank K Soong. TTS synthesis with bidirectional LSTM based
+recurrent neural networks. In Fifteenth Annual Conference of the International Speech Communication
+Association, 2014.
+
+10
+
+[21] Raymond Brueckner and Bjorn Schulter. Social signal classiﬁcation using deep BLSTM recurrent neural
+networks. In IEEE International Conference on Acoustics, Speech and Signal Processing (ICASSP), pages
+4823–4827, 2014.
+
+[22] Anton Milan, Seyed Hamid Rezatoﬁghi, Anthony R Dick, Ian D Reid, and Konrad Schindler. Online
+multi-target tracking using recurrent neural networks. In Proceedings of the AAAI Conference on Artiﬁcial
+Intelligence (AAAI), pages 4225–4232, 2017.
+
+[23] Jürgen Schmidhuber. Deep learning in neural networks: An overview. Neural networks, 61:85–117, 2015.
+
+[24] Kyunghyun Cho, Bart Van Merriënboer, Dzmitry Bahdanau, and Yoshua Bengio. On the properties of
+
+neural machine translation: Encoder-decoder approaches. arXiv:1409.1259, 2014.
+
+[25] Julian Georg Zilly, Rupesh Kumar Srivastava, Jan Koutník, and Jürgen Schmidhuber. Recurrent highway
+
+networks. arXiv:1607.03474, 2016.
+
+[26] Alex Graves, Greg Wayne, and Ivo Danihelka. Neural turing machines. arXiv:1410.5401, 2014.
+
+[27] Alex Graves, Greg Wayne, Malcolm Reynolds, Tim Harley, Ivo Danihelka, Agnieszka Grabska-Barwi´nska,
+Sergio Gómez Colmenarejo, Edward Grefenstette, Tiago Ramalho, John Agapiou, et al. Hybrid computing
+using a neural network with dynamic external memory. Nature, 538:471–476, 2016.
+
+[28] Mike Schuster and Kuldip K Paliwal. Bidirectional recurrent neural networks. IEEE Transactions on
+
+Signal Processing, 45(11):2673–2681, 1997.
+
+[29] Víctor Campos, Brendan Jou, Xavier Giró-i Nieto, Jordi Torres, and Shih-Fu Chang. Skip RNN: Learning
+to skip state updates in recurrent neural networks. In International Conference on Learning Representations
+(ICLR), 2018.
+
+[30] Golan Pundak and Tara N Sainath. Highway-LSTM and recurrent highway networks for speech recognition.
+
+In Proceedings of Interspeech, 2017.
+
+[31] Razvan Pascanu, Caglar Gulcehre, Kyunghyun Cho, and Yoshua Bengio. How to construct deep recurrent
+
+neural networks. arXiv:1312.6026, 2013.
+
+[32] Junyoung Chung, Sungjin Ahn, and Yoshua Bengio. Hierarchical multiscale recurrent neural networks. In
+
+International Conference on Learning Representations (ICLR), 2017.
+
+[33] Surat Teerapittayanon, Bradley McDanel, and H.T. Kung. BranchyNet: Fast inference via early exiting
+
+from deep neural networks. In International Conference on Pattern Recognition (ICPR), 2016.
+
+[34] Klaus Greff, Rupesh K. Srivastava, and Jürgen Schmidhuber. Highway and residual networks learn unrolled
+
+iterative estimation. In International Conference on Learning Representations (ICLR), 2017.
+
+[35] Song Han, Huizi Mao, and William J Dally. Deep compression: Compressing deep neural networks with
+pruning, trained quantization and huffman coding. In International Conference on Learning Representa-
+tions (ICLR), 2016.
+
+[36] Yong-Deok Kim, Eunhyeok Park, Sungjoo Yoo, Taelim Choi, Lu Yang, and Dongjun Shin. Compression
+of deep convolutional neural networks for fast and low power mobile applications. arXiv:1511.06530,
+2015.
+
+[37] Andrew Lavin and Scott Gray. Fast algorithms for convolutional neural networks. In Proceedings of the
+IEEE Conference on Computer Vision and Pattern Recognition (CVPR), pages 4013–4021, 2016.
+
+[38] Michael Mathieu, Mikael Henaff, and Yann LeCun. Fast training of convolutional networks through ffts.
+
+In International Conference on Learning Representations (ICLR), 2014.
+
+[39] Marvin Minsky and Seymour A. Papert. Perceptrons: An introduction to computational geometry. MIT
+
+press, 1969. retrieved from the 1988 reissue.
+
+[40] Ian Goodfellow, Yoshua Bengio, and Aaron Courville. Deep learning. MIT press Cambridge, 2016.
+[41] Karol Gregor and Yann LeCun. Learning fast approximations of sparse coding. International Conference
+
+on Machine Learning (ICML), pages 399–406, 2010.
+
+[42] Joao Carreira, Viorica Patraucean, Laurent Mazare, Andrew Zisserman, and Simon Osindero. Massively
+parallel video networks. Proceedings of the European Conference on Computer Vision (ECCV), pages
+649–666, 2018.
+
+[43] Du Tran, Lubomir Bourdev, Rob Fergus, Lorenzo Torresani, and Manohar Paluri. Learning spatiotemporal
+features with 3d convolutional networks. Proceedings of the IEEE International Conference on Computer
+Vision (ICCV), pages 4489–4497, 2015.
+
+[44] Fabian Caba Heilbron, Victor Escorcia, Bernard Ghanem, and Juan Carlos Niebles. Activitynet: A
+large-scale video benchmark for human activity understanding. Proceedings of the IEEE Conference on
+Computer Vision and Pattern Recognition (CVPR), pages 961–970, 2015.
+
+[45] Jan Koutnik, Klaus Greff, Faustino Gomez, and Jürgen Schmidhuber. A clockwork rnn. Proceedings of
+
+the 31st International Conference on Machine Learning PMLR, pages 1863–1871, 2014.
+
+11
+
+[46] Alexander Sasha Vezhnevets, Simon Osindero, Tom Schaul, Nicolas Heess, Max Jaderberg, David Silver,
+and Koray Kavukcuoglu. Feudal networks for hierarchical reinforcement learning. International Conference
+on Machine Learning (ICML), 2017.
+
+[47] Evan Shelhamer, Kate Rakelly, Judy Hoffman, and Trevor Darrell. Clockwork convnets for video semantic
+
+segmentation. ECCV Workshop, 2016.
+
+[48] Michael Figurnov, Maxwell D. Collins, Yukun Zhu, Li Zhang, Jonathan Huang, Dmitry Vetrov, and Ruslan
+Salakhutdinov. Spatially adaptive computation time for residual networks. Proceedings of the IEEE
+Conference on Computer Vision and Pattern Recognition (CVPR), 2017.
+
+[49] Daniel Neil, Michael Pfeiffer, and Shih-Chii Liu. Phased LSTM: Accelerating recurrent network training
+
+for long or event-based sequences. Advances in Neural Information Processing Systems (NIPS), 2016.
+
+[50] Yann LeCun, Léon Bottou, Yoshua Bengio, and Patrick Haffner. Gradient-based learning applied to
+
+document recognition. Proceedings of the IEEE, 86(11):2278–2324, 1998.
+
+[51] Alex Krizhevsky and Geoffrey E. Hinton. Learning multiple layers of features from tiny images. Technical
+
+report, University of Toronto, 2009.
+
+[52] Johannes Stallkamp, Marc Schlipsing, Jan Salmen, and Christian Igel. The german trafﬁc sign recognition
+benchmark: a multi-class classiﬁcation competition. In International Joint Conference on Neural Networks
+(IJCNN), pages 1453–1460. IEEE, 2011.
+
+[53] Karen Simonyan and Andrew Zisserman. Very deep convolutional networks for large-scale image recogni-
+
+tion. arXiv:1409.1556, 2014.
+
+[54] Alex Krizhevsky, Ilya Sutskever, and Geoffrey E Hinton. Imagenet classiﬁcation with deep convolutional
+neural networks. In Advances in Neural Information Processing Systems (NIPS), pages 1097–1105, 2012.
+
+[55] Gao Huang, Zhuang Liu, Kilian Q Weinberger, and Laurens van der Maaten. Densely connected convo-
+lutional networks. In Proceedings of the IEEE Conference on Computer Vision and Pattern Recognition
+(CVPR), pages 2261–2269, 2017.
+
+[56] Paul A. Merolla, John V. Arthur, Rodrigo Alvarez-Icaza, Andrew S. Cassidy, Jun Sawada, Filipp Akopyan,
+Bryan L. Jackson, Nabil Imam, Chen Guo, Yutaka Nakamura, Bernard Brezzo, Ivan Vo, Steven K. Esser,
+Rathinakumar Appuswamy, Brian Taba, Arnon Amir, Myron D. Flickner, William P. Risk, Rajit Manohar,
+and Dharmendra S. Modha. A million spiking-neuron integrated circuit with a scalable communication
+network and interface. Science, 345(6197):668–673, 2014.
+
+[57] Steven K. Esser, Paul A. Merolla, John V. Arthur, Andrew S. Cassidy, Rathinakumar Appuswamy, Alexan-
+der Andreopoulos, David J. Berg, Jeffrey L. McKinstry, Timothy Melano, Davis R. Barch, Carmelo
+di Nolfo, Pallab Datta, Arnon Amir, Brian Taba, Myron D. Flickner, and Dharmendra S. Modha. Convolu-
+tional networks for fast, energy-efﬁcient neuromorphic computing. Proceedings of the National Academy
+of Sciences, 113(41):11441–11446, 2016.
+
+[58] Tijmen Tieleman and Geoffrey Hinton. Lecture 6.5-rmsprop: Divide the gradient by a running average of
+
+its recent magnitude. COURSERA: Neural Networks for Machine Learning 4, 2012.
+
+[59] Theano Development Team. Theano: A Python framework for fast computation of mathematical expres-
+
+sions. arXiv:1605.02688, 2016.
+
+[60] Martín Abadi, Ashish Agarwal, Paul Barham, Eugene Brevdo, Zhifeng Chen, Craig Citro, Greg S.
+Corrado, Andy Davis, Jeffrey Dean, Matthieu Devin, Sanjay Ghemawat, Ian Goodfellow, Andrew Harp,
+Geoffrey Irving, Michael Isard, Yangqing Jia, Rafal Jozefowicz, Lukasz Kaiser, Manjunath Kudlur, Josh
+Levenberg, Dandelion Mané, Rajat Monga, Sherry Moore, Derek Murray, Chris Olah, Mike Schuster,
+Jonathon Shlens, Benoit Steiner, Ilya Sutskever, Kunal Talwar, Paul Tucker, Vincent Vanhoucke, Vijay
+Vasudevan, Fernanda Viégas, Oriol Vinyals, Pete Warden, Martin Wattenberg, Martin Wicke, Yuan Yu,
+and Xiaoqiang Zheng. TensorFlow: Large-scale machine learning on heterogeneous systems, 2015. URL
+https://www.tensorflow.org/. Software available from tensorﬂow.org.
+
+12
+
+The streaming rollout of deep networks - towards fully model-parallel
+execution
+Supplementary material
+
+A1 Proofs and notes for theory chapter
+
+To improve readability, we will restate certain parts of the theory chapter from the main text.
+
+A1.1 Examples for networks following our deﬁnition in Sec. 3
+
+Figure A1: Examples of networks covered by the presented theory in Sec. 3. The crossed-out network
+has no input and is consequently not a network by our deﬁnition.
+
+A1.2 Note: Connecting the theory of networks with deep neural networks
+
+For deep networks, nodes v correspond to layers and edges e to transformations between layers, such
+as convolutions (e.g., see networks in Fig. A1 and Fig. A2). To a node v a state xv ∈ RDv is assigned,
+e.g. an image with Dv = 32 × 32 × 3. Let denote ye the result of the transformation fe which is
+speciﬁed by an edge e = (u, v):
+
+ye = fe(θe, xu),
+
+where θe are parameters of the edge e, e.g. a weight kernel.
+
+For the node v, let SRCv denote the set of all edges targeting v. Ignoring the temporal dimension, a
+node’s state is then computed as:
+
+xv = fv(ϑv, ye1
+
+, . . . , ye|SRCv |
+
+v
+
+),
+
+v
+
+where ϑv are parameters of the vertex v (e.g., biases), and the mapping fv specifying how the sources
+are combined (e.g., addition and/or multiplication). Most architectures and network designs can be
+subsumed under this deﬁnition of a network, because we do not impose any constraints on the node
+and edge mappings fv, fe.
+
+For the experiments in this work, for every node v all results of incoming transformations were
+summed up:
+
+xv = fv(b, ye1
+
+, . . . , ye|SRCv |
+
+v
+
+v
+
+) = σ
+
+b +
+
+(cid:32)
+
+(cid:33)
+
+ye
+
+,
+
+(cid:88)
+
+e∈SRCv
+
+where σ is some activation function, b is a channel-wise bias and the edge transformations fe were
+convolutions with suitable stride to provide compatible dimensions for summation.
+
+A1.3 Proofs for deﬁnition (rollout) in Sec. 3
+
+Let N = (V, E) be a network. We call a mapping R : E → {0, 1} a rollout pattern of N . For a
+rollout pattern R, the rollout window of size W ∈ N is the directed graph RW = (VW , EW ) with:
+
+VW
+EW
+
+..= {0, . . . , W } × V, v = (i, v) ∈ VW
+..= {((i, u), (j, v)) ∈ VW × VW | (u, v) ∈ E ∧ j = i + R((u, v))}.
+
+(8)
+
+1
+
+We dropped the dependency of especially EW on the rollout pattern R in the notation. A rollout
+pattern and its rollout windows are called valid iff RW is acyclic for one and hence for all W ∈ N.
+We denote the set of all valid rollout patterns as RN , and the rollout pattern for which R ≡ 1 the
+streaming rollout Rstream ∈ RN . We say two rollout patterns R and R(cid:48) are equally model-parallel
+iff for all edges e = (u, v) ∈ E not originating in the network’s input u /∈ IN are equal R(e) = R(cid:48)(e).
+For i ∈ {0, . . . , W }, the subset {i} × V ⊂ VW is called the i-th frame.
+
+Note (interpretation): Here, we show how this deﬁnition reﬂects the intuition, that a rollout should
+be consistent with the network in the sense that it should contain all edges / nodes of the network
+and should not add new edges / nodes, which are not present in the network. Further, we show that
+this deﬁnition yields rollout windows which are temporally consistent and that rollout windows are
+consistent with regards to each other:
+
+• Rollout windows cannot add new edges / nodes: By this, we mean, that a rollout window
+only contains derived nodes and edges from the original network and for example cannot
+introduce edges between nodes in the rollout window, which were not already present in the
+network. This follows directly from the deﬁnition of EW .
+
+• Edges / nodes of the network are contained in a rollout window: For vertices this is
+
+trivial and for edges e = (u, v) ∈ E always ((0, u), (R(e), v)) ∈ EW .
+
+• Rollout windows contain no temporal backward edges: A backward edge is an edge
+
+((i, u), (j, v)) ∈ EW with j < i. But we know for all edges that j = i + R((u, v)).
+
+• Temporal consistency: Temporal consistency means that for an edge ((i, u), (j, v)) ∈ EW
+and a second edge between the same nodes ((i(cid:63), u), (j(cid:63), v)) ∈ EW the temporal gap is the
+same j − i = j(cid:63) − i(cid:63). By deﬁnition, both are equal to R((u, v)).
+
+• Rollout windows are compatible with each other: We show that RW is a sub-graph of
+RW +1, in the sense that VW ⊂ VW +1 and EW ⊂ EW +1: From the deﬁnition, this is
+obvious for the set of vertices and edges, but nevertheless we will state it for edges anyway:
+Let e ∈ EW with e = ((i, u), (j, v)). Then by deﬁnition (u, v) ∈ E and j = i + R((u, v)).
+Hence, e ∈ RW +1.
+
+Proof (deﬁnition of valid rollout pattern is well-deﬁned): For a rollout pattern, we prove that if
+the rollout window of a certain size W is valid, then the rollout window for any size is valid: Let R be
+a rollout pattern for a network N and RW be a valid rollout window. Because RW hence contains no
+cycles, also RW (cid:48) for W (cid:48) < W contains no cycles (see statement about rollout window compatibility
+from above). Using induction, it is sufﬁcient to show that RW +1 is valid. Assuming it is not, let p be
+a cycle in RW +1. Because there are no temporal backward edges (see above) p has to be contained in
+the last, the (W + 1)-th frame. Because of the temporal consistency of rollout windows (see above),
+there are now cycles in all previous frames which contradicts the validity of RW .
+
+Proof (streaming rollout exists and is valid): The streaming rollout pattern Rstream ≡ 1 always
+exists, because according to our network deﬁnition, E is not empty. Further, the streaming rollout
+pattern is always valid: Assuming that this is not the case, let Rstream
+W be a rollout window of size
+W which is not acyclic and let p be a cycle in Rstream
+W . Because there are no backward edges
+e = ((i, u), (j, v)) ∈ EW with j < i, all edges of the cycle must be inside a single frame, which is in
+contradiction to Rstream ≡ 1.
+
+Note (streaming rollout is un-ambiguous): Considering the sets of all most streaming and most
+non-streaming rollout patterns
+
+(cid:26)
+
+(cid:26)
+
+Rstreaming =
+
+R ∈ RN
+
+|R−1(1)| = max
+R(cid:63)∈RN
+
+|R−1
+
+(cid:63) (1)|
+
+Rnon-streaming =
+
+R ∈ RN
+
+|R−1(0)| = max
+R(cid:63)∈RN
+
+|R−1
+
+(cid:63) (0)|
+
+(cid:27)
+
+(cid:27)
+
+we have shown above that |Rstreaming| = 1 and this is exactly the streaming rollout. In contrast,
+|Rnon-streaming| ≥ 1 especially for networks containing cycles with length greater 1. In this sense, the
+streaming rollout is un-ambiguous because it always uniquely exists while the most-sequential rollout
+is ambiguous.
+
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+
+2
+
+A1.4 Proof for Lemma 1 in Sec. 3
+
+Lemma 1: Let N = (V, E) be a network. The number of valid rollout patterns |RN | is bounded
+by:
+
+1 ≤ n ≤ |RN | ≤ 2|E|−|Erec|,
+
+(9)
+
+where Erec is the set of all self-connecting edges Erec
+
+..= {(u, v) ∈ E | u = v}, and n either:
+
+• n = 2|Eforward|, with Eforward being the set of edges not contained in any cycle of N , or
+• n = (cid:81)
+p∈C
+
+(2|p| − 1), C ⊂ CN being any set of minimal and pair-wise non-overlapping cycles.
+
+Proof |RN | ≤ 2|E|−|Erec|: The number of all (valid and invalid) rollout patterns is 2|E|, because
+the pattern can assign 0 or 1 to every edge. In order to be valid (acyclic rollout windows), the pattern
+has to assign 1 at least to every self-connecting edge.
+
+Proof 1 ≤ n: Concerning the forward case: According to the deﬁnition of a network, IN is not
+empty and hence there always exists at least one forward edge |Eforward| > 0. Concerning the
+recurrent case: It is easy to see that n is greater than 0, increases with |C| and that C has to be at
+least the empty set.
+
+Proof n ≤ |RN | forward case: Considering the streaming rollout pattern Rstream ≡ 1 which
+always exists and is always valid (see above), we combinatorically can construct 2|Eforward| different
+valid rollout patterns on the basis of the streaming rollout pattern by combinatorically changing R(e)
+for all forward edges e ∈ Eforward.
+
+Proof n ≤ |RN | recurrent case: W.l.o.g. in case CN = ∅ we set n = 1. Otherwise let C ⊂ CN
+be any set of minimal and pair-wise non-overlapping cycles. Based on the streaming rollout pattern
+we will again construct the speciﬁed number of rollout patterns. The idea is that every cycle p ∈ C
+gives rise to 2|p| − 1 different rollout patterns by varying the streaming rollout Rstream(E) ≡ 1 on
+all edges in p and we have to subtract the one rollout for which R(p) ≡ 0, because for this speciﬁc
+rollout pattern, the cycle p does not get unrolled. Because the cycle is minimal, those 2|p| − 1 patterns
+are different from one another. Because all cycles in C are disjunct we can combinatorically use this
+construction across all cycles of C and constructed (cid:81)
+p∈C
+
+(2|p| − 1) valid rollouts.
+
+A1.5 Proof update steps convergence to full state in Sec. 3
+
+Let RW be a rollout window for a valid rollout pattern R of the network N = (V, E). Then, starting
+from the initial state Sinit and successively applying update steps U , converges always to the full state
+Sfull:
+
+∃n ∈ N : U n(Sinit) = Sfull
+
+Proof: Using induction, we show this without loss of generality for R1. Assuming that this is not
+the case, then there exists a state S ∈ Σ1, such that
+
+∀n ∈ N : U n(S) = S, and ∃v = (1, v) ∈ V1 : S(v) = 0
+But being unable to update v means, that there is another node that is input to v which is also not
+updated yet (1, v1) ∈ V1 and S((1, v1)) = 0. Because there are no loops in R1 these nodes are not
+the same v (cid:54)= v1. This line of argument can now also be applied to v1 leading to a third node (1, v2)
+with S((1, v2)) = 0 and v (cid:54)= v1 (cid:54)= v2 and so on. Because we only consider networks with |V | < ∞
+this leads to a contradiction.
+
+A1.6 Proof Deﬁnition of inference tableau in Sec. 3
+
+For a valid rollout pattern R and a rollout window RW , we deﬁned the inference tableau as the
+mapping T : VW → N with:
+
+T (v) ..= max
+p∈Pv
+
+|p| = argmin
+
+{U n(Sinit)(v) = 1}
+
+For this, we have to show, that the equation holds.
+
+n∈N
+
+3
+
+Proof: We denote:
+
+T max(v) ..= max
+p∈Pv
+
+|p|
+
+T min(v) ..= argmin
+
+{U n(Sinit)(v) = 1}
+
+n∈N
+
+and have to show T min ≡ T max. The proof is divided into two parts, ﬁrst showing that the number of
+necessary update steps to update a certain node v is higher or equal the length of any path p ∈ Pv
+and hence T min ≥ T max. In the second part of the proof, we show that maximal paths p ∈ Pv get
+successively updated at every update step.
+
+In the ﬁrst part, we will prove the following statement: For every v ∈ VW and p ∈ Pv:
+
+T min(v) ≥ T min(p(1)src) + |p|.
+Here, we denoted again the edges of the path as p(i) = (p(i)src, p(i)tgt) ∈ EW . In words this means,
+that for every path in a valid rollout window, the tableau values of the paths ﬁrst p(1)src and last
+v = p(|p|)tgt node differ at least about the length of the path. This is clear for paths of length one
+|p| = 1, because p(1)tgt can neither be updated before nor at the same update step as p(1)src, because
+p(1)src is an input of p(1)tgt. Using induction and the same argument for paths of greater lengths
+|p| = n proves (10) and therefore also T min ≥ T max.
+
+(10)
+
+In the second part of the proof, we will show that for all v ∈ VW all paths p ∈ Pv of maximal length
+get updated node by node in each update step:
+
+U i−1(Sinit)(p(i)tgt) = 0
+U i(Sinit)(p(i)tgt) = 1
+
+for i ∈ {1, . . . , |p|}.
+
+We will prove this via induction over maximal path lengths. For v ∈ VW for which the maximum
+length of a path p ∈ Pv is zero |p| = 0 and hence Pv = ∅ we know by deﬁnition of Pv and because
+the rollout window is connected to the initial state (see Sec. A1.5) that U 0(Sinit)(v) = Sinit(v) = 1.
+This proves the second part for v with maximum path length zero. Now we consider v ∈ VW for
+which the maximum length of a path p ∈ Pv is one |p| = 1. Because p is maximal, its ﬁrst node is
+in the initial state Sinit(p(1)src) = 1 and due to the deﬁnition of Pv it is Sinit(p(1)tgt) = 0. Further,
+because p is maximal and of length 1, the initial state of all inputs to p(1)tgt is 1 and hence p(1)tgt
+can be updated in the ﬁrst update step U (Sinit)(p(1)tgt) = 1. This proves the second part for v with
+maximum path length one.
+
+Let now be n ≥ 2, and we assume that the statement is true for nodes v for which maximal paths
+p ∈ Pv have length n. Be v now a node in VW for which the maximal length of a path p ∈ Pv is n + 1.
+If the end node of a maximal path p ∈ Pv cannot be updated U n+1(Sinit)(p(n + 1)tgt) = 0, then one
+of this end node’s inputs vinput ∈ VW was not yet updated U n(Sinit)(vinput) = 0. But because p is
+maximal and of length n + 1, and vinput is input to v, the maximum length of paths in Pvinput is n.
+Hence U n(Sinit)(vinput) = 1 contradicting that vinput was not yet updated and therefore proving the
+second part of the proof. This proves T min ≡ T max and hence both can be used to deﬁne the inference
+tableau.
+
+A1.7 Proof for Theorem 1 in Sec. 3
+
+Theorem 1: Let R be a valid rollout pattern for the network N = (V, E) then the following
+statements are equivalent:
+
+a) R and the streaming rollout pattern Rstream are equally model-parallel.
+b) The ﬁrst frame is updated entirely after the ﬁrst update step: F (R) = 1.
+c) For W ∈ N, the i-th frame of RW is updated at the i-th update step:
+
+∀(i, v) ∈ VW : T ((i, v)) ≤ i.
+
+d) For W ∈ N, the inference tableau of RW is minimal everywhere and over all rollout patterns
+
+(most frequent responses & earliest response):
+
+∀v ∈ VW : TRW (v) = min
+R(cid:48)∈RN
+
+TR(cid:48)
+
+W
+
+(v).
+
+4
+
+Proof: Equivalency of statements a) - d) will be shown via a series of implications connecting all
+statements:
+
+a) =⇒ b): Assuming there is a v = (1, v) which cannot be updated with the ﬁrst update step,
+then there has to be an input (1, vinput) of v for which Sinit((1, vinput)) = 0 which contradicts that R is
+equally model-parallel to the streaming rollout.
+
+b) =⇒ a): Assuming R(e) = 0 for an edge e = (u, v) ∈ E with u /∈ IN , would yield a
+dependency of (1, v) on (1, u). Because u /∈ IN , (1, u) is not updated at the beginning Sinit((1, u)) =
+0 and therefore U 1(Sinit)((1, v)) = 0 and hence T ((1, v)) ≥ 2 which contradicts b).
+
+c) =⇒ b): Trivial.
+
+a) =⇒ c): Let v = (i, v) ∈ VW . First we note, that every maximal path p ∈ Pv has to start in the
+initial state Sinit(p(1)src) = 1, otherwise we can extend p to a longer path. We will use the deﬁnition
+of T over maximum path lengths to prove c). Let R be equally model-parallel to the streaming rollout
+and p ∈ Pv a path of maximal length. We know Sinit(p(1)src) = 1 and hence either p(1)src ∈ {0} × V
+or p(1)src ∈ {0, . . . , W } × IN . For the ﬁrst case, it is easy to see that |p| = i, because R is equally
+model-parallel to the streaming rollout and hence one frame is bridged R(e) = 1 for every edge e in
+p. For the second case p(1)src ∈ {0, . . . , W } × IN , it follows from the same argument as before that
+|p| = i − isrc with p(1)src = (isrc, vsrc) which proves c).
+
+a) =⇒ d): For this proof we introduce induced paths: Let R be a valid rollout pattern, v =
+(i, v) ∈ RW and pR ∈ P RW
+(same as Pv from rollout deﬁnition but now expressing the dependency
+on the rollout window RW ):
+
+v
+
+pR(k) = ek
+
+= (cid:0)(jk
+= (cid:0)(jk
+
+src, ek
+src, ek
+
+src), (jk
+src), (jk
+
+tgt)(cid:1)
+tgt, ek
+src + R(ek), ek
+
+for k ∈ {1, . . . , |pR|} and ek = (ek
+denote n = |pR|. Notice that (jn
+tgt, en
+the path also ending at v ∈ R(cid:48)
+pattern R(cid:48). We deﬁne this induced path pR(cid:48) ∈ P R(cid:48)
+of pR, as the end of the following sequence of paths, starting with the path:
+
+tgt)(cid:1) ,
+tgt) ∈ E. Let R(cid:48) be a second valid rollout pattern and let
+src, ek
+tgt) = (i, v). We want to deﬁne the induced path pR(cid:48) ∈ P R(cid:48)
+as
+W , backwards using the same edges as pR and respecting the rollout
+of pR recursively, beginning with the last edge
+
+W
+
+W
+
+v
+
+v
+
+pR(cid:48),1 : {1} → ER(cid:48)
+
+W
+
+pR(cid:48),1(1) = ((i − R(cid:48)(en), en
+
+src), (i, en
+
+tgt))
+
+Recursively we deﬁne:
+
+pR(cid:48),m : {1, . . . , m} → ER(cid:48)
+
+W
+
+pR(cid:48),m(k) = pR(cid:48),m−1(k − 1), k ∈ {2, . . . , m}
+pR(cid:48),m(1) = ((i − sR(cid:48),pR (m), vn−m+1
+
+src
+
+), (i − sR(cid:48),pR (m − 1), vn−m+1
+
+tgt
+
+))
+
+m
+(cid:80)
+k=1
+
+R(cid:48)(en−k+1). In words, sR(cid:48),pR (m) is the frame length of the last m edges
+with sR(cid:48),pR (m) =
+of the path pR under the rollout pattern R(cid:48). The sequence stops at a certain m, either if no edges
+are left in pR: m = n or at the ﬁrst time the source of the path’s ﬁrst edge reaches the 0-th frame:
+i − sR(cid:48),pR (m) = 0. With this deﬁnition we can proceed in the prove of a) =⇒ d):
+Let R be equally model-parallel to the streaming rollout pattern, W ∈ N, and v ∈ VW . Let further be
+pR ∈ P RW
+a path of maximal length, R(cid:48) be any valid rollout pattern, and pR(cid:48) be the induced path of
+pR. We want to show that |pR| = |pR(cid:48)|.
+
+v
+
+If both rollouts are equally model-parallel on the edges of the path {e1, . . . , e|pR|} (this means
+R(ek) = R(cid:48)(ek) for k ∈ {1, . . . , |pR|} if e1 does not originate in the input e1
+src /∈ IN , and for
+
+5
+
+k ∈ {2, . . . , |pR|} if e1 does originate in the input), the path pR and its induced path pR(cid:48) are the same
+up to their ﬁrst edge which might or might not bridge a frame, but in both cases |pR| = |pR(cid:48)|.
+
+If the rollouts are not model-parallel on the edges of the path and hence differ on at least one edge
+ek which does not originate in the input, and because R is equally model-parallel to the streaming
+rollout, it is:
+
+Because the induced path using the same rollout cannot loose length, we also know:
+
+sR,pR (|pR|) > sR(cid:48),pR (|pR(cid:48)|).
+
+i − sR,pR (|pR|) ≥ 0.
+
+(11)
+
+(12)
+
+Greater than zero would be the case for pR originating in the input pR(1)src ∈ {1, . . . , W } × IN .
+Combining (11) and (12) yields:
+
+i − sR(cid:48),pR (|pR(cid:48)|) > 0.
+Considering the two stopping criteria from the sequence of paths used to deﬁne the induced path
+from above, this proves |pR| = |pR(cid:48)|.
+
+We now have proven that the induced path pR(cid:48) from a maximal path pR in a rollout window from
+a rollout pattern R which is equally model-parallel to the streaming rollout is never shorter than
+pR (especially for highly sequential R(cid:48), most pR(cid:48) are not of maximal length). This means, that the
+maximal length of paths in P R(cid:48)
+which by
+deﬁnition of the inference tableau proves a) =⇒ d).
+
+is at least as large as the maximal length of paths in P RW
+
+W
+
+v
+
+v
+
+d) =⇒ b): Trivial.
+
+A2 Details about networks, data, and training
+
+In the depiction of network architectures (Fig. 1, Fig. A3, and Fig. A2), connections between
+nodes are always realized as convolutional or fully connected layers. In case a node (layer) is the
+target of several connections, its activation is always computed as the sum over outputs of these
+connections. This is mathematically equivalent to concatenating all inputs of the layer and applying a
+single convolution on the concatenation.
+
+FF
+
+S
+
+a)
+
+b)
+
+c)
+
+d)
+
+e)
+
+f)
+
+O
+
+H2
+
+H1
+
+I
+
+Figure A2: Neural networks (gray boxes) used for MNIST (Fig. 3a-c) with different rollouts.
+Schematics of a feed-forward network (FF, a, green) with its corresponding sequential (b, blue) and
+streaming (c, red) rollouts. Nodes represent layers, edges represent transformations, e.g. convolutions.
+Only one rollout step is shown and each column in (b) and (c) is one frame within the rollout. Rollouts
+are also shown for networks with an additional skip connection (S, d-f). Node labels on the left are
+referred to in Sec. A2.
+
+MNIST The network designs are shown in Fig. 1 and Fig. A2. The size of the layers (pixels, pixels,
+features) are: input image I with (28, 28, 1), hidden layer H1 with (7, 7, 16), hidden layer H2 with (1,
+1, 128) and output layer O with (1, 1, 10).
+
+The following network design speciﬁcations were applied with A-B meaning the edge between layer
+A and layer B. Some of these edges only exist in the networks with skip connection (S) or with skip
+and self-recurrent connections (SR). For node labels see Fig. A2:
+
+• I-H1: a convolution with receptive ﬁeld 7 and stride 4
+
+6
+
+• H1-H2 and H2-O: fully connected layers
+• H1-O: a fully connected layer
+• H1-H1-recurrence: a convolution with receptive ﬁeld 3 and stride 1
+
+DSR0
+
+DSR1
+
+DSR2
+
+DSR4
+
+DSR6
+
+a)
+
+b)
+
+c)
+
+O
+
+HD
+
+H23
+
+H22
+
+H21
+
+H2
+
+H13
+
+H12
+
+H11
+
+H1
+
+I
+
+Figure A3: a: A selection of the sequence of networks evaluated on CIFAR10 (for details see Sec. A2).
+For evaluating the GTSRB dataset the network DSR4 is used, but without the self-connection of node
+H1. The input of the networks are images with added Gaussian noise as shown in b: for CIFAR10
+and c: for GTSRB (for details see Table A1).
+
+CIFAR10 The network design is shown in Fig. A3a. We used a sequence of 7 increasingly deep
+network architectures with the ﬁrst network DSR0 being a simple (3 hidden layers) forward design
+and the ﬁrst hidden layer having a self-recurrent connection. We added additional hidden layers to
+generate the next networks in the following way: H11 to DSR0, H21 to DSR2, H12 to DSR3, ...,
+H23 to DSR6. Note that every network is a sub-network of its successor. Hence, the length of the
+shortest path is always 4, while the length of the longest path increases from 4 to 11 by 1 for every
+consecutive network.
+
+The size of the layers (pixels, pixels, features) are: input image I with (32, 32, 3) and hidden layers
+H1, H11, H12, H13 with (32, 32, 32) and H2, H21, H22, H23 with (16, 16, 64), fully connected layer
+HD with (4, 4, 512) and output layer O with (1, 1, 10).
+
+The following network design speciﬁcations were applied:
+
+• I-H1: a convolution with receptive ﬁeld 5 and stride 1
+• H1-H11, H11-H12, H12-H13: a convolution with receptive ﬁeld 3 and stride 1
+• H2-H21, H21-H22, H22-H23: a convolution with receptive ﬁeld 3 and stride 1
+• H13-H2: convolutions with receptive ﬁeld 3 and stride 2
+• H23-HD: convolutions with receptive ﬁeld 3 and stride 4
+• H1-H1-recurrence: a convolution with receptive ﬁeld 3 and stride 1
+• skip connections H1-H12, H1-H13, H1-H2, H11-H13, H11-H2, H12-H2 and H2-H22,
+H2-H23, H2-HD, H21-H23, H21-HD, H22-HD: convolution with receptive ﬁeld 3 and stride
+input size
+output size
+
+GTSRB For the experiments, the network DSR4 shown in Fig. A3a was used without the self-
+recurrence H1-H1 connection. Design speciﬁcations are adapted from the CIFAR10 networks with
+input image I with (32, 32, 3) and output layer O with (1, 1, 43). For each repetition, 80% of the data
+was randomly taken for training, 10% for validation, and 10% for testing.
+
+7
+
+Training details To train networks, we used RMSprop ([58]) with an initial learning rate of 10−4
+and an exponential decay of 10−6. All networks were trained for 100 epochs. A dropout rate of 0.25
+was used for all but the last hidden layer, for which a rate of 0.5 was used. The loss for the rolled-out
+networks is always the mean over the single-frame prediction losses, for which we used cross-entropy.
+At the zero-th frame, states of all but the input layers were initialized with zero.
+
+Details about experimental setups and data processing are given in Table A1.
+
+Data
+
+Noisy
+MNIST
+
+value
+range
+
+[0,1]
+
+CIFAR10
+
+[0,1]
+
+1. N (σ = 2.0);
+2. clipped to [0,1]
+
+1. N (σ = 1.0);
+2. clipped to [0,1]
+3. mean subtracted
+
+perturbation
+
+augmentation
+
+training /
+val. / test size
+
+None
+
+50k / 10k / 10k
+
+batch
+size
+
+128
+
+reps
+
+6
+
+1
+
+40k / 10k / 10k
+
+64
+
+GTRSB
+
+[0,1]
+
+1. N (σ = 0.5);
+2. clipped to [0,1]
+3. resized to 32 × 32 pixels
+
+80% / 10% / 10% of
+1305 tracks
+(30 frames each)
+
+16
+
+12
+
+Table A1: Experimental setups for the data sets: Image pixels were scaled (value range); then each
+frame was perturbed adding Gaussian noise with a standard deviation of σ, clipped back into the
+value range and for CIFAR10 the channel-wise mean over all training images was subtracted. For
+GTRSB images of different size were resized. Data augmentation was conducted for training and the
+number of images for training, validation, and testing (training / val. / test size) and the batch sizes
+are listed. Experiments were repeated (reps) times.
+
+horizontal
+ﬂipping
+
+None
+
+A3 Toolbox for streaming rollouts
+
+One of the contributions of this work is to provide an open-source toolbox (https://github.
+com/boschresearch/statestream) to design, train, evaluate, and interact with the streaming
+rollout of deep networks. An example screenshot of the provided user interface is shown in Fig. A4.
+
+Networks are speciﬁed in a text ﬁle, and a core process distributes the network elements onto separate
+processes on CPUs and/or GPUs. Network elements are executed with alternating read and write
+phases, synchronized via a core process, and operate on a shared representation of the network. The
+toolbox is written in Python and uses the Theano [59] or TensorFlow [60] backend. The shared
+representation enables parallelization of operations across multiple processes and GPUs on a single
+machine and enables online interaction.
+
+Figure A4: Visualization example of a simple classiﬁcation network using the provided toolbox (best
+viewed in color). The network is shown as graph together with information about the network.
+
+8
+

@@ -700,3 +700,705 @@ stochastic gradient descent.
 
 5
 
+6
+1
+0
+2
+ 
+c
+e
+D
+ 
+3
+2
+ 
+ 
+]
+
+C
+D
+.
+s
+c
+[
+ 
+ 
+2
+v
+2
+7
+1
+6
+0
+.
+1
+1
+6
+1
+:
+v
+i
+X
+r
+a
+
+Parallelizing Word2Vec in Multi-Core and
+Many-Core Architectures
+
+Shihao Ji, Nadathur Satish, Sheng Li, Pradeep Dubey
+Parallel Computing Lab, Intel Labs, USA
+{shihao.ji, nadathur.rajagopalan.satish, sheng.r.li, pradeep.dubey}@intel.com
+
+Abstract
+
+Word2vec is a widely used algorithm for extracting low-dimensional vector rep-
+resentations of words. State-of-the-art algorithms including those by Mikolov et
+al. [5, 6] have been parallelized for multi-core CPU architectures, but are based
+on vector-vector operations with “Hogwild" updates that are memory-bandwidth
+intensive and do not efﬁciently use computational resources. In this paper, we
+propose “HogBatch" by improving reuse of various data structures in the algorithm
+through the use of minibatching and negative sample sharing, hence allowing us to
+express the problem using matrix multiply operations. We also explore different
+techniques to distribute word2vec computation across nodes in a compute cluster,
+and demonstrate good strong scalability up to 32 nodes. The new algorithm is
+particularly suitable for modern multi-core/many-core architectures, especially
+Intel’s latest Knights Landing processors, and allows us to scale up the compu-
+tation near linearly across cores and nodes, and process hundreds of millions of
+words per second, which is the fastest word2vec implementation to the best of our
+knowledge.
+
+1 From Hogwild to HogBatch
+
+We refer the reader to [5, 6] for an introduction to word2vec and its optimization problem. The
+original implementation of word2vec by Mikolov et al. 1 uses Hogwild [7] to parallelize SGD.
+Hogwild is a parallel SGD algorithm that seeks to ignore conﬂicts between model updates on different
+threads and allows updates to proceed even in the presence of conﬂicts. The psuedocode of word2vec
+Hogwild SGD is shown in Algorithm 1. The algorithm takes in a matrix M V ×D
+that contains the
+word representations for each input word, and a matrix M V ×D
+for the word representations of each
+output word. Each word is represented as an array of D ﬂoating point numbers, corresponding to
+one row of the two matrices. These matrices are updated during the training. We take in a target
+word, and a set of N input context words around the target as depicted in the top of Figure 1. The
+algorithm iterates over the N input words in Lines 2-3. In the loop at Line 6, we pick either the
+positive example (the target word in Line 8) or a negative example at random (Line 10). Lines
+13-15 compute the gradient of the objective function with respect to the choice of input word and
+positive/negative example. Lines 17–20 perform the update to the entries Mout[pos/neg example]
+and Min[input context]. The psuedocode only shows a single thread; in Hogwild, the loop in Line 2
+is parallelized over threads without any additional change in the code.
+
+out
+
+in
+
+Algorithm 1 reads and updates entries corresponding to the input context and positive/negative words
+at each iteration of the loop at Line 6. This means that there is a potential dependence between
+successive iterations - they may happen to touch the same word representations, and each iteration
+must potentially wait for the update from the previous iteration to complete. Hogwild ignores such
+
+1https://code.google.com/archive/p/word2vec/
+
+30th Conference on Neural Information Processing Systems (NIPS 2016), Barcelona, Spain.
+
+Algorithm 1 word2vec Hogwild SGD in one thread.
+1: Given model parameter Ω = {Min, Mout}, learning rate α, 1 target word wt
+
+out, and N input
+
+out; label = 1;
+
+words {w0
+
+in, w1
+
+in, · · · , wN −1
+
+in
+
+}
+
+} else {
+
+if (k = 0) {
+
+target_word = wt
+
+2: for (i = 0; i < N; i++) {
+input_word = wi
+in;
+3:
+for (j = 0; j < D; j++) temp[j] = 0;
+4:
+// negative sampling
+5:
+for (k = 0; k < negative + 1; k++) {
+6:
+7:
+8:
+9:
+10:
+11:
+12:
+13:
+14:
+15:
+16:
+17:
+18:
+19:
+20:
+21: }
+
+target_word = sample one word from V; label = 0;
+
+}
+inn = 0;
+for (j = 0; j < D; j++) inn += Min[input_word][j] * Mout[target_word][j];
+err = label - σ(inn);
+for (j = 0; j < D; j++) temp[j] += err * Mout[target_word][j];
+// update output matrix
+for (j = 0; j < D; j++) Mout[target_word][j] += α * err * Min[input_word][j];
+
+}
+// update input matrix
+for (j = 0; j < D; j++) Min[input_word][j] += α * temp[j];
+
+dependencies and proceeds with updates regardless of conﬂicts. In theory, this can reduce the rate
+of convergence of the algorithm as compared to a sequential run. However, the Hogwild approach
+has been shown to work well in case the updates across threads are unlikely to be to the same word;
+and indeed for large vocabulary sizes, conﬂicts are relatively rare and convergence is not typically
+affected.
+
+Figure 1: The parallelization schemes of the original word2vec (left) and our optimization (right).
+
+1.1 Shared Memory Parallelization: HogBatch
+
+However, the original word2vec algorithm suffers from two main drawbacks that signiﬁcantly affect
+runtimes. First, since multiple threads can update the same cache line containing a speciﬁc model
+entry, there can be signiﬁcant ping-ponging of cache lines across cores. This leads to high access
+
+2
+
+latency and signiﬁcant drop in scalability. Second and perhaps even more importantly, there is a
+signiﬁcant amount of locality in the model updates that is not exploited in the Hogwild algorithm.
+As an example, we can easily see that the same target word wt
+out is used in the model updates for
+several input words. By performing a single update at a time, this locality information is lost, and
+the algorithm performs a series of dot-products that are level-1 BLAS operations [1] and limited by
+memory bandwidth. It is indeed, as we show next, possible to batch these operations into a level-3
+BLAS call [1] which can more efﬁciently utilize the compute capabilities and the instruction sets of
+modern multi-core and many-core architectures.
+
+We exploit locality in two steps. As a motivation, consider Figure 1. The ﬁgure to the left shows the
+parallelization scheme of the original word2vec. Note that we compute dot products of the word
+vectors for a given input word wi
+in with both the target word wt
+out as well as a set of K negative
+samples {w1
+out, · · · , wK
+out}. Rather than doing these one at a time, it is rather simple to batch these
+dot products into a matrix vector multiply, a level-2 BLAS operation [1], as shown in the left side
+of Figure 1. However, this alone does not buy signiﬁcant performance improvement. Indeed, most
+likely the shared input word vector may come from cache. In order to convert this to a level-3 BLAS
+operation, we also need to batch the input context words. Doing this is non-trivial since the negative
+samples for each input word could be different in the original word2vec implementation. We hence
+propose “negative sample sharing” as a strategy, where we share negative samples across a small
+batch of input words. Doing so allows us to convert the original dot-product based multiply into
+a matrix-matrix multiply call (GEMM) as shown on the right side of Figure 1. At the end of the
+GEMM, the model updates for all the word vectors of all input words and target/sample words that
+are computed need to be written back. Performing matrix-matrix multiplies (GEMMs) rather than
+dot-products allows us to leverage all the compute capabilities of modern architectures including
+vector units and instruction set features such as multiply-add instructions in the Intel AVX2 instruction
+set. It also allows us to leverage heavily optimized linear algebra libraries.
+
+For multi-threading across the GEMM calls, we follow the same “Hogwild"-style philosophy - each
+thread performs its own GEMM call independently to other threads, and we allow for threads to
+potentially conﬂict when updating the models at the end of the GEMM operation. We therefore call
+our new parallelization scheme “HogBatch".
+
+While the original word2vec performs model updates after each dot product, our HogBatch scheme
+performs a number of dot products as a GEMM call before performing model updates. It is important
+to note that this locality optimization has a secondary but important beneﬁt - we cut down on the
+total number of updates to the model. This happens since the GEMM operation performs a reduction
+(in registers/local cache) to an update to a single entry in the output matrix; while in the original
+word2vec scheme such updates to the same entry (same input word representation, for instance)
+happen at distinct periods of time with potential ping-pong trafﬁc happening in between. As we
+will see in Sec. 2 when we present results, this leads to a much better scaling of HogBatch than the
+original word2vec.
+
+1.2 Distributed Memory Parallelization
+
+To scale out word2vec, we also explore different techniques to distribute its computation across nodes
+in a compute cluster. Essentially, we employ data parallelism for distributed computation. Due to
+limited space, we skip the details here and will report it in a full paper.
+
+2 Experiments
+
+We compare the performances of three different implementations of word2vec: (1) the original
+implementation from Google that is based on Hogwild SGD on shared memory systems (https://
+code.google.com/archive/p/word2vec/), (2) BIDMach (https://github.com/BIDData/
+BIDMach) which achieves the best known performance of word2vec on Nvidia GPUs, and (3)
+our optimized implementation on Intel architectures, including (1) 36-core Intel Xeon E5-2697 v4
+Broadwell (BDW) CPUs, and (2) the latest Intel Xeon Phi 68-core Knights Landing (KNL) processors.
+We train the algorithm on the one billion word benchmark [3] with the same parameter settings of
+BIDMatch (dim=300, negative samples=5, window=5, sample=1e-4, vocabulary of 1,115,011 words).
+We evaluate the model accuracy on the standard word similarity benchmark WS-353 [4] and Google
+word analogy benchmark [5]. Since all the implementations achieve similar accuracy and due to
+
+3
+
+lack of space, in the following we only report their performances in term of throughput, measured as
+million words/sec. More details of the experimental comparison will be reported in a full paper. Our
+implementation and scripts are open sourced at https://github.com/IntelLabs/pWord2Vec.
+
+Figure 2: (a) Scalabilities of the original word2vec and our optimization on all threads of an Intel
+Broadwell CPU; (b) Scalabilities of our distributed word2vec on multiple Intel Broadwell and Knights
+Landing nodes, and BIDMach on N = 1, 4 NVidia Titan-X nodes as reported in [2].
+
+Figure 2 shows the throughputs measured as million words/sec of our algorithm and the original
+word2vec, scaling across cores and nodes of Intel BDW and KNL processors. When scaling to
+multiple threads (Figure 2(a)), our algorithm achieves near linear speedup until 36 threads. In contract,
+the original word2vec scales linearly only until 8 threads and slows down signiﬁcantly after that.
+In the end, the original word2vec delivers about 1.6 million words/sec, while our code delivers
+5.8 million words/sec or a 3.6X speedup over the original word2vec. The superior performance
+highlights the effectiveness of our optimization in reducing unnecessary inter-thread communications
+and utilizing computation resource of modern multi-core architecture. When scaling across multiple
+nodes (Figure 2(b)), our distributed word2vec achieves near linear scaling until 16 BDW nodes
+or 8 KNL nodes while maintaining a similar accuracy to that of the original word2vec. As the
+number of nodes increases, to maintain a comparable accuracy, we need to increase the model
+synchronization frequency to mitigate the loss of convergence rate. However, this takes a toll on the
+scalability and leads to a sub-linear scaling at 32 BDW nodes or 16 KNL nodes. Despite of this, our
+distributed word2vec delivers over 100 million words/sec with a small 1% accuracy loss. To the best
+of our knowledge, this is the best performance reported so far on this benchmark. Finally, Table 1
+summarizes the best performances of the state-of-the-art implementations on different architectures,
+demonstrating superior performance of our algorithm.
+
+Table 1: Performance comparison of the state-of-the-art implementations of word2vec on different
+architectures.
+
+Processor
+Intel BDW (Xeon E5-2697 v4)
+Intel BDW (Xeon E5-2697 v4)
+Nvdia K40
+Intel BDW (Xeon E5-2697 v4)
+Nvdia GeForce Titan-X
+Intel KNL
+Nvdia GeForce Titan-X (4 nodes) BIDMach
+Intel KNL (4 nodes)
+1Data from [2].
+
+Code
+Original
+BIDMach
+BIDMach
+Our
+BIDMach
+Our
+
+Our
+
+Words/Sec
+1.6M
+2.5M
+4.2M1
+5.8M
+8.5M1
+8.9M
+20M1
+29.4M
+
+3 Conclusion
+
+A high performance word2vec algorithm “HogBatch" is proposed for shared memory and distributed
+memory systems. The algorithm is particularly suitable for modern multi-core/many-core architec-
+tures, especially Intel’s KNL, on which we deliver the best known performance reported so far. Our
+implementation is publicly available for general usage.
+
+4
+
+References
+
+[1] L. S. Blackford, J. Demmel, J. Dongarra, I. Duff, S. Hammarling, G. Henry, M. Heroux,
+L. Kaufman, A. Lumsdaine, A. Petitet, R. Pozo, K. Remington, and R. C. Whaley. An updated
+set of basic linear algebra subprograms (blas). ACM Trans. Mathematical Software, 28(2):
+135–151, 2002.
+
+[2] J. Canny, H. Zhao, Y. Chen, B. Jaros, and J. Mao. Machine learning at the limit. In IEEE
+
+International Conference on Big Data. 2015.
+
+[3] C. Chelba, T. Mikolov, M. Schuster, Q. Ge, T. Brants, P. Koehn, and T. Robinson. One billion
+word benchmark for measuring progress in statistical language modeling. In INTERSPEECH,
+pages 2635–2639, 2014.
+
+[4] L. Finkelstein, E. Gabrilovich, Y. Matias, E. Rivlin, Z. Solan, G. Wolfman, and E. Ruppin.
+Placing search in context: The concept revisited. ACM Transactions on Information Systems, 20:
+116–131, 2002.
+
+[5] T. Mikolov, K. Chen, G. Corrado, and J. Dean. Efﬁcient estimation of word representations in
+
+vector space. Proceedings of Workshop at ICLR, 2013.
+
+[6] T. Mikolov, I. Sutskever, K. Chen, G. S. Corrado, and J. Dean. Distributed representations of
+words and phrases and their compositionality. In Advances in Neural Information Processing
+Systems 26, pages 3111–3119. 2013.
+
+[7] F. Niu, B. Recht, C. Re, and S. J. Wright. Hogwild: A lock-free approach to parallelizing
+In Advances in Neural Information Processing Systems, pages
+
+stochastic gradient descent.
+693–701. 2011.
+
+5
+
+6
+1
+0
+2
+ 
+c
+e
+D
+ 
+3
+2
+ 
+ 
+]
+
+C
+D
+.
+s
+c
+[
+ 
+ 
+2
+v
+2
+7
+1
+6
+0
+.
+1
+1
+6
+1
+:
+v
+i
+X
+r
+a
+
+Parallelizing Word2Vec in Multi-Core and
+Many-Core Architectures
+
+Shihao Ji, Nadathur Satish, Sheng Li, Pradeep Dubey
+Parallel Computing Lab, Intel Labs, USA
+{shihao.ji, nadathur.rajagopalan.satish, sheng.r.li, pradeep.dubey}@intel.com
+
+Abstract
+
+Word2vec is a widely used algorithm for extracting low-dimensional vector rep-
+resentations of words. State-of-the-art algorithms including those by Mikolov et
+al. [5, 6] have been parallelized for multi-core CPU architectures, but are based
+on vector-vector operations with “Hogwild" updates that are memory-bandwidth
+intensive and do not efﬁciently use computational resources. In this paper, we
+propose “HogBatch" by improving reuse of various data structures in the algorithm
+through the use of minibatching and negative sample sharing, hence allowing us to
+express the problem using matrix multiply operations. We also explore different
+techniques to distribute word2vec computation across nodes in a compute cluster,
+and demonstrate good strong scalability up to 32 nodes. The new algorithm is
+particularly suitable for modern multi-core/many-core architectures, especially
+Intel’s latest Knights Landing processors, and allows us to scale up the compu-
+tation near linearly across cores and nodes, and process hundreds of millions of
+words per second, which is the fastest word2vec implementation to the best of our
+knowledge.
+
+1 From Hogwild to HogBatch
+
+We refer the reader to [5, 6] for an introduction to word2vec and its optimization problem. The
+original implementation of word2vec by Mikolov et al. 1 uses Hogwild [7] to parallelize SGD.
+Hogwild is a parallel SGD algorithm that seeks to ignore conﬂicts between model updates on different
+threads and allows updates to proceed even in the presence of conﬂicts. The psuedocode of word2vec
+Hogwild SGD is shown in Algorithm 1. The algorithm takes in a matrix M V ×D
+that contains the
+word representations for each input word, and a matrix M V ×D
+for the word representations of each
+output word. Each word is represented as an array of D ﬂoating point numbers, corresponding to
+one row of the two matrices. These matrices are updated during the training. We take in a target
+word, and a set of N input context words around the target as depicted in the top of Figure 1. The
+algorithm iterates over the N input words in Lines 2-3. In the loop at Line 6, we pick either the
+positive example (the target word in Line 8) or a negative example at random (Line 10). Lines
+13-15 compute the gradient of the objective function with respect to the choice of input word and
+positive/negative example. Lines 17–20 perform the update to the entries Mout[pos/neg example]
+and Min[input context]. The psuedocode only shows a single thread; in Hogwild, the loop in Line 2
+is parallelized over threads without any additional change in the code.
+
+out
+
+in
+
+Algorithm 1 reads and updates entries corresponding to the input context and positive/negative words
+at each iteration of the loop at Line 6. This means that there is a potential dependence between
+successive iterations - they may happen to touch the same word representations, and each iteration
+must potentially wait for the update from the previous iteration to complete. Hogwild ignores such
+
+1https://code.google.com/archive/p/word2vec/
+
+30th Conference on Neural Information Processing Systems (NIPS 2016), Barcelona, Spain.
+
+Algorithm 1 word2vec Hogwild SGD in one thread.
+1: Given model parameter Ω = {Min, Mout}, learning rate α, 1 target word wt
+
+out, and N input
+
+out; label = 1;
+
+words {w0
+
+in, w1
+
+in, · · · , wN −1
+
+in
+
+}
+
+} else {
+
+if (k = 0) {
+
+target_word = wt
+
+2: for (i = 0; i < N; i++) {
+input_word = wi
+in;
+3:
+for (j = 0; j < D; j++) temp[j] = 0;
+4:
+// negative sampling
+5:
+for (k = 0; k < negative + 1; k++) {
+6:
+7:
+8:
+9:
+10:
+11:
+12:
+13:
+14:
+15:
+16:
+17:
+18:
+19:
+20:
+21: }
+
+target_word = sample one word from V; label = 0;
+
+}
+inn = 0;
+for (j = 0; j < D; j++) inn += Min[input_word][j] * Mout[target_word][j];
+err = label - σ(inn);
+for (j = 0; j < D; j++) temp[j] += err * Mout[target_word][j];
+// update output matrix
+for (j = 0; j < D; j++) Mout[target_word][j] += α * err * Min[input_word][j];
+
+}
+// update input matrix
+for (j = 0; j < D; j++) Min[input_word][j] += α * temp[j];
+
+dependencies and proceeds with updates regardless of conﬂicts. In theory, this can reduce the rate
+of convergence of the algorithm as compared to a sequential run. However, the Hogwild approach
+has been shown to work well in case the updates across threads are unlikely to be to the same word;
+and indeed for large vocabulary sizes, conﬂicts are relatively rare and convergence is not typically
+affected.
+
+Figure 1: The parallelization schemes of the original word2vec (left) and our optimization (right).
+
+1.1 Shared Memory Parallelization: HogBatch
+
+However, the original word2vec algorithm suffers from two main drawbacks that signiﬁcantly affect
+runtimes. First, since multiple threads can update the same cache line containing a speciﬁc model
+entry, there can be signiﬁcant ping-ponging of cache lines across cores. This leads to high access
+
+2
+
+latency and signiﬁcant drop in scalability. Second and perhaps even more importantly, there is a
+signiﬁcant amount of locality in the model updates that is not exploited in the Hogwild algorithm.
+As an example, we can easily see that the same target word wt
+out is used in the model updates for
+several input words. By performing a single update at a time, this locality information is lost, and
+the algorithm performs a series of dot-products that are level-1 BLAS operations [1] and limited by
+memory bandwidth. It is indeed, as we show next, possible to batch these operations into a level-3
+BLAS call [1] which can more efﬁciently utilize the compute capabilities and the instruction sets of
+modern multi-core and many-core architectures.
+
+We exploit locality in two steps. As a motivation, consider Figure 1. The ﬁgure to the left shows the
+parallelization scheme of the original word2vec. Note that we compute dot products of the word
+vectors for a given input word wi
+in with both the target word wt
+out as well as a set of K negative
+samples {w1
+out, · · · , wK
+out}. Rather than doing these one at a time, it is rather simple to batch these
+dot products into a matrix vector multiply, a level-2 BLAS operation [1], as shown in the left side
+of Figure 1. However, this alone does not buy signiﬁcant performance improvement. Indeed, most
+likely the shared input word vector may come from cache. In order to convert this to a level-3 BLAS
+operation, we also need to batch the input context words. Doing this is non-trivial since the negative
+samples for each input word could be different in the original word2vec implementation. We hence
+propose “negative sample sharing” as a strategy, where we share negative samples across a small
+batch of input words. Doing so allows us to convert the original dot-product based multiply into
+a matrix-matrix multiply call (GEMM) as shown on the right side of Figure 1. At the end of the
+GEMM, the model updates for all the word vectors of all input words and target/sample words that
+are computed need to be written back. Performing matrix-matrix multiplies (GEMMs) rather than
+dot-products allows us to leverage all the compute capabilities of modern architectures including
+vector units and instruction set features such as multiply-add instructions in the Intel AVX2 instruction
+set. It also allows us to leverage heavily optimized linear algebra libraries.
+
+For multi-threading across the GEMM calls, we follow the same “Hogwild"-style philosophy - each
+thread performs its own GEMM call independently to other threads, and we allow for threads to
+potentially conﬂict when updating the models at the end of the GEMM operation. We therefore call
+our new parallelization scheme “HogBatch".
+
+While the original word2vec performs model updates after each dot product, our HogBatch scheme
+performs a number of dot products as a GEMM call before performing model updates. It is important
+to note that this locality optimization has a secondary but important beneﬁt - we cut down on the
+total number of updates to the model. This happens since the GEMM operation performs a reduction
+(in registers/local cache) to an update to a single entry in the output matrix; while in the original
+word2vec scheme such updates to the same entry (same input word representation, for instance)
+happen at distinct periods of time with potential ping-pong trafﬁc happening in between. As we
+will see in Sec. 2 when we present results, this leads to a much better scaling of HogBatch than the
+original word2vec.
+
+1.2 Distributed Memory Parallelization
+
+To scale out word2vec, we also explore different techniques to distribute its computation across nodes
+in a compute cluster. Essentially, we employ data parallelism for distributed computation. Due to
+limited space, we skip the details here and will report it in a full paper.
+
+2 Experiments
+
+We compare the performances of three different implementations of word2vec: (1) the original
+implementation from Google that is based on Hogwild SGD on shared memory systems (https://
+code.google.com/archive/p/word2vec/), (2) BIDMach (https://github.com/BIDData/
+BIDMach) which achieves the best known performance of word2vec on Nvidia GPUs, and (3)
+our optimized implementation on Intel architectures, including (1) 36-core Intel Xeon E5-2697 v4
+Broadwell (BDW) CPUs, and (2) the latest Intel Xeon Phi 68-core Knights Landing (KNL) processors.
+We train the algorithm on the one billion word benchmark [3] with the same parameter settings of
+BIDMatch (dim=300, negative samples=5, window=5, sample=1e-4, vocabulary of 1,115,011 words).
+We evaluate the model accuracy on the standard word similarity benchmark WS-353 [4] and Google
+word analogy benchmark [5]. Since all the implementations achieve similar accuracy and due to
+
+3
+
+lack of space, in the following we only report their performances in term of throughput, measured as
+million words/sec. More details of the experimental comparison will be reported in a full paper. Our
+implementation and scripts are open sourced at https://github.com/IntelLabs/pWord2Vec.
+
+Figure 2: (a) Scalabilities of the original word2vec and our optimization on all threads of an Intel
+Broadwell CPU; (b) Scalabilities of our distributed word2vec on multiple Intel Broadwell and Knights
+Landing nodes, and BIDMach on N = 1, 4 NVidia Titan-X nodes as reported in [2].
+
+Figure 2 shows the throughputs measured as million words/sec of our algorithm and the original
+word2vec, scaling across cores and nodes of Intel BDW and KNL processors. When scaling to
+multiple threads (Figure 2(a)), our algorithm achieves near linear speedup until 36 threads. In contract,
+the original word2vec scales linearly only until 8 threads and slows down signiﬁcantly after that.
+In the end, the original word2vec delivers about 1.6 million words/sec, while our code delivers
+5.8 million words/sec or a 3.6X speedup over the original word2vec. The superior performance
+highlights the effectiveness of our optimization in reducing unnecessary inter-thread communications
+and utilizing computation resource of modern multi-core architecture. When scaling across multiple
+nodes (Figure 2(b)), our distributed word2vec achieves near linear scaling until 16 BDW nodes
+or 8 KNL nodes while maintaining a similar accuracy to that of the original word2vec. As the
+number of nodes increases, to maintain a comparable accuracy, we need to increase the model
+synchronization frequency to mitigate the loss of convergence rate. However, this takes a toll on the
+scalability and leads to a sub-linear scaling at 32 BDW nodes or 16 KNL nodes. Despite of this, our
+distributed word2vec delivers over 100 million words/sec with a small 1% accuracy loss. To the best
+of our knowledge, this is the best performance reported so far on this benchmark. Finally, Table 1
+summarizes the best performances of the state-of-the-art implementations on different architectures,
+demonstrating superior performance of our algorithm.
+
+Table 1: Performance comparison of the state-of-the-art implementations of word2vec on different
+architectures.
+
+Processor
+Intel BDW (Xeon E5-2697 v4)
+Intel BDW (Xeon E5-2697 v4)
+Nvdia K40
+Intel BDW (Xeon E5-2697 v4)
+Nvdia GeForce Titan-X
+Intel KNL
+Nvdia GeForce Titan-X (4 nodes) BIDMach
+Intel KNL (4 nodes)
+1Data from [2].
+
+Code
+Original
+BIDMach
+BIDMach
+Our
+BIDMach
+Our
+
+Our
+
+Words/Sec
+1.6M
+2.5M
+4.2M1
+5.8M
+8.5M1
+8.9M
+20M1
+29.4M
+
+3 Conclusion
+
+A high performance word2vec algorithm “HogBatch" is proposed for shared memory and distributed
+memory systems. The algorithm is particularly suitable for modern multi-core/many-core architec-
+tures, especially Intel’s KNL, on which we deliver the best known performance reported so far. Our
+implementation is publicly available for general usage.
+
+4
+
+References
+
+[1] L. S. Blackford, J. Demmel, J. Dongarra, I. Duff, S. Hammarling, G. Henry, M. Heroux,
+L. Kaufman, A. Lumsdaine, A. Petitet, R. Pozo, K. Remington, and R. C. Whaley. An updated
+set of basic linear algebra subprograms (blas). ACM Trans. Mathematical Software, 28(2):
+135–151, 2002.
+
+[2] J. Canny, H. Zhao, Y. Chen, B. Jaros, and J. Mao. Machine learning at the limit. In IEEE
+
+International Conference on Big Data. 2015.
+
+[3] C. Chelba, T. Mikolov, M. Schuster, Q. Ge, T. Brants, P. Koehn, and T. Robinson. One billion
+word benchmark for measuring progress in statistical language modeling. In INTERSPEECH,
+pages 2635–2639, 2014.
+
+[4] L. Finkelstein, E. Gabrilovich, Y. Matias, E. Rivlin, Z. Solan, G. Wolfman, and E. Ruppin.
+Placing search in context: The concept revisited. ACM Transactions on Information Systems, 20:
+116–131, 2002.
+
+[5] T. Mikolov, K. Chen, G. Corrado, and J. Dean. Efﬁcient estimation of word representations in
+
+vector space. Proceedings of Workshop at ICLR, 2013.
+
+[6] T. Mikolov, I. Sutskever, K. Chen, G. S. Corrado, and J. Dean. Distributed representations of
+words and phrases and their compositionality. In Advances in Neural Information Processing
+Systems 26, pages 3111–3119. 2013.
+
+[7] F. Niu, B. Recht, C. Re, and S. J. Wright. Hogwild: A lock-free approach to parallelizing
+In Advances in Neural Information Processing Systems, pages
+
+stochastic gradient descent.
+693–701. 2011.
+
+5
+

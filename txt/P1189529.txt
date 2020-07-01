@@ -3880,3 +3880,2591 @@ Win and Wout.
 
 14
 
+6
+1
+0
+2
+ 
+r
+a
+
+M
+ 
+1
+3
+ 
+ 
+]
+
+G
+L
+.
+s
+c
+[
+ 
+ 
+7
+v
+9
+0
+9
+6
+0
+.
+1
+1
+5
+1
+:
+v
+i
+X
+r
+a
+
+Published as a conference paper at ICLR 2016
+
+BLACKOUT: SPEEDING UP RECURRENT NEURAL NET-
+WORK LANGUAGE MODELS WITH VERY LARGE VO-
+CABULARIES
+
+Shihao Ji
+Parallel Computing Lab, Intel
+shihao.ji@intel.com
+
+S. V. N. Vishwanathan
+Univ. of California, Santa Cruz
+vishy@ucsc.edu
+
+Nadathur Satish, Michael J. Anderson & Pradeep Dubey
+Parallel Computing Lab, Intel
+{nadathur.rajagopalan.satish,michael.j.anderson,pradeep.dubey}@intel.com
+
+ABSTRACT
+
+We propose BlackOut, an approximation algorithm to efﬁciently train massive
+recurrent neural network language models (RNNLMs) with million word vocab-
+ularies. BlackOut is motivated by using a discriminative loss, and we describe
+a weighted sampling strategy which signiﬁcantly reduces computation while im-
+proving stability, sample efﬁciency, and rate of convergence. One way to under-
+stand BlackOut is to view it as an extension of the DropOut strategy to the out-
+put layer, wherein we use a discriminative training loss and a weighted sampling
+scheme. We also establish close connections between BlackOut, importance sam-
+pling, and noise contrastive estimation (NCE). Our experiments, on the recently
+released one billion word language modeling benchmark, demonstrate scalabil-
+ity and accuracy of BlackOut; we outperform the state-of-the art, and achieve
+the lowest perplexity scores on this dataset. Moreover, unlike other established
+methods which typically require GPUs or CPU clusters, we show that a carefully
+implemented version of BlackOut requires only 1-10 days on a single machine to
+train a RNNLM with a million word vocabulary and billions of parameters on one
+billion words. Although we describe BlackOut in the context of RNNLM training,
+it can be used to any networks with large softmax output layers.
+
+1
+
+INTRODUCTION
+
+Statistical language models are a crucial component of speech recognition, machine translation and
+information retrieval systems. In order to handle the data sparsity problem associated with tradi-
+tional n-gram language models (LMs), neural network language models (NNLMs) (Bengio et al.,
+2001) represent the history context in a continuous vector space that can be learned towards error
+rate reduction by sharing data among similar contexts. Instead of using ﬁxed number of words to
+represent context, recurrent neural network language models (RNNLMs) (Mikolov et al., 2010) use
+a recurrent hidden layer to represent longer and variable length histories. RNNLMs signiﬁcantly
+outperform traditional n-gram LMs, and are therefore becoming an increasingly popular choice for
+practitioners (Mikolov et al., 2010; Sundermeyer et al., 2013; Devlin et al., 2014).
+
+Consider a standard RNNLM, depicted in Figure 1. The network has an input layer x, a hidden
+layer s (also called context layer or state) with a recurrent connection to itself, and an output layer
+y. Typically, at time step t the network is fed as input xt ∈ RV , where V denotes the vocabulary
+size, and st−1 ∈ Rh, the previous state. It produces a hidden state st ∈ Rh, where h is the size
+of the hidden layer, which in turn is transformed to the output yt ∈ RV . Different layers are fully
+connected, with the weight matrices denoted by Ω = {W V ×h
+
+, W V ×h
+
+, W h×h
+r
+
+in
+
+out }.
+
+For language modeling applications, the input xt is a sparse vector of a 1-of-V (or one-hot) encoding
+with the element corresponding to the input word wt−1 being 1 and the rest of components of xt set
+to 0; the state of the network st is a dense vector, summarizing the history context {wt−1, · · · , w0}
+
+1
+
+Published as a conference paper at ICLR 2016
+
+Figure 1: The network architecture of a standard RNNLM and its unrolled version for an example
+input sentence: <s> A cat is sitting on a sofa </s>.
+
+preceding the output word wt; and the output yt is a dense vector, with the i-th element denoting
+the probability of the next word being wi, that is, p(wi|wt−1, · · · , w0), or more concisely, p(wi|st).
+The input to output transformation occurs via:
+
+st = σ(W T
+yt = f (Woutst),
+
+inxt + Wrst−1)
+
+(1)
+(2)
+
+where σ(v) = 1/(1 + exp(−v)) is the sigmoid activation function, and f (·) is the softmax function
+f (ui) := exp(ui)/ (cid:80)V
+
+j=1 exp(uj).
+
+One can immediately see that if xt uses a 1-of-V encoding, then the computations in equation (1)
+are relatively inexpensive (typically h is of the order of a few thousand, and the computations are
+O(h2)), while the computations in equation (2) are expensive (typically V is of the order of a million,
+and the computations are O(V h)). Similarly, back propagating the gradients from the output layer
+to the hidden layer is expensive. Consequently, the training times for some of the largest models
+reported in literature are of the order of weeks (Mikolov et al., 2011; Williams et al., 2015).
+
+In this paper, we ask the following question: Can we design an approximate training scheme for
+RNNLM which will improve on the state of the art models, while using signiﬁcantly less compu-
+tational resources? Towards this end, we propose BlackOut an approximation algorithm to efﬁ-
+ciently train massive RNNLMs with million word vocabularies. BlackOut is motivated by using a
+discriminative loss, and we describe a weighted sampling strategy which signiﬁcantly reduces com-
+putation while improving stability, sample efﬁciency, and rate of convergence. We also establish
+close connections between BlackOut, importance sampling, and noise contrastive estimation (NCE)
+(Gutmann & Hyv¨arinen, 2012; Mnih & Teh, 2012), and demonstrate that BlackOut mitigates some
+of the limitations of both previous methods. Our experiments, on the recently released one billion
+word language modeling benchmark (Chelba et al., 2014), demonstrate scalability and accuracy of
+BlackOut; we outperform the state-of-the art, achieving the lowest perplexity scores on this dataset.
+Moreover, unlike other established methods which typically require GPUs or CPU clusters, we show
+that a carefully implemented version of BlackOut requires only 1-10 days on a single CPU machine
+to train a RNNLM with a million word vocabulary and billions of parameters on one billion words.
+
+One way to understand BlackOut is to view it as an extension of the DropOut strategy (Srivastava
+et al., 2014) to the output layer, wherein we use a discriminative training loss and a weighted sam-
+pling scheme. The connection to DropOut is mainly from the way they operate in model training
+and model evaluation. Similar to DropOut, in BlackOut training a subset of output layer is sampled
+and trained at each training batch and when evaluating, the full network participates. Also, like
+DropOut, a regularization technique, our experiments show that the models trained by BlackOut are
+less prone to overﬁtting. A primary difference between them is that DropOut is routinely used at
+input and/or hidden layers of deep neural networks, while BlackOut only operates at output layer.
+We chose the name BlackOut in light of the similarities between our method and DropOut, and the
+complementary they offer to train deep neural networks.
+
+2
+
+Published as a conference paper at ICLR 2016
+
+2 BLACKOUT: A SAMPLING-BASED APPROXIMATION
+
+We will primarily focus on estimation of the matrix Wout. To simplify notation, in the sequel we
+will use θ to denote Wout and θj to denote the j-th row of Wout. Moreover, let (cid:104)·, ·(cid:105) denote the dot
+product between two vectors. Given these notations, one can rewrite equation (2) as
+
+pθ (wi|s) =
+
+exp ((cid:104)θi, s(cid:105))
+j=1 exp ((cid:104)θj, s(cid:105))
+
+(cid:80)V
+
+∀i ∈ {1, · · · , V }.
+
+(3)
+
+RNNLMs with a softmax output layer are typically trained using cross-entropy as the loss function,
+which is equivalent to maximum likelihood (ML) estimation, that is, to ﬁnd the model parameter θ
+which maximizes the log-likelihood of target word wi, given a history context s:
+J s
+ml(θ) = log pθ(wi|s),
+
+(4)
+
+whose gradient is given by
+
+∂J s
+
+ml(θ)
+∂θ
+
+=
+
+=
+
+∂
+∂θ
+
+∂
+∂θ
+
+(cid:104)θi, s(cid:105) −
+
+pθ (wj|s)
+
+(cid:104)θj, s(cid:105) ,
+
+V
+(cid:88)
+
+j=1
+
+∂
+∂θ
+
+(cid:104)θi, s(cid:105) − Epθ(w|s)
+
+(cid:20) ∂
+∂θ
+
+(cid:21)
+(cid:104)θw, s(cid:105)
+
+.
+
+(5)
+
+(6)
+
+(7)
+
+The gradient of log-likelihood is expensive to evaluate because (1) the cost of computing pθ(wj|s)
+is O(V h) and (2) the summation above takes time linear in the vocabulary size O(V ).
+
+To alleviate the computational bottleneck of computing the gradient (5), we propose to use the
+following discriminative objective function for training RNNLM:
+
+J s
+disc(θ) = log ˜pθ(wi|s) +
+
+log(1 − ˜pθ(wj|s)),
+
+(cid:88)
+
+j∈SK
+
+where SK is a set of indices of K words drawn from the vocabulary, and i /∈ SK. Typically, K is a
+tiny fraction of V , and in our experiments we use K ≈ V /200. To generate SK we will sample K
+words from the vocabulary using an easy to sample distribution Q(w), and set qj := 1
+Q(wj ) in order
+to compute
+
+˜pθ(wi|s) =
+
+qi exp ((cid:104)θi, s(cid:105)) + (cid:80)
+
+j∈SK
+
+qj exp ((cid:104)θj, s(cid:105))
+
+.
+
+qi exp ((cid:104)θi, s(cid:105))
+
+Equation 6 is the cost function of a standard logistic regression classiﬁer that discriminates one
+positive sample wi from K negative samples wj, ∀j ∈ SK. The ﬁrst term in (6) corresponds to the
+traditional maximum likelihood training, and the second term explicitly pushes down the probability
+of negative samples in addition to the implicit shrinkage enforced by the denominator of (7). In our
+experiments, we found the discriminative training (6) outperforms the maximum likelihood training
+(the ﬁrst term of Eq. 6) in all the cases, with varying degree of accuracy improvement depending on
+K.
+
+The weighted softmax function (7) can be considered as a stochastic version of the standard soft-
+max (3) on a different base measure. While the standard softmax (3) uses a base measure which
+gives equal weights to all words, and has support over the entire vocabulary, the base measure used
+in (7) has support only on K + 1 words: the target word wi and K samples from Q(w). The noise
+portion of (7) has the motivation from the sampling scheme, and the qi term for target word wi is
+introduced mainly to balance the contributions from target word and noisy sample words.1 Other
+justiﬁcations are discussed in Sec. 2.1 and Sec. 2.2, where we establish close connections between
+BlackOut, importance sampling, and noise contrastive estimation.
+
+Due to the weighted sampling property of BlackOut, some words might be sampled multiple times
+according to the proposal distribution Q(w), and thus their indices may appear multiple times in
+SK. As wi is the target word, which is assumed to be included in computing (7), we therefore set
+i /∈ SK explicitly.
+
+1It’s shown empirically in our experiments that setting qi = 1 in (7) hurts the accuracy signiﬁcantly.
+
+3
+
+Published as a conference paper at ICLR 2016
+
+
+
+(8)
+
+(9)
+
+Substituting (7) into (6) and letting uj = (cid:104)θj, s(cid:105) and ˜pj = ˜pθ (wj|s), we have
+
+J s
+disc(θ) ∝ ui − (K + 1) log
+
+(cid:88)
+
+qk exp(uk) +
+
+(cid:88)
+
+log
+
+
+
+(cid:88)
+
+qk exp(uk) − qj exp(uj)
+
+ .
+
+k∈{i}∪SK
+
+j∈SK
+
+k∈{i}∪SK
+
+
+
+Then taking derivatives with respect to uj, ∀j ∈ {i} ∪ SK, yields
+
+∂J s
+
+disc(θ)
+∂ui
+
+∂J s
+
+disc(θ)
+∂uj
+
+= 1 −
+
+K + 1 −
+
+
+
+
+
+(cid:88)
+
+j∈SK
+
+1
+1 − ˜pj
+
+
+
+ ˜pi
+
+
+
+(cid:88)
+
+1
+1 − ˜pk
+
+k∈SK \{j}
+
+= −
+
+K + 1 −
+
+ ˜pj,
+
+for j ∈ SK.
+
+(10)
+
+By the chain rule of derivatives, we can propagate the errors backward to previous layers and com-
+pute the gradients with respect to the full model parameters Ω. In contrast to Eq. 5, Eqs. 9 and 10
+are much cheaper to evaluate as (1) the cost of computing ˜pj is O(Kh) and (2) the summation takes
+O(K), hence roughly a V /K times of speed-up.
+
+Next we turn our attention to the proposal distribution Q(w). In the past, a uniform distribution
+or the unigram distribution have been advocated as promising candidates for sampling distributions
+(Bengio & Sen´ecal, 2003; Jean et al., 2015; Bengio & Sen´ecal, 2008; Mnih & Teh, 2012). As we
+will see in the experiments, neither one is suitable for a wide range of datasets, and we ﬁnd that the
+power-raised unigram distribution of Mikolov et al. (2013) is very important in this context:
+
+Qα(w) ∝ pα
+
+uni(w), α ∈ [0, 1].
+
+(11)
+
+Note that Qα(w) is a generalization of uniform distribution (when α = 0) and unigram distribution
+(when α = 1). The rationale behind our choice is that by tuning α, one can interpolate smoothly
+between sampling popular words, as advocated by the unigram distribution, and sampling all words
+equally. The best α is typically dataset and/or problem dependent; in our experiments, we use a
+holdout set to ﬁnd the best value of α. It’s worth noting that this sampling strategy has been used by
+Mikolov et al. (2013) in a similar context of word embedding, while here we explore its effect in the
+language modeling applications.
+
+After BlackOut training, we evaluate the predictive performance of RNNLM by perplexity. To cal-
+culate perplexity, we explicitly normalize the output distribution by using the exact softmax func-
+tion (3). This is similar to DropOut (Srivastava et al., 2014), wherein a subset of network is sampled
+and trained at each training batch and when evaluating, the full network participates.
+
+2.1 CONNECTION TO IMPORTANCE SAMPLING
+
+BlackOut has a close connection to importance sampling (IS). To see this, differentiating the loga-
+rithm of Eq. 7 with respect to model parameter θ, we have
+
+∂
+∂θ
+
+log ˜pθ(wi|s) =
+
+(cid:104)θi, s(cid:105) −
+
+(cid:80)
+
+1
+qk exp((cid:104)θk, s(cid:105))
+
+(cid:88)
+
+j∈{i}∪SK
+
+qj exp((cid:104)θj, s(cid:105))
+
+(cid:104)θj, s(cid:105)
+
+∂
+∂θ
+
+∂
+∂θ
+
+∂
+∂θ
+
+=
+
+(cid:104)θi, s(cid:105) − E ˜pθ(w|s)
+
+k∈{i}∪SK
+(cid:20) ∂
+∂θ
+
+(cid:21)
+(cid:104)θw, s(cid:105)
+
+.
+
+(12)
+
+In contrast with Eq. 5, it shows that the weighted softmax function (7) corresponds to an IS-based
+estimator of the standard softmax (3) with a proposal distribution Q(w).
+
+Importance sampling has been applied to NNLMs with large output layers in previous works (Bengio
+& Sen´ecal, 2003; 2008; Jean et al., 2015). However, either uniform distribution or unigram distri-
+bution is used for sampling and all aforementioned works exploit the maximum likelihood learning
+of model parameter θ. By contrast, BlackOut uses a discriminative training (6) and a power-raised
+unigram distribution Qα(w) for sampling; these two changes are important to mitigate some of lim-
+itations of IS-based approaches. While an IS-based approach with a uniform proposal distribution
+
+4
+
+Published as a conference paper at ICLR 2016
+
+is very stable for training, it suffers from large bias due to the apparent divergence of the uniform
+distribution from the true data distribution pθ(w|s). On the other hand, a unigram-based IS esti-
+mate can make learning unstable due to the high variance (Bengio & Sen´ecal, 2003; 2008). Using a
+power-raised unigram distribution Qα(w) entails a better trade-off between bias and variance, and
+thus strikes a better balance between these two extremes. In addition, as we will see from the experi-
+ments, the discriminative training of BlackOut speeds up the rate of convergence over the traditional
+maximum likelihood learning.
+
+2.2 CONNECTION TO NOISE CONTRASTIVE ESTIMATION
+
+The basic idea of NCE is to transform the density estimation problem to the problem of learning
+by comparison, e.g., estimating the parameters of a binary classiﬁer that distinguishes samples from
+the data distribution pd from samples generated by a known noise distribution pn (Gutmann &
+Hyv¨arinen, 2012). In the language modeling setting, the data distribution pd will be the distribution
+pθ(w|s) of interest, and the noise distribution pn is often chosen from the ones that are easy to
+sample from and possibly close to the true data distribution (so that the classiﬁcation problem isn’t
+trivial). While Mnih & Teh (2012) uses a context-independent (unigram) noise distribution pn(w),
+BlackOut can be formulated into the NCE framework by considering a context-dependent noise
+distribution pn(w|s), estimated from K samples drawn from Q(w), by
+
+pn(wi|s) =
+
+pθ(wj|s),
+
+1
+K
+
+(cid:88)
+
+j∈SK
+
+qj
+qi
+
+(13)
+
+(14)
+
+which is a probability distribution function under the expectation that K samples are drawn from
+Q(w): SK ∼ Q(w) since ESK ∼Q(w)(pn(wi|s)) = Q(wi) and ESK ∼Q(w)((cid:80)V
+i=1 pn(wi|s)) = 1
+(See the proof in Appendix A).
+
+Similar to Gutmann & Hyv¨arinen (2012), noise samples are assumed K times more frequent than
+K+1 pθ(w|s)
+data samples so that data points are generated from a mixture of two distributions:
+and K
+K+1 pn(w|s). Then the conditional probability of sample wi being generated from the data
+distribution is
+
+1
+
+pθ(D = 1|wi, s) =
+
+pθ(wi|s)
+pθ(wi|s) + Kpn(wi|s)
+
+.
+
+Inserting Eq. 13 into Eq. 14, we have
+
+pθ(D = 1|wi, s) =
+
+qi exp((cid:104)θi, s(cid:105))
+
+qi exp((cid:104)θi, s(cid:105)) + (cid:80)
+
+j∈SK
+
+qj exp((cid:104)θj, s(cid:105))
+
+,
+
+(15)
+
+which is exactly the weighted softmax function deﬁned in (7). Note that due to the noise distribution
+proposed in Eq. 13, the expensive denominator (or the partition function Z) of pθ(wj|s) is canceled
+out, while in Mnih & Teh (2012) the partition function Z is either treated as a free parameter to be
+learned or approximated by a constant. Mnih & Teh (2012) recommended to set Z = 1.0 in the NCE
+training. However, from our experiments, setting Z = 1.0 often leads to sub-optimal solutions2 and
+different settings of Z sometimes incur numerical instability since the log-sum-exp trick3 can not
+be used there to shift the scores of the output layer to a range that is amenable to the exponential
+function. BlackOut does not have this hyper-parameter to tune and the log-sum-exp trick still works
+for the weighted softmax function (7). Due to the discriminative training of NCE and BlackOut,
+they share the same objective function (6).
+
+We shall emphasize that according to the theory of NCE, the K samples should be sampled from the
+noise distribution pn(w|s). But in order to calculate pn(w|s), we need the K samples drawn from
+Q(w) beforehand. As an approximation, we use the same K samples drawn from Q(w) as the K
+samples from pn(w|s), and only use the expression of pn(w|s) in (13) to evaluate the noise density
+value required by Eq. 14. This approximation is accurate since ESK ∼Q(w)(pn(wi|s)) = Q(wi) as
+proved in Appendix A, and we ﬁnd empirically that it performs much better (with improved stability)
+than using a unigram noise distribution as in Mnih & Teh (2012).
+
+2Similarly, Chen et al. (2015) reported that setting ln(Z) = 9 gave them the best results.
+3https://en.wikipedia.org/wiki/LogSumExp
+
+5
+
+Published as a conference paper at ICLR 2016
+
+2.3 RELATED WORK
+
+Many approaches have been proposed to address the difﬁculty of training deep neural networks with
+large output spaces. In general, they can be categorized into four categories:
+
+• Hierarchical softmax (Morin & Bengio, 2005; Mnih & Hinton, 2008) uses a hierarchical
+binary tree representation of the output layer with the V words as its leaves. It allows ex-
+ponentially faster computation of word probabilities and their gradients, but the predictive
+performance of the resulting model is heavily dependent on the tree used, which is of-
+ten constructed heuristically. Moreover, by relaxing the constraint of a binary structure, Le
+et al. (2011) introduces a structured output layer with an arbitrary tree structure constructed
+from word clustering. All these methods speed up both the model training and evaluation
+considerably.
+
+• Sampling-based approximations select at random or heuristically a small subset of the out-
+put layer and estimate gradient only from those samples. The use of importance sampling
+in Bengio & Sen´ecal (2003; 2008); Jean et al. (2015), and the use of NCE (Gutmann &
+Hyv¨arinen, 2012) in Mnih & Teh (2012) all fall under this category, so does the more
+recent use of Locality Sensitive Hashing (LSH) techniques (Shrivastava & Li, 2014; Vi-
+jayanarasimhan et al., 2014) to select a subset of good samples. BlackOut, with close con-
+nections to importance sampling and NCE, also falls in this category. All these approaches
+only speed up the model training, while the model evaluation still remains computationally
+challenging.
+
+• Self normalization (Devlin et al., 2014) extends the cross-entropy loss function by explicitly
+encouraging the partition function of softmax to be as close to 1.0 as possible. Initially, this
+approach only speeds up the model evaluation and more recently it’s extended to facilitate
+the training as well with some theoretical guarantees (Andreas & Klein, 2014; Andreas
+et al., 2015).
+
+• Exact gradient on limited loss functions (Vincent et al., 2015) introduces an algorithmic
+approach to efﬁciently compute the exact loss, gradient update for the output weights in
+O(h2) per training example instead of O(V h). Unfortunately, it only applies to a lim-
+ited family of loss functions that includes squared error and spherical softmax, while the
+standard softmax isn’t included.
+
+As discussed in the introduction, BlackOut also shares some similarity to DropOut (Srivastava et al.,
+2014). While DropOut is often applied to input and/or hidden layers of deep neural networks to
+avoid feature co-adaptation and overﬁtting by uniform sampling, BlackOut applies to a softmax
+output layer, uses a weighted sampling, and employs a discriminative training loss. We chose the
+name BlackOut in light of the similarities between our method and DropOut, and the complementary
+they offer to train deep neural networks.
+
+3
+
+IMPLEMENTATION AND FURTHER SPEED-UP
+
+We implemented BlackOut on a standard machine with a dual-socket 28-core Intel R(cid:13)Xeon R(cid:13)4
+Haswell CPU. To achieve high throughput, we train RNNLM with Back-Propagation Through Time
+(BPTT) (Rumelhart et al., 1988) with mini-batches (Chen et al., 2014). We use RMSProp (Hinton,
+2012) for learning rate scheduling and gradient clipping (Bengio et al., 2013) to avoid the gradi-
+ent explosion issue of recurrent networks. We use the latest Intel MKL library (version 11.3.0) for
+SGEMM calls, which has improved support for tall-skinny matrix-matrix multiplications, which
+consume about 80% of the run-time of RNNLMs.
+
+It is expensive to access and update large models with billions of parameters. Fortunately, due to
+the 1-of-V encoding at input layer and the BlackOut sampling at output layer, the model update on
+Win and Wout is sparse, i.e., only the model parameters corresponding to input/output words and
+the samples in SK are updated at each training batch. However, subnet updates have to be done
+carefully due to the dependency within RMSProp updating procedure. We therefore propose an
+approximated RMSProp that enables an efﬁcient subnet update and thus speeds up the algorithm
+even further. Details can be found in Appendix C.
+
+4
+
+Intel and Xeon are trademarks of Intel Corporation in the U.S. and/or other countries.
+
+6
+
+Published as a conference paper at ICLR 2016
+
+4 EXPERIMENTS
+
+In our experiments, we ﬁrst compare BlackOut, NCE and exact softmax (without any approxima-
+tion) using a small dataset. We then evaluate the performance of BlackOut on the recently released
+one billion word language modeling benchmark (Chelba et al., 2014) with a vocabulary size of up to
+one million. We compare the performance of BlackOut on a standard CPU machine versus the state-
+of-the-arts reported in the literature that are achieved on GPUs or on clusters of CPU nodes. Our
+implementation and scripts are open sourced at https://github.com/IntelLabs/rnnlm.
+
+Corpus Models are trained and evaluated on two different corpora: a small dataset provided by
+the RNNLM Toolkit5, and the recently released one billion word language modeling benchmark6,
+which is perhaps the largest public dataset in language modeling. The small dataset has 10,000
+training sentences, with 71,350 words in total and 3,720 unique words; and the test perplexity is
+evaluated on 1,000 test sentences. The one billion word benchmark was constructed from a mono-
+lingual/English corpora; after all necessary preprocessing including de-duplication, normalization
+and tokenization, 30,301,028 sentences (about 0.8 billion words) are randomly selected for training,
+6,075 sentences are randomly selected for test and the remaining 300,613 sentences are reserved for
+future development and can be used as holdout set.
+
+4.1 RESULTS ON SMALL DATASET
+
+We evaluate BlackOut, NCE and exact softmax (without any approximation) on the small dataset
+described above. This small dataset is used so that we can train the standard RNNLM algorithm
+with exact softmax within a reasonable time frame and hence to provide a baseline of expected
+perplexity. There are many other techniques involved in the training, such as RMSProp for learning
+rate scheduling (Hinton, 2012), subnet update (Appendix C), and mini-batch splicing (Chen et al.,
+2014), etc., which can affect the perplexity signiﬁcantly. For a fair comparison, we use the same
+tricks and settings for all the algorithms, and only evaluate the impact of the different approximations
+(or no approximation) on the softmax output layer. Moreover, there are a few hyper-parameters that
+have strong impact on the predictive performance, including α of the proposal distribution Qα(w)
+for BlackOut and NCE, and additionally for NCE, the partition function Z. We pay an equal amount
+of effort to tune these hyper-parameters for BlackOut and NCE on the validation set as number of
+samples increases.
+
+Figure 2 shows the perplexity reduction as a function of number of samples K under two different
+vocabulary settings: (a) a full vocabulary of 3,720 words, and (b) using the most frequent 2,065
+words as vocabulary. The latter is a common approach used in practice to accelerate RNNLM
+computation by using RNNLM to predict only the most frequent words and handling the rest using
+an n-gram model (Schwenk & Gauvain, 2005). We will see similar vocabulary settings when we
+evaluate BlackOut on the large scale one billion word benchmark.
+
+As can be seen, when the size of the samples increases, in general both BlackOut and NCE improve
+their prediction accuracy under the two vocabulary settings, and even with only 2 samples both al-
+gorithms still converge to reasonable solutions. BlackOut can utilize samples much more effectively
+than NCE as manifested by the signiﬁcantly lower perplexities achieved by BlackOut, especially
+when number of samples is small; Given about 20-50 samples, BlackOut and NCE reach similar
+perplexities as the exact softmax, which is expensive to train as it requires to evaluate all the words
+in the vocabularies. When the vocabulary size is 2,065, BlackOut achieves even better perplexity
+than that of the exact softmax. This is possible since BlackOut does stochastic sampling at each
+training example and uses the full softmax output layer in prediction; this is similar to DropOut that
+is routinely used in input layer and/or hidden layers of deep neural networks (Srivastava et al., 2014).
+As in DropOut, BlackOut has the beneﬁt of regularization and avoids feature co-adaption and is pos-
+sibly less prone to overﬁtting. To verify this hypothesis, we evaluate the perplexities achieved on the
+training set for different algorithms and provide the results in Figure 5 at Appendix B. As can been
+seen, the exact softmax indeed overﬁts to the training set and reaches lower training perplexities
+than NCE and BlackOut.
+
+5http://www.rnnlm.org/
+6https://code.google.com/p/1-billion-word-language-modeling-benchmark/
+
+7
+
+Published as a conference paper at ICLR 2016
+
+Figure 2: Test perplexity evolution as a function of number of samples K (a) with a full vocabulary
+of 3,720 words, and (b) with the most frequent 2,065 words in vocabulary. The experiments are
+executed on the RNNLMs with 16 hidden units.
+
+Next we compare the convergence rates of BlackOut and NCE when training the RNNLMs with 16
+hidden units for a full vocabulary of 3,720 words. Figures 3(a) and 3(b) plot the learning curves of
+BlackOut and NCE when 10 samples or 50 samples are used in training, respectively. The ﬁgure
+shows that BlackOut enjoys a much faster convergence rate than NCE, especially when number of
+samples is small (Figure 3(a)); but this advantage gets smaller when number of samples increases
+(Figure 3(b)). We also observed similar behavior when we evaluated BlackOut and NCE on the
+large scale one billion word benchmark.
+
+Figure 3: The learning curves of BlackOut and NCE when training the RNNLMs with 16 hidden
+units with (a) 10 samples, and (b) 50 samples.
+
+4.2 RESULTS ON ONE BILLION WORD BENCHMARK
+
+We follow the experiments from Williams et al. (2015) and Le et al. (2015) and compare the perfor-
+mance of BlackOut with the state-of-the-art results provided by them. While we evaluated Black-
+Out on a dual-socket 28-core Intel R(cid:13)Xeon R(cid:13)Haswell machine, Williams et al. (2015) implemented
+RNNLM with the NCE approximation on NVIDIA GTX Titan GPUs, and Le et al. (2015) executed
+an array of recurrent networks, including deep RNN and LSTM, without approximation on a CPU
+cluster. Besides the time-to-solution comparison, these published results enable us to cross-check
+the predictive performance of BlackOut with another implementation of NCE or with other compet-
+itive network architectures.
+
+4.2.1 WHEN VOCABULARY SIZE IS 64K
+
+Following the experiments in Williams et al. (2015), we evaluate the performance of BlackOut on
+a vocabulary of 64K most frequent words. This is similar to the scenario in Figure 2(b) where the
+
+8
+
+Published as a conference paper at ICLR 2016
+
+most frequent words are kept in vocabulary and the rest rare words are mapped to a special <unk>
+token. We ﬁrst study the importance of α of the proposal distribution Qα(w) and the discrimina-
+tive training (6) as proposed in BlackOut. As we discussed in Sec. 2, when α = 0, the proposal
+distribution Qα(w) degenerates to a uniform distribution over all the words in the vocabulary, and
+when α = 1, we recover the unigram distribution. Thus, we evaluate the impact of α in the range
+of [0, 1]. Figure 4(a) shows the evolution of test perplexity as a function of α for the RNNLMs with
+256 hidden units. As can be seen, α has a signiﬁcant impact on the prediction accuracy. The com-
+monly used uniform distribution (when α = 0) and unigram distribution (when α = 1) often yield
+sub-optimal solutions. For the dataset and experiment considered, α = 0.4 gives the best perplexity
+(consistent on holdout set and test set). We therefore use α = 0.4 in the experiments that follow.
+The number of samples used is 500, which is about 0.8% of the vocabulary size.
+
+Figure 4: (a) The impact of α evaluated when 256 hidden units are used; (b) The learning curves of
+maximum likelihood and discriminative training when 512 hidden units are used.
+
+Figure 4(b) demonstrates the impact of discriminative training (6) over the maximum likelihood
+training (the ﬁrst term of Eq. 6) on the RNNLMs with 512 hidden units using two different α’s. In
+general, we observe 1-3 points of perplexity reduction due to discriminative training over traditional
+maximum likelihood training.
+
+Finally, we evaluate the scalability of BlackOut when number of hidden units increases. As the
+dataset is large, we observed that the performance of RNNLM depends on the size of the hidden
+layer: they perform better as the size of the hidden layer gets larger. As a truncated 64K word
+vocabulary is used, we interpolate the RNNLM scores with a full size 5-gram to ﬁll in rare word
+probabilities (Schwenk & Gauvain, 2005; Park et al., 2010). We report the interpolated perplexities
+BlackOut achieved and compare them with the results from Williams et al. (2015) in Table 1. As can
+be seen, BlackOut reaches lower perplexities than those reported in Williams et al. (2015) within
+comparable time frames (often 10%-40% faster). We achieved a perplexity of 42.0 when the hidden
+layer size is 4096. To the best of our knowledge, this is the lowest perplexity reported on this
+benchmark.
+
+Table 1: Performance on the one billion word benchmark by interpolating RNNLM on a 64K word
+vocabulary with a full-size KN 5-gram LM.
+
+Model
+
+KN 5-gram
+RNN-128 + KN 5-gram
+RNN-256 + KN 5-gram
+RNN-512 + KN 5-gram
+RNN-1024 + KN 5-gram
+RNN-2048 + KN 5-gram
+RNN-4096 + KN 5-gram
+1Data from Table 1 of Williams et al. (2015).
+
+#Params
+[millions]
+1,748
+1,764
+1,781
+1,814
+1,880
+2,014
+2,289
+
+Test Perplexity
+Published1 BlackOut
+66.95
+
+Time to Solution
+Published1 BlackOut
+45m
+
+59.0
+55.1
+51.5
+47.6
+43.9
+42.0
+
+6h
+16h
+1d2h
+2d2h
+4d7h
+14d5h
+
+9h
+14h
+1d
+1d14h
+2d15h
+10d
+
+60.8
+57.3
+53.2
+48.9
+45.2
+42.4
+
+9
+
+Published as a conference paper at ICLR 2016
+
+4.2.2 WHEN VOCABULARY SIZE IS 1M
+
+In the ﬁnal set of experiments, we evaluate the performance of BlackOut with a very large vocabulary
+of 1,000,000 words, and the results are provided in Table 2. This is the largest vocabulary used on
+this benchmark that we could ﬁnd in existing literature. We consider the RNNLM with 1,024 hidden
+units (about 2 billion parameters) and 2,048 hidden units (about 4.1 billion parameters) and compare
+their test perplexities with the results from Le et al. (2015). We use 2,000 samples, 0.2% of the
+vocabulary size, for BlackOut training with α = 0.1. Comparing to the experiments with the 64K
+word vocabulary, a much smaller α is used here since the sampling rate (0.2%) is much lower than
+that is used (0.8%) when the vocabulary size is 64K, and a smaller α strikes a better balance between
+sample coverage per training example and convergence rate. In contrast, NCE with the same setting
+converges very slowly (similar to Figure 3(a)) and couldn’t reach a competitive perplexity within
+the time frame considered, and its results are not reported here.
+
+As the standard RNN/LSTM algorithms (without approximation) are used in Le et al. (2015), a
+cluster of 32 CPU machines (at least 20 cores each) are used to train the models for about 60
+hours. BlackOut enables us to train this large model using a single CPU machine for 175 hours.
+Since different model architectures are used in the experiments (deep RNN/LSTM vs. standard
+RNNLM), the direct comparison of test perplexity isn’t very meaningful. However, this experiment
+demonstrates that even though our largest model is about 2-3 times larger than the models evaluated
+in Le et al. (2015), BlackOut, along with a few other optimization techniques, make this large scale
+learning problem still feasible on a single box machine without using GPUs or CPU clusters.
+
+Table 2: Performance on the one billion word benchmark with a vocabulary of 1,000,000 words.
+Single model (RNN/LSTM-only) perplexities are reported; no interpolation is applied to any models.
+
+Results from
+Le et al. (2015)
+60 hours
+32 machines
+
+Model
+LSTM (512 units)
+IRNN (4 layers, 512 units)
+IRNN (1 layer, 1024 units + 512 linear units)
+RNN (4 layers, 512 tanh units)
+RNN (1 layer, 1024 tanh units + 512 linear units)
+RNN (1 layer, 1024 sigmoid units)
+175 hours, 1 machine RNN (1 layer, 2048 sigmoid units)
+
+Our Results
+
+Perplexity
+68.8
+69.4
+70.2
+71.8
+72.5
+78.4
+68.3
+
+Last, we collect all the state of the art results we are aware of on this benchmark and summarize
+them in Table 3. Since all the models are the interpolated ones, we interpolate our best RNN model7
+from Table 2 with the KN 5-gram model and achieve a perplexity score of 47.3. Again, different
+papers provide their best models trained with different architectures and vocabulary settings. Hence,
+an absolutely fair comparison isn’t possible. Regardless of these discrepancies, our models, within
+different groups of vocabulary settings, are very competitive in terms of prediction accuracy and
+model size.
+
+Table 3: Comparison with the state of the art results reported on the one billion word benchmark.
+
+Model
+
+RNN-1024 (full vocab) + MaxEnt1
+RNN-2048 (full vocab) + KN 5-gram2
+RNN-1024 (full vocab) + MaxEnt + 3 models1
+RNN-4096 (64K vocab) + KN 5-gram3
+RNN-4096 (64K vocab) + KN 5-gram2
+1Data from Chelba et al. (2014); 2Our results; 3Data from Williams et al. (2015).
+
+#Params [billions]
+20
+5.0
+42.9
+2.3
+2.3
+
+Test Perplexity
+51.3
+47.3
+43.8
+42.4
+42.0
+
+7To be consistent with the benchmark in Chelba et al. (2014), we retrained it with the full-size vocabulary
+
+of about 0.8M words.
+
+10
+
+Published as a conference paper at ICLR 2016
+
+5 CONCLUSION
+
+We proposed BlackOut, a sampling-based approximation, to train RNNLMs with very large vocabu-
+laries (e.g., 1 million). We established its connections to importance sampling and noise contrastive
+estimation (NCE), and demonstrated its stability, sample efﬁciency and rate of convergence on the
+recently released one billion word language modeling benchmark. We achieved the lowest reported
+perplexity on this benchmark without using GPUs or CPU clusters.
+
+As for future extensions, our plans include exploring other proposal distributions Q(w), and theo-
+retical properties of the generalization property and sample complexity bounds for BlackOut. We
+will also investigate a multi-machine distributed implementation.
+
+We would like to thank Oriol Vinyals, Andriy Mnih and the anonymous reviewers for their excellent
+comments and suggestions, which helped improve the quality of this paper.
+
+ACKNOWLEDGMENTS
+
+REFERENCES
+
+Andreas, Jacob and Klein, Dan. When and why are log-linear models self-normalizing? In Proceed-
+ings of the Annual Meeting of the North American Chapter of the Association for Computational
+Linguistics, 2014.
+
+Andreas, Jacob, Rabinovich, Maxim, Klein, Dan, and Jordan, Michael I. On the accuracy of self-
+
+normalized log-linear models. In NIPS, 2015.
+
+Bengio, Yoshua and Sen´ecal, Jean-S´ebastien. Quick training of probabilistic neural nets by impor-
+
+tance sampling. In AISTATS, 2003.
+
+Bengio, Yoshua and Sen´ecal, Jean-S´ebastien. Adaptive importance sampling to accelerate training
+of a neural probabilistic language model. In IEEE Transactions on Neural Networks, volume 19,
+pp. 713–722, 2008.
+
+Bengio, Yoshua, Ducharme, Rjean, and Vincent, Pascal. A neural probabilistic language model. In
+
+NIPS, pp. 932–938, 2001.
+
+Bengio, Yoshua, Boulanger-Lewandowski, Nicolas, and Pascanu, Razvan. Advances in optimizing
+
+recurrent networks. In ICASSP, pp. 8624–8628, 2013.
+
+Chelba, Ciprian, Mikolov, Tomas, Schuster, Mike, Ge, Qi, Brants, Thorsten, Koehn, Phillipp, and
+Robinson, Tony. One billion word benchmark for measuring progress in statistical language
+modeling. In INTERSPEECH, pp. 2635–2639, 2014.
+
+Chen, Xie, Wang, Yongqiang, Liu, Xunying, Gales, Mark JF, and Woodland, Philip C. Efﬁcient
+gpu-based training of recurrent neural network language models using spliced sentence bunch. In
+INTERSPEECH, 2014.
+
+Chen, Xie, Liu, Xunying, Gales, Mark JF, and Woodland, Philip C. Recurrent neural network
+In ICASSP,
+
+language model training with noise contrastive estimation for speech recognition.
+2015.
+
+Devlin, Jacob, Zbib, Rabih, Huang, Zhongqiang, Lamar, Thomas, Schwartz, Richard, and Makhoul,
+John. Fast and robust neural network joint models for statistical machine translation. In ACL,
+2014.
+
+Gutmann, Michael U. and Hyv¨arinen, Aapo. Noise-contrastive estimation of unnormalized statisti-
+
+cal models, with applications to natural image statistics. JMLR, 13:307–361, 2012.
+
+Hinton, Geoffrey. Lecture 6.5-rmsprop: Divide the gradient by a running average of its recent
+
+magnitude. COURSERA: Neural Networks for Machine Learning, 2012.
+
+11
+
+Published as a conference paper at ICLR 2016
+
+Jean, Sbastien, Cho, Kyunghyun, Memisevic, Roland, and Bengio, Yoshua. On using very large
+
+target vocabulary for neural machine translation. In ACL, 2015.
+
+Le, Hai-Son, Oparin, Ilya, Allauzen, Alexandre, Gauvain, Jean-Luc, and Yvon, Franc¸ois. Structured
+
+output layer neural network language model. In ICASSP, pp. 5524–5527, 2011.
+
+Le, Quoc V., Jaitly, Navdeep, and Hinton, Geoffrey. A simple way to initialize recurrent networks
+
+of rectiﬁed linear units. arXiv preprint arxiv:1504.00941, 2015.
+
+Mikolov, Tomas, Karaﬁ´at, Martin, Burget, Luk´as, Cernock´y, Jan, and Khudanpur, Sanjeev. Recur-
+
+rent neural network based language model. In INTERSPEECH, pp. 1045–1048, 2010.
+
+Mikolov, Tomas, Deoras, Anoop, Povey, Dan, Burget, Lukar, and Cernocky, Jan Honza. Strategies
+for training large scale neural network language models. IEEE Automatic Speech Recognition
+and Understanding Workshop, 2011.
+
+Mikolov, Tomas, Sutskever, Ilya, Chen, Kai, Corrado, Greg, and Dean, Jeffrey. Distributed rep-
+resentations of words and phrases and their compositionality. In Burges, Chris, Bottou, Leon,
+Welling, Max, Ghahramani, Zoubin, and Weinberger, Kilian (eds.), Advances in Neural Informa-
+tion Processing Systems 26, 2013.
+
+Mnih, Andriy and Hinton, Geoffrey E. A scalable hierarchical distributed language model. In NIPS,
+
+volume 21, pp. 1081–1088, 2008.
+
+Mnih, Andriy and Teh, Yee Whye. A fast and simple algorithm for training neural probabilistic
+language models. In Proceedings of the International Conference on Machine Learning, 2012.
+
+Morin, Frederic and Bengio, Yoshua. Hierarchical probabilistic neural network language model. In
+Proceedings of the international workshop on artiﬁcial intelligence and statistics, pp. 246–252.
+Citeseer, 2005.
+
+Park, Junho, Liu, Xunying, Gales, Mark J. F., and Woodland, P. C. Improved neural network based
+
+language modelling and adaptation. In Proc. ISCA Interspeech, pp. 10411044, 2010.
+
+Rumelhart, David E., Hinton, Geoffrey E., and Williams, Ronald J. Neurocomputing: Foundations
+of research. chapter Learning Representations by Back-propagating Errors, pp. 696–699. MIT
+Press, Cambridge, MA, USA, 1988.
+
+Schwenk, Holger and Gauvain, Jean-Luc. Training neural network language models on very large
+corpora. In Proceedings of Human Language Technology Conference and Conference on Empir-
+ical Methods in Natural Language Processing, pp. 201–208, 2005.
+
+Shrivastava, Anshumali and Li, Ping. Asymmetric lsh (alsh) for sublinear time maximum inner
+
+product search (mips). In NIPS, volume 27, pp. 2321–2329, 2014.
+
+Srivastava, Nitish, Hinton, Geoffrey, Krizhevsky, Alex, Sutskever, Ilya, and Salakhutdinov, Ruslan.
+Dropout: A simple way to prevent neural networks from overﬁtting. JMLR, 15:1929–1958, 2014.
+
+Sundermeyer, Martin, Oparin, Ilya, Gauvain, Jean-Luc, Freiberg, Ben, Schl
+
+”uter, Ralf, and Ney, Hermann. Comparison of feedforward and recurrent neural network lan-
+guage models. In ICASSP, pp. 8430–8434, 2013.
+
+Vijayanarasimhan, Sudheendra, Shlens, Jonathon, Monga, Rajat, and Yagnik, Jay. Deep networks
+
+with large output spaces. arXiv preprint arxiv:1412.7479, 2014.
+
+Vincent, Pascal, de Brbisson, Alexandre, and Bouthillier, Xavier. Efﬁcient exact gradient update for
+
+training deep networks with very large sparse targets. In NIPS, 2015.
+
+Williams, Will, Prasad, Niranjani, Mrva, David, Ash, Tom, and Robinson, Tony. Scaling recurrent
+
+neural network language models. In ICASSP, 2015.
+
+12
+
+Published as a conference paper at ICLR 2016
+
+BlackOut: Speeding up Recurrent Neural Network Language
+Models with Very Large Vocabularies
+(Supplementary Material)
+
+A NOISE DISTRIBUTION pn(wi|s)
+
+Theorem 1 The noise distribution function pn(wi|s) deﬁned in Eq. 13 is a probability distribution
+function under the expectation that K samples in SK are drawn from Q(w) randomly, SK ∼ Q(w),
+such that ESK ∼Q(w)(pn(wi|s)) = Q(wi) and ESK ∼Q(w)((cid:80)V
+
+i=1 pn(wi|s)) = 1.
+
+Proof
+
+ESK ∼Q(w)(pn(wi|s)) = ESK ∼Q(w)
+
+
+
+pθ(wj|s)
+
+
+
+
+
+
+
+1
+K
+
+qj
+qi
+
+(cid:88)
+
+j∈SK
+
+
+=
+
+Q(wi)
+K
+
+ESK ∼Q(w)
+
+
+
+(cid:88)
+
+j∈SK
+
+pθ(wj|s)
+Q(wj)
+
+
+
+
+
+Q(wi)
+K
+
+
+
+
+
+(cid:88)
+
+(cid:89)
+
+Q(wk) ·
+
+wk,∀k∈SK
+
+k∈SK
+
+(cid:88)
+
+j∈SK
+
+pθ(wj|s)
+Q(wj)
+
+
+
+
+
+=
+
+=
+
+Q(wi)
+K
+
+K
+
+= Q(wi)
+
+ESK ∼Q(w)
+
+pn(wi|s)
+
+=
+
+ESK ∼Q(w) (pn(wi|s)) =
+
+(Q(wi)) = 1
+
+(cid:32) V
+
+(cid:88)
+
+i=1
+
+(cid:33)
+
+V
+(cid:88)
+
+i=1
+
+V
+(cid:88)
+
+i=1
+
+B PERPLEXITIES ON TRAINING SET
+
+Figure 5: Training perplexity evolution as a function of number of samples K (a) with a full vocab-
+ulary of 3,720 words, and (b) with the most frequent 2,065 words in vocabulary. The experiments
+are executed on the RNNLMs with 16 hidden units.
+
+13
+
+Published as a conference paper at ICLR 2016
+
+C SUBNET UPDATE WITH APPROXIMATED RMSPROP
+
+RMSProp (Hinton, 2012) is an adaptive learning rate method that has found much success in prac-
+tice. Instead of using a single learning rate to all the model parameters in Ω, RMSProp dedicates
+a learning rate for each model parameter and normalizes the gradient by an exponential moving
+average of the magnitude of the gradient:
+
+where β ∈ (0, 1) denotes the decay rate. The model update at time step t is then given by
+
+vt = βvt−1 + (1 − β)(∇J)2
+
+θt = θt−1 + (cid:15)
+
+∇J(θt−1)
+√
+vt + λ
+
+where (cid:15) is the learning rate and λ is a damping factor, e.g., λ = 10−6. While RMSProp is one of
+the most effective learning rate scheduling techniques, it requires a large amount of memory to store
+per-parameter vt in addition to model parameter Ω and their gradients.
+
+It is expensive to access and update large models with billions of parameters. Fortunately, due to
+the 1-of-V encoding at input layer and the BlackOut sampling at output layer, the model update on
+Win and Wout is sparse, e.g., only the model parameters corresponding to input/output words and
+the samples in SK are to be updated.8 For Eq. 16, however, even a model parameter is not involved
+in the current training, its vt value still needs to be updated by vt = βvt−1 since its (∇J)2 = 0.
+Ignoring this update has detrimental effect on the predictive performance; in our experiments, we
+observed 5 − 10 point perplexity loss if we ignore this update completely.
+
+We resort to an approximation to vt = βvt−1. Given pu(w) is the probability of a word w being
+selected for update, the number of time steps elapsed when it is successfully selected follows a
+geometric distribution with a success rate pu(w), whose mean value is 1/pu(w). Assume that an
+input/output word is selected according to the unigram distribution puni(w) and the samples in SK
+are drawn from Qα(w), Eq. 16 can be approximated by
+
+vt ≈ β1/pu vt−n + (1 − β)(∇J)2
+
+with
+
+(cid:26)puni(w) × B × T
+
+pu(w) =
+
+puni(w) × B × T + Qα(w) × K × T
+
+for word w at input layer
+for word w at output layer,
+
+where B is the mini-batch size and T is the BPTT block size. Now we can only update the model
+parameters, typically a tiny fraction of Ω, that are really involved in the current training, and thus
+speed up the RNNLM training further.
+
+(16)
+
+(17)
+
+(18)
+
+(19)
+
+8The parameter update on Wr is still dense, but its size is several orders of magnitude smaller than those of
+
+Win and Wout.
+
+14
+
+6
+1
+0
+2
+ 
+r
+a
+
+M
+ 
+1
+3
+ 
+ 
+]
+
+G
+L
+.
+s
+c
+[
+ 
+ 
+7
+v
+9
+0
+9
+6
+0
+.
+1
+1
+5
+1
+:
+v
+i
+X
+r
+a
+
+Published as a conference paper at ICLR 2016
+
+BLACKOUT: SPEEDING UP RECURRENT NEURAL NET-
+WORK LANGUAGE MODELS WITH VERY LARGE VO-
+CABULARIES
+
+Shihao Ji
+Parallel Computing Lab, Intel
+shihao.ji@intel.com
+
+S. V. N. Vishwanathan
+Univ. of California, Santa Cruz
+vishy@ucsc.edu
+
+Nadathur Satish, Michael J. Anderson & Pradeep Dubey
+Parallel Computing Lab, Intel
+{nadathur.rajagopalan.satish,michael.j.anderson,pradeep.dubey}@intel.com
+
+ABSTRACT
+
+We propose BlackOut, an approximation algorithm to efﬁciently train massive
+recurrent neural network language models (RNNLMs) with million word vocab-
+ularies. BlackOut is motivated by using a discriminative loss, and we describe
+a weighted sampling strategy which signiﬁcantly reduces computation while im-
+proving stability, sample efﬁciency, and rate of convergence. One way to under-
+stand BlackOut is to view it as an extension of the DropOut strategy to the out-
+put layer, wherein we use a discriminative training loss and a weighted sampling
+scheme. We also establish close connections between BlackOut, importance sam-
+pling, and noise contrastive estimation (NCE). Our experiments, on the recently
+released one billion word language modeling benchmark, demonstrate scalabil-
+ity and accuracy of BlackOut; we outperform the state-of-the art, and achieve
+the lowest perplexity scores on this dataset. Moreover, unlike other established
+methods which typically require GPUs or CPU clusters, we show that a carefully
+implemented version of BlackOut requires only 1-10 days on a single machine to
+train a RNNLM with a million word vocabulary and billions of parameters on one
+billion words. Although we describe BlackOut in the context of RNNLM training,
+it can be used to any networks with large softmax output layers.
+
+1
+
+INTRODUCTION
+
+Statistical language models are a crucial component of speech recognition, machine translation and
+information retrieval systems. In order to handle the data sparsity problem associated with tradi-
+tional n-gram language models (LMs), neural network language models (NNLMs) (Bengio et al.,
+2001) represent the history context in a continuous vector space that can be learned towards error
+rate reduction by sharing data among similar contexts. Instead of using ﬁxed number of words to
+represent context, recurrent neural network language models (RNNLMs) (Mikolov et al., 2010) use
+a recurrent hidden layer to represent longer and variable length histories. RNNLMs signiﬁcantly
+outperform traditional n-gram LMs, and are therefore becoming an increasingly popular choice for
+practitioners (Mikolov et al., 2010; Sundermeyer et al., 2013; Devlin et al., 2014).
+
+Consider a standard RNNLM, depicted in Figure 1. The network has an input layer x, a hidden
+layer s (also called context layer or state) with a recurrent connection to itself, and an output layer
+y. Typically, at time step t the network is fed as input xt ∈ RV , where V denotes the vocabulary
+size, and st−1 ∈ Rh, the previous state. It produces a hidden state st ∈ Rh, where h is the size
+of the hidden layer, which in turn is transformed to the output yt ∈ RV . Different layers are fully
+connected, with the weight matrices denoted by Ω = {W V ×h
+
+, W V ×h
+
+, W h×h
+r
+
+in
+
+out }.
+
+For language modeling applications, the input xt is a sparse vector of a 1-of-V (or one-hot) encoding
+with the element corresponding to the input word wt−1 being 1 and the rest of components of xt set
+to 0; the state of the network st is a dense vector, summarizing the history context {wt−1, · · · , w0}
+
+1
+
+Published as a conference paper at ICLR 2016
+
+Figure 1: The network architecture of a standard RNNLM and its unrolled version for an example
+input sentence: <s> A cat is sitting on a sofa </s>.
+
+preceding the output word wt; and the output yt is a dense vector, with the i-th element denoting
+the probability of the next word being wi, that is, p(wi|wt−1, · · · , w0), or more concisely, p(wi|st).
+The input to output transformation occurs via:
+
+st = σ(W T
+yt = f (Woutst),
+
+inxt + Wrst−1)
+
+(1)
+(2)
+
+where σ(v) = 1/(1 + exp(−v)) is the sigmoid activation function, and f (·) is the softmax function
+f (ui) := exp(ui)/ (cid:80)V
+
+j=1 exp(uj).
+
+One can immediately see that if xt uses a 1-of-V encoding, then the computations in equation (1)
+are relatively inexpensive (typically h is of the order of a few thousand, and the computations are
+O(h2)), while the computations in equation (2) are expensive (typically V is of the order of a million,
+and the computations are O(V h)). Similarly, back propagating the gradients from the output layer
+to the hidden layer is expensive. Consequently, the training times for some of the largest models
+reported in literature are of the order of weeks (Mikolov et al., 2011; Williams et al., 2015).
+
+In this paper, we ask the following question: Can we design an approximate training scheme for
+RNNLM which will improve on the state of the art models, while using signiﬁcantly less compu-
+tational resources? Towards this end, we propose BlackOut an approximation algorithm to efﬁ-
+ciently train massive RNNLMs with million word vocabularies. BlackOut is motivated by using a
+discriminative loss, and we describe a weighted sampling strategy which signiﬁcantly reduces com-
+putation while improving stability, sample efﬁciency, and rate of convergence. We also establish
+close connections between BlackOut, importance sampling, and noise contrastive estimation (NCE)
+(Gutmann & Hyv¨arinen, 2012; Mnih & Teh, 2012), and demonstrate that BlackOut mitigates some
+of the limitations of both previous methods. Our experiments, on the recently released one billion
+word language modeling benchmark (Chelba et al., 2014), demonstrate scalability and accuracy of
+BlackOut; we outperform the state-of-the art, achieving the lowest perplexity scores on this dataset.
+Moreover, unlike other established methods which typically require GPUs or CPU clusters, we show
+that a carefully implemented version of BlackOut requires only 1-10 days on a single CPU machine
+to train a RNNLM with a million word vocabulary and billions of parameters on one billion words.
+
+One way to understand BlackOut is to view it as an extension of the DropOut strategy (Srivastava
+et al., 2014) to the output layer, wherein we use a discriminative training loss and a weighted sam-
+pling scheme. The connection to DropOut is mainly from the way they operate in model training
+and model evaluation. Similar to DropOut, in BlackOut training a subset of output layer is sampled
+and trained at each training batch and when evaluating, the full network participates. Also, like
+DropOut, a regularization technique, our experiments show that the models trained by BlackOut are
+less prone to overﬁtting. A primary difference between them is that DropOut is routinely used at
+input and/or hidden layers of deep neural networks, while BlackOut only operates at output layer.
+We chose the name BlackOut in light of the similarities between our method and DropOut, and the
+complementary they offer to train deep neural networks.
+
+2
+
+Published as a conference paper at ICLR 2016
+
+2 BLACKOUT: A SAMPLING-BASED APPROXIMATION
+
+We will primarily focus on estimation of the matrix Wout. To simplify notation, in the sequel we
+will use θ to denote Wout and θj to denote the j-th row of Wout. Moreover, let (cid:104)·, ·(cid:105) denote the dot
+product between two vectors. Given these notations, one can rewrite equation (2) as
+
+pθ (wi|s) =
+
+exp ((cid:104)θi, s(cid:105))
+j=1 exp ((cid:104)θj, s(cid:105))
+
+(cid:80)V
+
+∀i ∈ {1, · · · , V }.
+
+(3)
+
+RNNLMs with a softmax output layer are typically trained using cross-entropy as the loss function,
+which is equivalent to maximum likelihood (ML) estimation, that is, to ﬁnd the model parameter θ
+which maximizes the log-likelihood of target word wi, given a history context s:
+J s
+ml(θ) = log pθ(wi|s),
+
+(4)
+
+whose gradient is given by
+
+∂J s
+
+ml(θ)
+∂θ
+
+=
+
+=
+
+∂
+∂θ
+
+∂
+∂θ
+
+(cid:104)θi, s(cid:105) −
+
+pθ (wj|s)
+
+(cid:104)θj, s(cid:105) ,
+
+V
+(cid:88)
+
+j=1
+
+∂
+∂θ
+
+(cid:104)θi, s(cid:105) − Epθ(w|s)
+
+(cid:20) ∂
+∂θ
+
+(cid:21)
+(cid:104)θw, s(cid:105)
+
+.
+
+(5)
+
+(6)
+
+(7)
+
+The gradient of log-likelihood is expensive to evaluate because (1) the cost of computing pθ(wj|s)
+is O(V h) and (2) the summation above takes time linear in the vocabulary size O(V ).
+
+To alleviate the computational bottleneck of computing the gradient (5), we propose to use the
+following discriminative objective function for training RNNLM:
+
+J s
+disc(θ) = log ˜pθ(wi|s) +
+
+log(1 − ˜pθ(wj|s)),
+
+(cid:88)
+
+j∈SK
+
+where SK is a set of indices of K words drawn from the vocabulary, and i /∈ SK. Typically, K is a
+tiny fraction of V , and in our experiments we use K ≈ V /200. To generate SK we will sample K
+words from the vocabulary using an easy to sample distribution Q(w), and set qj := 1
+Q(wj ) in order
+to compute
+
+˜pθ(wi|s) =
+
+qi exp ((cid:104)θi, s(cid:105)) + (cid:80)
+
+j∈SK
+
+qj exp ((cid:104)θj, s(cid:105))
+
+.
+
+qi exp ((cid:104)θi, s(cid:105))
+
+Equation 6 is the cost function of a standard logistic regression classiﬁer that discriminates one
+positive sample wi from K negative samples wj, ∀j ∈ SK. The ﬁrst term in (6) corresponds to the
+traditional maximum likelihood training, and the second term explicitly pushes down the probability
+of negative samples in addition to the implicit shrinkage enforced by the denominator of (7). In our
+experiments, we found the discriminative training (6) outperforms the maximum likelihood training
+(the ﬁrst term of Eq. 6) in all the cases, with varying degree of accuracy improvement depending on
+K.
+
+The weighted softmax function (7) can be considered as a stochastic version of the standard soft-
+max (3) on a different base measure. While the standard softmax (3) uses a base measure which
+gives equal weights to all words, and has support over the entire vocabulary, the base measure used
+in (7) has support only on K + 1 words: the target word wi and K samples from Q(w). The noise
+portion of (7) has the motivation from the sampling scheme, and the qi term for target word wi is
+introduced mainly to balance the contributions from target word and noisy sample words.1 Other
+justiﬁcations are discussed in Sec. 2.1 and Sec. 2.2, where we establish close connections between
+BlackOut, importance sampling, and noise contrastive estimation.
+
+Due to the weighted sampling property of BlackOut, some words might be sampled multiple times
+according to the proposal distribution Q(w), and thus their indices may appear multiple times in
+SK. As wi is the target word, which is assumed to be included in computing (7), we therefore set
+i /∈ SK explicitly.
+
+1It’s shown empirically in our experiments that setting qi = 1 in (7) hurts the accuracy signiﬁcantly.
+
+3
+
+Published as a conference paper at ICLR 2016
+
+
+
+(8)
+
+(9)
+
+Substituting (7) into (6) and letting uj = (cid:104)θj, s(cid:105) and ˜pj = ˜pθ (wj|s), we have
+
+J s
+disc(θ) ∝ ui − (K + 1) log
+
+(cid:88)
+
+qk exp(uk) +
+
+(cid:88)
+
+log
+
+
+
+(cid:88)
+
+qk exp(uk) − qj exp(uj)
+
+ .
+
+k∈{i}∪SK
+
+j∈SK
+
+k∈{i}∪SK
+
+
+
+Then taking derivatives with respect to uj, ∀j ∈ {i} ∪ SK, yields
+
+∂J s
+
+disc(θ)
+∂ui
+
+∂J s
+
+disc(θ)
+∂uj
+
+= 1 −
+
+K + 1 −
+
+
+
+
+
+(cid:88)
+
+j∈SK
+
+1
+1 − ˜pj
+
+
+
+ ˜pi
+
+
+
+(cid:88)
+
+1
+1 − ˜pk
+
+k∈SK \{j}
+
+= −
+
+K + 1 −
+
+ ˜pj,
+
+for j ∈ SK.
+
+(10)
+
+By the chain rule of derivatives, we can propagate the errors backward to previous layers and com-
+pute the gradients with respect to the full model parameters Ω. In contrast to Eq. 5, Eqs. 9 and 10
+are much cheaper to evaluate as (1) the cost of computing ˜pj is O(Kh) and (2) the summation takes
+O(K), hence roughly a V /K times of speed-up.
+
+Next we turn our attention to the proposal distribution Q(w). In the past, a uniform distribution
+or the unigram distribution have been advocated as promising candidates for sampling distributions
+(Bengio & Sen´ecal, 2003; Jean et al., 2015; Bengio & Sen´ecal, 2008; Mnih & Teh, 2012). As we
+will see in the experiments, neither one is suitable for a wide range of datasets, and we ﬁnd that the
+power-raised unigram distribution of Mikolov et al. (2013) is very important in this context:
+
+Qα(w) ∝ pα
+
+uni(w), α ∈ [0, 1].
+
+(11)
+
+Note that Qα(w) is a generalization of uniform distribution (when α = 0) and unigram distribution
+(when α = 1). The rationale behind our choice is that by tuning α, one can interpolate smoothly
+between sampling popular words, as advocated by the unigram distribution, and sampling all words
+equally. The best α is typically dataset and/or problem dependent; in our experiments, we use a
+holdout set to ﬁnd the best value of α. It’s worth noting that this sampling strategy has been used by
+Mikolov et al. (2013) in a similar context of word embedding, while here we explore its effect in the
+language modeling applications.
+
+After BlackOut training, we evaluate the predictive performance of RNNLM by perplexity. To cal-
+culate perplexity, we explicitly normalize the output distribution by using the exact softmax func-
+tion (3). This is similar to DropOut (Srivastava et al., 2014), wherein a subset of network is sampled
+and trained at each training batch and when evaluating, the full network participates.
+
+2.1 CONNECTION TO IMPORTANCE SAMPLING
+
+BlackOut has a close connection to importance sampling (IS). To see this, differentiating the loga-
+rithm of Eq. 7 with respect to model parameter θ, we have
+
+∂
+∂θ
+
+log ˜pθ(wi|s) =
+
+(cid:104)θi, s(cid:105) −
+
+(cid:80)
+
+1
+qk exp((cid:104)θk, s(cid:105))
+
+(cid:88)
+
+j∈{i}∪SK
+
+qj exp((cid:104)θj, s(cid:105))
+
+(cid:104)θj, s(cid:105)
+
+∂
+∂θ
+
+∂
+∂θ
+
+∂
+∂θ
+
+=
+
+(cid:104)θi, s(cid:105) − E ˜pθ(w|s)
+
+k∈{i}∪SK
+(cid:20) ∂
+∂θ
+
+(cid:21)
+(cid:104)θw, s(cid:105)
+
+.
+
+(12)
+
+In contrast with Eq. 5, it shows that the weighted softmax function (7) corresponds to an IS-based
+estimator of the standard softmax (3) with a proposal distribution Q(w).
+
+Importance sampling has been applied to NNLMs with large output layers in previous works (Bengio
+& Sen´ecal, 2003; 2008; Jean et al., 2015). However, either uniform distribution or unigram distri-
+bution is used for sampling and all aforementioned works exploit the maximum likelihood learning
+of model parameter θ. By contrast, BlackOut uses a discriminative training (6) and a power-raised
+unigram distribution Qα(w) for sampling; these two changes are important to mitigate some of lim-
+itations of IS-based approaches. While an IS-based approach with a uniform proposal distribution
+
+4
+
+Published as a conference paper at ICLR 2016
+
+is very stable for training, it suffers from large bias due to the apparent divergence of the uniform
+distribution from the true data distribution pθ(w|s). On the other hand, a unigram-based IS esti-
+mate can make learning unstable due to the high variance (Bengio & Sen´ecal, 2003; 2008). Using a
+power-raised unigram distribution Qα(w) entails a better trade-off between bias and variance, and
+thus strikes a better balance between these two extremes. In addition, as we will see from the experi-
+ments, the discriminative training of BlackOut speeds up the rate of convergence over the traditional
+maximum likelihood learning.
+
+2.2 CONNECTION TO NOISE CONTRASTIVE ESTIMATION
+
+The basic idea of NCE is to transform the density estimation problem to the problem of learning
+by comparison, e.g., estimating the parameters of a binary classiﬁer that distinguishes samples from
+the data distribution pd from samples generated by a known noise distribution pn (Gutmann &
+Hyv¨arinen, 2012). In the language modeling setting, the data distribution pd will be the distribution
+pθ(w|s) of interest, and the noise distribution pn is often chosen from the ones that are easy to
+sample from and possibly close to the true data distribution (so that the classiﬁcation problem isn’t
+trivial). While Mnih & Teh (2012) uses a context-independent (unigram) noise distribution pn(w),
+BlackOut can be formulated into the NCE framework by considering a context-dependent noise
+distribution pn(w|s), estimated from K samples drawn from Q(w), by
+
+pn(wi|s) =
+
+pθ(wj|s),
+
+1
+K
+
+(cid:88)
+
+j∈SK
+
+qj
+qi
+
+(13)
+
+(14)
+
+which is a probability distribution function under the expectation that K samples are drawn from
+Q(w): SK ∼ Q(w) since ESK ∼Q(w)(pn(wi|s)) = Q(wi) and ESK ∼Q(w)((cid:80)V
+i=1 pn(wi|s)) = 1
+(See the proof in Appendix A).
+
+Similar to Gutmann & Hyv¨arinen (2012), noise samples are assumed K times more frequent than
+K+1 pθ(w|s)
+data samples so that data points are generated from a mixture of two distributions:
+and K
+K+1 pn(w|s). Then the conditional probability of sample wi being generated from the data
+distribution is
+
+1
+
+pθ(D = 1|wi, s) =
+
+pθ(wi|s)
+pθ(wi|s) + Kpn(wi|s)
+
+.
+
+Inserting Eq. 13 into Eq. 14, we have
+
+pθ(D = 1|wi, s) =
+
+qi exp((cid:104)θi, s(cid:105))
+
+qi exp((cid:104)θi, s(cid:105)) + (cid:80)
+
+j∈SK
+
+qj exp((cid:104)θj, s(cid:105))
+
+,
+
+(15)
+
+which is exactly the weighted softmax function deﬁned in (7). Note that due to the noise distribution
+proposed in Eq. 13, the expensive denominator (or the partition function Z) of pθ(wj|s) is canceled
+out, while in Mnih & Teh (2012) the partition function Z is either treated as a free parameter to be
+learned or approximated by a constant. Mnih & Teh (2012) recommended to set Z = 1.0 in the NCE
+training. However, from our experiments, setting Z = 1.0 often leads to sub-optimal solutions2 and
+different settings of Z sometimes incur numerical instability since the log-sum-exp trick3 can not
+be used there to shift the scores of the output layer to a range that is amenable to the exponential
+function. BlackOut does not have this hyper-parameter to tune and the log-sum-exp trick still works
+for the weighted softmax function (7). Due to the discriminative training of NCE and BlackOut,
+they share the same objective function (6).
+
+We shall emphasize that according to the theory of NCE, the K samples should be sampled from the
+noise distribution pn(w|s). But in order to calculate pn(w|s), we need the K samples drawn from
+Q(w) beforehand. As an approximation, we use the same K samples drawn from Q(w) as the K
+samples from pn(w|s), and only use the expression of pn(w|s) in (13) to evaluate the noise density
+value required by Eq. 14. This approximation is accurate since ESK ∼Q(w)(pn(wi|s)) = Q(wi) as
+proved in Appendix A, and we ﬁnd empirically that it performs much better (with improved stability)
+than using a unigram noise distribution as in Mnih & Teh (2012).
+
+2Similarly, Chen et al. (2015) reported that setting ln(Z) = 9 gave them the best results.
+3https://en.wikipedia.org/wiki/LogSumExp
+
+5
+
+Published as a conference paper at ICLR 2016
+
+2.3 RELATED WORK
+
+Many approaches have been proposed to address the difﬁculty of training deep neural networks with
+large output spaces. In general, they can be categorized into four categories:
+
+• Hierarchical softmax (Morin & Bengio, 2005; Mnih & Hinton, 2008) uses a hierarchical
+binary tree representation of the output layer with the V words as its leaves. It allows ex-
+ponentially faster computation of word probabilities and their gradients, but the predictive
+performance of the resulting model is heavily dependent on the tree used, which is of-
+ten constructed heuristically. Moreover, by relaxing the constraint of a binary structure, Le
+et al. (2011) introduces a structured output layer with an arbitrary tree structure constructed
+from word clustering. All these methods speed up both the model training and evaluation
+considerably.
+
+• Sampling-based approximations select at random or heuristically a small subset of the out-
+put layer and estimate gradient only from those samples. The use of importance sampling
+in Bengio & Sen´ecal (2003; 2008); Jean et al. (2015), and the use of NCE (Gutmann &
+Hyv¨arinen, 2012) in Mnih & Teh (2012) all fall under this category, so does the more
+recent use of Locality Sensitive Hashing (LSH) techniques (Shrivastava & Li, 2014; Vi-
+jayanarasimhan et al., 2014) to select a subset of good samples. BlackOut, with close con-
+nections to importance sampling and NCE, also falls in this category. All these approaches
+only speed up the model training, while the model evaluation still remains computationally
+challenging.
+
+• Self normalization (Devlin et al., 2014) extends the cross-entropy loss function by explicitly
+encouraging the partition function of softmax to be as close to 1.0 as possible. Initially, this
+approach only speeds up the model evaluation and more recently it’s extended to facilitate
+the training as well with some theoretical guarantees (Andreas & Klein, 2014; Andreas
+et al., 2015).
+
+• Exact gradient on limited loss functions (Vincent et al., 2015) introduces an algorithmic
+approach to efﬁciently compute the exact loss, gradient update for the output weights in
+O(h2) per training example instead of O(V h). Unfortunately, it only applies to a lim-
+ited family of loss functions that includes squared error and spherical softmax, while the
+standard softmax isn’t included.
+
+As discussed in the introduction, BlackOut also shares some similarity to DropOut (Srivastava et al.,
+2014). While DropOut is often applied to input and/or hidden layers of deep neural networks to
+avoid feature co-adaptation and overﬁtting by uniform sampling, BlackOut applies to a softmax
+output layer, uses a weighted sampling, and employs a discriminative training loss. We chose the
+name BlackOut in light of the similarities between our method and DropOut, and the complementary
+they offer to train deep neural networks.
+
+3
+
+IMPLEMENTATION AND FURTHER SPEED-UP
+
+We implemented BlackOut on a standard machine with a dual-socket 28-core Intel R(cid:13)Xeon R(cid:13)4
+Haswell CPU. To achieve high throughput, we train RNNLM with Back-Propagation Through Time
+(BPTT) (Rumelhart et al., 1988) with mini-batches (Chen et al., 2014). We use RMSProp (Hinton,
+2012) for learning rate scheduling and gradient clipping (Bengio et al., 2013) to avoid the gradi-
+ent explosion issue of recurrent networks. We use the latest Intel MKL library (version 11.3.0) for
+SGEMM calls, which has improved support for tall-skinny matrix-matrix multiplications, which
+consume about 80% of the run-time of RNNLMs.
+
+It is expensive to access and update large models with billions of parameters. Fortunately, due to
+the 1-of-V encoding at input layer and the BlackOut sampling at output layer, the model update on
+Win and Wout is sparse, i.e., only the model parameters corresponding to input/output words and
+the samples in SK are updated at each training batch. However, subnet updates have to be done
+carefully due to the dependency within RMSProp updating procedure. We therefore propose an
+approximated RMSProp that enables an efﬁcient subnet update and thus speeds up the algorithm
+even further. Details can be found in Appendix C.
+
+4
+
+Intel and Xeon are trademarks of Intel Corporation in the U.S. and/or other countries.
+
+6
+
+Published as a conference paper at ICLR 2016
+
+4 EXPERIMENTS
+
+In our experiments, we ﬁrst compare BlackOut, NCE and exact softmax (without any approxima-
+tion) using a small dataset. We then evaluate the performance of BlackOut on the recently released
+one billion word language modeling benchmark (Chelba et al., 2014) with a vocabulary size of up to
+one million. We compare the performance of BlackOut on a standard CPU machine versus the state-
+of-the-arts reported in the literature that are achieved on GPUs or on clusters of CPU nodes. Our
+implementation and scripts are open sourced at https://github.com/IntelLabs/rnnlm.
+
+Corpus Models are trained and evaluated on two different corpora: a small dataset provided by
+the RNNLM Toolkit5, and the recently released one billion word language modeling benchmark6,
+which is perhaps the largest public dataset in language modeling. The small dataset has 10,000
+training sentences, with 71,350 words in total and 3,720 unique words; and the test perplexity is
+evaluated on 1,000 test sentences. The one billion word benchmark was constructed from a mono-
+lingual/English corpora; after all necessary preprocessing including de-duplication, normalization
+and tokenization, 30,301,028 sentences (about 0.8 billion words) are randomly selected for training,
+6,075 sentences are randomly selected for test and the remaining 300,613 sentences are reserved for
+future development and can be used as holdout set.
+
+4.1 RESULTS ON SMALL DATASET
+
+We evaluate BlackOut, NCE and exact softmax (without any approximation) on the small dataset
+described above. This small dataset is used so that we can train the standard RNNLM algorithm
+with exact softmax within a reasonable time frame and hence to provide a baseline of expected
+perplexity. There are many other techniques involved in the training, such as RMSProp for learning
+rate scheduling (Hinton, 2012), subnet update (Appendix C), and mini-batch splicing (Chen et al.,
+2014), etc., which can affect the perplexity signiﬁcantly. For a fair comparison, we use the same
+tricks and settings for all the algorithms, and only evaluate the impact of the different approximations
+(or no approximation) on the softmax output layer. Moreover, there are a few hyper-parameters that
+have strong impact on the predictive performance, including α of the proposal distribution Qα(w)
+for BlackOut and NCE, and additionally for NCE, the partition function Z. We pay an equal amount
+of effort to tune these hyper-parameters for BlackOut and NCE on the validation set as number of
+samples increases.
+
+Figure 2 shows the perplexity reduction as a function of number of samples K under two different
+vocabulary settings: (a) a full vocabulary of 3,720 words, and (b) using the most frequent 2,065
+words as vocabulary. The latter is a common approach used in practice to accelerate RNNLM
+computation by using RNNLM to predict only the most frequent words and handling the rest using
+an n-gram model (Schwenk & Gauvain, 2005). We will see similar vocabulary settings when we
+evaluate BlackOut on the large scale one billion word benchmark.
+
+As can be seen, when the size of the samples increases, in general both BlackOut and NCE improve
+their prediction accuracy under the two vocabulary settings, and even with only 2 samples both al-
+gorithms still converge to reasonable solutions. BlackOut can utilize samples much more effectively
+than NCE as manifested by the signiﬁcantly lower perplexities achieved by BlackOut, especially
+when number of samples is small; Given about 20-50 samples, BlackOut and NCE reach similar
+perplexities as the exact softmax, which is expensive to train as it requires to evaluate all the words
+in the vocabularies. When the vocabulary size is 2,065, BlackOut achieves even better perplexity
+than that of the exact softmax. This is possible since BlackOut does stochastic sampling at each
+training example and uses the full softmax output layer in prediction; this is similar to DropOut that
+is routinely used in input layer and/or hidden layers of deep neural networks (Srivastava et al., 2014).
+As in DropOut, BlackOut has the beneﬁt of regularization and avoids feature co-adaption and is pos-
+sibly less prone to overﬁtting. To verify this hypothesis, we evaluate the perplexities achieved on the
+training set for different algorithms and provide the results in Figure 5 at Appendix B. As can been
+seen, the exact softmax indeed overﬁts to the training set and reaches lower training perplexities
+than NCE and BlackOut.
+
+5http://www.rnnlm.org/
+6https://code.google.com/p/1-billion-word-language-modeling-benchmark/
+
+7
+
+Published as a conference paper at ICLR 2016
+
+Figure 2: Test perplexity evolution as a function of number of samples K (a) with a full vocabulary
+of 3,720 words, and (b) with the most frequent 2,065 words in vocabulary. The experiments are
+executed on the RNNLMs with 16 hidden units.
+
+Next we compare the convergence rates of BlackOut and NCE when training the RNNLMs with 16
+hidden units for a full vocabulary of 3,720 words. Figures 3(a) and 3(b) plot the learning curves of
+BlackOut and NCE when 10 samples or 50 samples are used in training, respectively. The ﬁgure
+shows that BlackOut enjoys a much faster convergence rate than NCE, especially when number of
+samples is small (Figure 3(a)); but this advantage gets smaller when number of samples increases
+(Figure 3(b)). We also observed similar behavior when we evaluated BlackOut and NCE on the
+large scale one billion word benchmark.
+
+Figure 3: The learning curves of BlackOut and NCE when training the RNNLMs with 16 hidden
+units with (a) 10 samples, and (b) 50 samples.
+
+4.2 RESULTS ON ONE BILLION WORD BENCHMARK
+
+We follow the experiments from Williams et al. (2015) and Le et al. (2015) and compare the perfor-
+mance of BlackOut with the state-of-the-art results provided by them. While we evaluated Black-
+Out on a dual-socket 28-core Intel R(cid:13)Xeon R(cid:13)Haswell machine, Williams et al. (2015) implemented
+RNNLM with the NCE approximation on NVIDIA GTX Titan GPUs, and Le et al. (2015) executed
+an array of recurrent networks, including deep RNN and LSTM, without approximation on a CPU
+cluster. Besides the time-to-solution comparison, these published results enable us to cross-check
+the predictive performance of BlackOut with another implementation of NCE or with other compet-
+itive network architectures.
+
+4.2.1 WHEN VOCABULARY SIZE IS 64K
+
+Following the experiments in Williams et al. (2015), we evaluate the performance of BlackOut on
+a vocabulary of 64K most frequent words. This is similar to the scenario in Figure 2(b) where the
+
+8
+
+Published as a conference paper at ICLR 2016
+
+most frequent words are kept in vocabulary and the rest rare words are mapped to a special <unk>
+token. We ﬁrst study the importance of α of the proposal distribution Qα(w) and the discrimina-
+tive training (6) as proposed in BlackOut. As we discussed in Sec. 2, when α = 0, the proposal
+distribution Qα(w) degenerates to a uniform distribution over all the words in the vocabulary, and
+when α = 1, we recover the unigram distribution. Thus, we evaluate the impact of α in the range
+of [0, 1]. Figure 4(a) shows the evolution of test perplexity as a function of α for the RNNLMs with
+256 hidden units. As can be seen, α has a signiﬁcant impact on the prediction accuracy. The com-
+monly used uniform distribution (when α = 0) and unigram distribution (when α = 1) often yield
+sub-optimal solutions. For the dataset and experiment considered, α = 0.4 gives the best perplexity
+(consistent on holdout set and test set). We therefore use α = 0.4 in the experiments that follow.
+The number of samples used is 500, which is about 0.8% of the vocabulary size.
+
+Figure 4: (a) The impact of α evaluated when 256 hidden units are used; (b) The learning curves of
+maximum likelihood and discriminative training when 512 hidden units are used.
+
+Figure 4(b) demonstrates the impact of discriminative training (6) over the maximum likelihood
+training (the ﬁrst term of Eq. 6) on the RNNLMs with 512 hidden units using two different α’s. In
+general, we observe 1-3 points of perplexity reduction due to discriminative training over traditional
+maximum likelihood training.
+
+Finally, we evaluate the scalability of BlackOut when number of hidden units increases. As the
+dataset is large, we observed that the performance of RNNLM depends on the size of the hidden
+layer: they perform better as the size of the hidden layer gets larger. As a truncated 64K word
+vocabulary is used, we interpolate the RNNLM scores with a full size 5-gram to ﬁll in rare word
+probabilities (Schwenk & Gauvain, 2005; Park et al., 2010). We report the interpolated perplexities
+BlackOut achieved and compare them with the results from Williams et al. (2015) in Table 1. As can
+be seen, BlackOut reaches lower perplexities than those reported in Williams et al. (2015) within
+comparable time frames (often 10%-40% faster). We achieved a perplexity of 42.0 when the hidden
+layer size is 4096. To the best of our knowledge, this is the lowest perplexity reported on this
+benchmark.
+
+Table 1: Performance on the one billion word benchmark by interpolating RNNLM on a 64K word
+vocabulary with a full-size KN 5-gram LM.
+
+Model
+
+KN 5-gram
+RNN-128 + KN 5-gram
+RNN-256 + KN 5-gram
+RNN-512 + KN 5-gram
+RNN-1024 + KN 5-gram
+RNN-2048 + KN 5-gram
+RNN-4096 + KN 5-gram
+1Data from Table 1 of Williams et al. (2015).
+
+#Params
+[millions]
+1,748
+1,764
+1,781
+1,814
+1,880
+2,014
+2,289
+
+Test Perplexity
+Published1 BlackOut
+66.95
+
+Time to Solution
+Published1 BlackOut
+45m
+
+59.0
+55.1
+51.5
+47.6
+43.9
+42.0
+
+6h
+16h
+1d2h
+2d2h
+4d7h
+14d5h
+
+9h
+14h
+1d
+1d14h
+2d15h
+10d
+
+60.8
+57.3
+53.2
+48.9
+45.2
+42.4
+
+9
+
+Published as a conference paper at ICLR 2016
+
+4.2.2 WHEN VOCABULARY SIZE IS 1M
+
+In the ﬁnal set of experiments, we evaluate the performance of BlackOut with a very large vocabulary
+of 1,000,000 words, and the results are provided in Table 2. This is the largest vocabulary used on
+this benchmark that we could ﬁnd in existing literature. We consider the RNNLM with 1,024 hidden
+units (about 2 billion parameters) and 2,048 hidden units (about 4.1 billion parameters) and compare
+their test perplexities with the results from Le et al. (2015). We use 2,000 samples, 0.2% of the
+vocabulary size, for BlackOut training with α = 0.1. Comparing to the experiments with the 64K
+word vocabulary, a much smaller α is used here since the sampling rate (0.2%) is much lower than
+that is used (0.8%) when the vocabulary size is 64K, and a smaller α strikes a better balance between
+sample coverage per training example and convergence rate. In contrast, NCE with the same setting
+converges very slowly (similar to Figure 3(a)) and couldn’t reach a competitive perplexity within
+the time frame considered, and its results are not reported here.
+
+As the standard RNN/LSTM algorithms (without approximation) are used in Le et al. (2015), a
+cluster of 32 CPU machines (at least 20 cores each) are used to train the models for about 60
+hours. BlackOut enables us to train this large model using a single CPU machine for 175 hours.
+Since different model architectures are used in the experiments (deep RNN/LSTM vs. standard
+RNNLM), the direct comparison of test perplexity isn’t very meaningful. However, this experiment
+demonstrates that even though our largest model is about 2-3 times larger than the models evaluated
+in Le et al. (2015), BlackOut, along with a few other optimization techniques, make this large scale
+learning problem still feasible on a single box machine without using GPUs or CPU clusters.
+
+Table 2: Performance on the one billion word benchmark with a vocabulary of 1,000,000 words.
+Single model (RNN/LSTM-only) perplexities are reported; no interpolation is applied to any models.
+
+Results from
+Le et al. (2015)
+60 hours
+32 machines
+
+Model
+LSTM (512 units)
+IRNN (4 layers, 512 units)
+IRNN (1 layer, 1024 units + 512 linear units)
+RNN (4 layers, 512 tanh units)
+RNN (1 layer, 1024 tanh units + 512 linear units)
+RNN (1 layer, 1024 sigmoid units)
+175 hours, 1 machine RNN (1 layer, 2048 sigmoid units)
+
+Our Results
+
+Perplexity
+68.8
+69.4
+70.2
+71.8
+72.5
+78.4
+68.3
+
+Last, we collect all the state of the art results we are aware of on this benchmark and summarize
+them in Table 3. Since all the models are the interpolated ones, we interpolate our best RNN model7
+from Table 2 with the KN 5-gram model and achieve a perplexity score of 47.3. Again, different
+papers provide their best models trained with different architectures and vocabulary settings. Hence,
+an absolutely fair comparison isn’t possible. Regardless of these discrepancies, our models, within
+different groups of vocabulary settings, are very competitive in terms of prediction accuracy and
+model size.
+
+Table 3: Comparison with the state of the art results reported on the one billion word benchmark.
+
+Model
+
+RNN-1024 (full vocab) + MaxEnt1
+RNN-2048 (full vocab) + KN 5-gram2
+RNN-1024 (full vocab) + MaxEnt + 3 models1
+RNN-4096 (64K vocab) + KN 5-gram3
+RNN-4096 (64K vocab) + KN 5-gram2
+1Data from Chelba et al. (2014); 2Our results; 3Data from Williams et al. (2015).
+
+#Params [billions]
+20
+5.0
+42.9
+2.3
+2.3
+
+Test Perplexity
+51.3
+47.3
+43.8
+42.4
+42.0
+
+7To be consistent with the benchmark in Chelba et al. (2014), we retrained it with the full-size vocabulary
+
+of about 0.8M words.
+
+10
+
+Published as a conference paper at ICLR 2016
+
+5 CONCLUSION
+
+We proposed BlackOut, a sampling-based approximation, to train RNNLMs with very large vocabu-
+laries (e.g., 1 million). We established its connections to importance sampling and noise contrastive
+estimation (NCE), and demonstrated its stability, sample efﬁciency and rate of convergence on the
+recently released one billion word language modeling benchmark. We achieved the lowest reported
+perplexity on this benchmark without using GPUs or CPU clusters.
+
+As for future extensions, our plans include exploring other proposal distributions Q(w), and theo-
+retical properties of the generalization property and sample complexity bounds for BlackOut. We
+will also investigate a multi-machine distributed implementation.
+
+We would like to thank Oriol Vinyals, Andriy Mnih and the anonymous reviewers for their excellent
+comments and suggestions, which helped improve the quality of this paper.
+
+ACKNOWLEDGMENTS
+
+REFERENCES
+
+Andreas, Jacob and Klein, Dan. When and why are log-linear models self-normalizing? In Proceed-
+ings of the Annual Meeting of the North American Chapter of the Association for Computational
+Linguistics, 2014.
+
+Andreas, Jacob, Rabinovich, Maxim, Klein, Dan, and Jordan, Michael I. On the accuracy of self-
+
+normalized log-linear models. In NIPS, 2015.
+
+Bengio, Yoshua and Sen´ecal, Jean-S´ebastien. Quick training of probabilistic neural nets by impor-
+
+tance sampling. In AISTATS, 2003.
+
+Bengio, Yoshua and Sen´ecal, Jean-S´ebastien. Adaptive importance sampling to accelerate training
+of a neural probabilistic language model. In IEEE Transactions on Neural Networks, volume 19,
+pp. 713–722, 2008.
+
+Bengio, Yoshua, Ducharme, Rjean, and Vincent, Pascal. A neural probabilistic language model. In
+
+NIPS, pp. 932–938, 2001.
+
+Bengio, Yoshua, Boulanger-Lewandowski, Nicolas, and Pascanu, Razvan. Advances in optimizing
+
+recurrent networks. In ICASSP, pp. 8624–8628, 2013.
+
+Chelba, Ciprian, Mikolov, Tomas, Schuster, Mike, Ge, Qi, Brants, Thorsten, Koehn, Phillipp, and
+Robinson, Tony. One billion word benchmark for measuring progress in statistical language
+modeling. In INTERSPEECH, pp. 2635–2639, 2014.
+
+Chen, Xie, Wang, Yongqiang, Liu, Xunying, Gales, Mark JF, and Woodland, Philip C. Efﬁcient
+gpu-based training of recurrent neural network language models using spliced sentence bunch. In
+INTERSPEECH, 2014.
+
+Chen, Xie, Liu, Xunying, Gales, Mark JF, and Woodland, Philip C. Recurrent neural network
+In ICASSP,
+
+language model training with noise contrastive estimation for speech recognition.
+2015.
+
+Devlin, Jacob, Zbib, Rabih, Huang, Zhongqiang, Lamar, Thomas, Schwartz, Richard, and Makhoul,
+John. Fast and robust neural network joint models for statistical machine translation. In ACL,
+2014.
+
+Gutmann, Michael U. and Hyv¨arinen, Aapo. Noise-contrastive estimation of unnormalized statisti-
+
+cal models, with applications to natural image statistics. JMLR, 13:307–361, 2012.
+
+Hinton, Geoffrey. Lecture 6.5-rmsprop: Divide the gradient by a running average of its recent
+
+magnitude. COURSERA: Neural Networks for Machine Learning, 2012.
+
+11
+
+Published as a conference paper at ICLR 2016
+
+Jean, Sbastien, Cho, Kyunghyun, Memisevic, Roland, and Bengio, Yoshua. On using very large
+
+target vocabulary for neural machine translation. In ACL, 2015.
+
+Le, Hai-Son, Oparin, Ilya, Allauzen, Alexandre, Gauvain, Jean-Luc, and Yvon, Franc¸ois. Structured
+
+output layer neural network language model. In ICASSP, pp. 5524–5527, 2011.
+
+Le, Quoc V., Jaitly, Navdeep, and Hinton, Geoffrey. A simple way to initialize recurrent networks
+
+of rectiﬁed linear units. arXiv preprint arxiv:1504.00941, 2015.
+
+Mikolov, Tomas, Karaﬁ´at, Martin, Burget, Luk´as, Cernock´y, Jan, and Khudanpur, Sanjeev. Recur-
+
+rent neural network based language model. In INTERSPEECH, pp. 1045–1048, 2010.
+
+Mikolov, Tomas, Deoras, Anoop, Povey, Dan, Burget, Lukar, and Cernocky, Jan Honza. Strategies
+for training large scale neural network language models. IEEE Automatic Speech Recognition
+and Understanding Workshop, 2011.
+
+Mikolov, Tomas, Sutskever, Ilya, Chen, Kai, Corrado, Greg, and Dean, Jeffrey. Distributed rep-
+resentations of words and phrases and their compositionality. In Burges, Chris, Bottou, Leon,
+Welling, Max, Ghahramani, Zoubin, and Weinberger, Kilian (eds.), Advances in Neural Informa-
+tion Processing Systems 26, 2013.
+
+Mnih, Andriy and Hinton, Geoffrey E. A scalable hierarchical distributed language model. In NIPS,
+
+volume 21, pp. 1081–1088, 2008.
+
+Mnih, Andriy and Teh, Yee Whye. A fast and simple algorithm for training neural probabilistic
+language models. In Proceedings of the International Conference on Machine Learning, 2012.
+
+Morin, Frederic and Bengio, Yoshua. Hierarchical probabilistic neural network language model. In
+Proceedings of the international workshop on artiﬁcial intelligence and statistics, pp. 246–252.
+Citeseer, 2005.
+
+Park, Junho, Liu, Xunying, Gales, Mark J. F., and Woodland, P. C. Improved neural network based
+
+language modelling and adaptation. In Proc. ISCA Interspeech, pp. 10411044, 2010.
+
+Rumelhart, David E., Hinton, Geoffrey E., and Williams, Ronald J. Neurocomputing: Foundations
+of research. chapter Learning Representations by Back-propagating Errors, pp. 696–699. MIT
+Press, Cambridge, MA, USA, 1988.
+
+Schwenk, Holger and Gauvain, Jean-Luc. Training neural network language models on very large
+corpora. In Proceedings of Human Language Technology Conference and Conference on Empir-
+ical Methods in Natural Language Processing, pp. 201–208, 2005.
+
+Shrivastava, Anshumali and Li, Ping. Asymmetric lsh (alsh) for sublinear time maximum inner
+
+product search (mips). In NIPS, volume 27, pp. 2321–2329, 2014.
+
+Srivastava, Nitish, Hinton, Geoffrey, Krizhevsky, Alex, Sutskever, Ilya, and Salakhutdinov, Ruslan.
+Dropout: A simple way to prevent neural networks from overﬁtting. JMLR, 15:1929–1958, 2014.
+
+Sundermeyer, Martin, Oparin, Ilya, Gauvain, Jean-Luc, Freiberg, Ben, Schl
+
+”uter, Ralf, and Ney, Hermann. Comparison of feedforward and recurrent neural network lan-
+guage models. In ICASSP, pp. 8430–8434, 2013.
+
+Vijayanarasimhan, Sudheendra, Shlens, Jonathon, Monga, Rajat, and Yagnik, Jay. Deep networks
+
+with large output spaces. arXiv preprint arxiv:1412.7479, 2014.
+
+Vincent, Pascal, de Brbisson, Alexandre, and Bouthillier, Xavier. Efﬁcient exact gradient update for
+
+training deep networks with very large sparse targets. In NIPS, 2015.
+
+Williams, Will, Prasad, Niranjani, Mrva, David, Ash, Tom, and Robinson, Tony. Scaling recurrent
+
+neural network language models. In ICASSP, 2015.
+
+12
+
+Published as a conference paper at ICLR 2016
+
+BlackOut: Speeding up Recurrent Neural Network Language
+Models with Very Large Vocabularies
+(Supplementary Material)
+
+A NOISE DISTRIBUTION pn(wi|s)
+
+Theorem 1 The noise distribution function pn(wi|s) deﬁned in Eq. 13 is a probability distribution
+function under the expectation that K samples in SK are drawn from Q(w) randomly, SK ∼ Q(w),
+such that ESK ∼Q(w)(pn(wi|s)) = Q(wi) and ESK ∼Q(w)((cid:80)V
+
+i=1 pn(wi|s)) = 1.
+
+Proof
+
+ESK ∼Q(w)(pn(wi|s)) = ESK ∼Q(w)
+
+
+
+pθ(wj|s)
+
+
+
+
+
+
+
+1
+K
+
+qj
+qi
+
+(cid:88)
+
+j∈SK
+
+
+=
+
+Q(wi)
+K
+
+ESK ∼Q(w)
+
+
+
+(cid:88)
+
+j∈SK
+
+pθ(wj|s)
+Q(wj)
+
+
+
+
+
+Q(wi)
+K
+
+
+
+
+
+(cid:88)
+
+(cid:89)
+
+Q(wk) ·
+
+wk,∀k∈SK
+
+k∈SK
+
+(cid:88)
+
+j∈SK
+
+pθ(wj|s)
+Q(wj)
+
+
+
+
+
+=
+
+=
+
+Q(wi)
+K
+
+K
+
+= Q(wi)
+
+ESK ∼Q(w)
+
+pn(wi|s)
+
+=
+
+ESK ∼Q(w) (pn(wi|s)) =
+
+(Q(wi)) = 1
+
+(cid:32) V
+
+(cid:88)
+
+i=1
+
+(cid:33)
+
+V
+(cid:88)
+
+i=1
+
+V
+(cid:88)
+
+i=1
+
+B PERPLEXITIES ON TRAINING SET
+
+Figure 5: Training perplexity evolution as a function of number of samples K (a) with a full vocab-
+ulary of 3,720 words, and (b) with the most frequent 2,065 words in vocabulary. The experiments
+are executed on the RNNLMs with 16 hidden units.
+
+13
+
+Published as a conference paper at ICLR 2016
+
+C SUBNET UPDATE WITH APPROXIMATED RMSPROP
+
+RMSProp (Hinton, 2012) is an adaptive learning rate method that has found much success in prac-
+tice. Instead of using a single learning rate to all the model parameters in Ω, RMSProp dedicates
+a learning rate for each model parameter and normalizes the gradient by an exponential moving
+average of the magnitude of the gradient:
+
+where β ∈ (0, 1) denotes the decay rate. The model update at time step t is then given by
+
+vt = βvt−1 + (1 − β)(∇J)2
+
+θt = θt−1 + (cid:15)
+
+∇J(θt−1)
+√
+vt + λ
+
+where (cid:15) is the learning rate and λ is a damping factor, e.g., λ = 10−6. While RMSProp is one of
+the most effective learning rate scheduling techniques, it requires a large amount of memory to store
+per-parameter vt in addition to model parameter Ω and their gradients.
+
+It is expensive to access and update large models with billions of parameters. Fortunately, due to
+the 1-of-V encoding at input layer and the BlackOut sampling at output layer, the model update on
+Win and Wout is sparse, e.g., only the model parameters corresponding to input/output words and
+the samples in SK are to be updated.8 For Eq. 16, however, even a model parameter is not involved
+in the current training, its vt value still needs to be updated by vt = βvt−1 since its (∇J)2 = 0.
+Ignoring this update has detrimental effect on the predictive performance; in our experiments, we
+observed 5 − 10 point perplexity loss if we ignore this update completely.
+
+We resort to an approximation to vt = βvt−1. Given pu(w) is the probability of a word w being
+selected for update, the number of time steps elapsed when it is successfully selected follows a
+geometric distribution with a success rate pu(w), whose mean value is 1/pu(w). Assume that an
+input/output word is selected according to the unigram distribution puni(w) and the samples in SK
+are drawn from Qα(w), Eq. 16 can be approximated by
+
+vt ≈ β1/pu vt−n + (1 − β)(∇J)2
+
+with
+
+(cid:26)puni(w) × B × T
+
+pu(w) =
+
+puni(w) × B × T + Qα(w) × K × T
+
+for word w at input layer
+for word w at output layer,
+
+where B is the mini-batch size and T is the BPTT block size. Now we can only update the model
+parameters, typically a tiny fraction of Ω, that are really involved in the current training, and thus
+speed up the RNNLM training further.
+
+(16)
+
+(17)
+
+(18)
+
+(19)
+
+8The parameter update on Wr is still dense, but its size is several orders of magnitude smaller than those of
+
+Win and Wout.
+
+14
+

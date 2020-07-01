@@ -1,0 +1,1646 @@
+Self-critical Sequence Training for Image Captioning
+
+Steven J. Rennie1, Etienne Marcheret1, Youssef Mroueh, Jerret Ross and Vaibhava Goel1
+Watson Multimodal Algorithms and Engines Group
+IBM T.J. Watson Research Center, NY, USA
+
+steve@fusemachines.com, {etiennemarcheret, vaibhavagoel}@gmail.com, {mroueh, rossja}@us.ibm.com
+
+7
+1
+0
+2
+ 
+v
+o
+N
+ 
+6
+1
+ 
+ 
+]
+
+G
+L
+.
+s
+c
+[
+ 
+ 
+2
+v
+3
+6
+5
+0
+0
+.
+2
+1
+6
+1
+:
+v
+i
+X
+r
+a
+
+Abstract
+
+Recently it has been shown that policy-gradient methods
+for reinforcement learning can be utilized to train deep end-
+to-end systems directly on non-differentiable metrics for the
+task at hand. In this paper we consider the problem of opti-
+mizing image captioning systems using reinforcement learn-
+ing, and show that by carefully optimizing our systems us-
+ing the test metrics of the MSCOCO task, signiﬁcant gains
+in performance can be realized. Our systems are built using
+a new optimization approach that we call self-critical se-
+quence training (SCST). SCST is a form of the popular RE-
+INFORCE algorithm that, rather than estimating a “base-
+line” to normalize the rewards and reduce variance, utilizes
+the output of its own test-time inference algorithm to nor-
+malize the rewards it experiences. Using this approach, es-
+timating the reward signal (as actor-critic methods must do)
+and estimating normalization (as REINFORCE algorithms
+typically do) is avoided, while at the same time harmonizing
+the model with respect to its test-time inference procedure.
+Empirically we ﬁnd that directly optimizing the CIDEr met-
+ric with SCST and greedy decoding at test-time is highly
+effective. Our results on the MSCOCO evaluation sever es-
+tablish a new state-of-the-art on the task, improving the best
+result in terms of CIDEr from 104.9 to 114.7.
+
+1. Introduction
+
+Image captioning aims at generating a natural language
+description of an image. Open domain captioning is a very
+challenging task, as it requires a ﬁne-grained understand-
+ing of the global and the local entities in an image, as
+well as their attributes and relationships. The recently re-
+leased MSCOCO challenge [1] provides a new, larger scale
+platform for evaluating image captioning systems, com-
+plete with an evaluation server for benchmarking compet-
+ing methods. Deep learning approaches to sequence model-
+
+1Authors Steven J. Rennie, Etienne Marcheret, and Vaibhava Goel
+
+were at IBM while the work was being completed.
+
+ing have yielded impressive results on the task, dominat-
+ing the task leaderboard.
+Inspired by the recently intro-
+duced encoder/decoder paradigm for machine translation
+using recurrent neural networks (RNNs) [2], [3], and [4]
+use a deep convolutional neural network (CNN) to encode
+the input image, and a Long Short Term Memory (LSTM)
+[5] RNN decoder to generate the output caption. These
+systems are trained end-to-end using back-propagation, and
+have achieved state-of-the-art results on MSCOCO. More
+recently in [6], the use of spatial attention mechanisms on
+CNN layers to incorporate visual context—which implicitly
+conditions on the text generated so far—was incorporated
+into the generation process. It has been shown and we have
+qualitatively observed that captioning systems that utilize
+attention mechanisms lead to better generalization, as these
+models can compose novel text descriptions based on the
+recognition of the global and local entities that comprise
+images.
+
+As discussed in [7], deep generative models for text are
+typically trained to maximize the likelihood of the next
+ground-truth word given the previous ground-truth word
+using back-propagation. This approach has been called
+“Teacher-Forcing” [8]. However, this approach creates a
+mismatch between training and testing, since at test-time
+the model uses the previously generated words from the
+model distribution to predict the next word. This exposure
+bias [7], results in error accumulation during generation at
+test time, since the model has never been exposed to its own
+predictions.
+
+Several approaches to overcoming the exposure bias
+problem described above have recently been proposed. In
+[8] they show that feeding back the model’s own predictions
+and slowly increasing the feedback probability p during
+training leads to signiﬁcantly better test-time performance.
+Another line of work proposes “Professor-Forcing” [9], a
+technique that uses adversarial training to encourage the dy-
+namics of the recurrent network to be the same when train-
+ing conditioned on ground truth previous words and when
+sampling freely from the network.
+
+While sequence models are usually trained using the
+
+1
+
+cross entropy loss, they are typically evaluated at test time
+using discrete and non-differentiable NLP metrics such as
+BLEU [10], ROUGE [11], METEOR [12] or CIDEr [13].
+Ideally sequence models for image captioning should be
+trained to avoid exposure bias and directly optimize met-
+rics for the task at hand.
+
+Recently it has been shown that both the exposure bias
+and non-differentiable task metric issues can be addressed
+by incorporating techniques from Reinforcement Learn-
+ing (RL) [14]. Speciﬁcally in [7], Ranzato et al. use
+the REINFORCE algorithm [15] to directly optimize non-
+differentiable, sequence-based test metrics, and overcome
+both issues. REINFORCE as we will describe, allows one
+to optimize the gradient of the expected reward by sampling
+from the model during training, and treating those samples
+as ground-truth labels (that are re-weighted by the reward
+they deliver). The major limitation of the approach is that
+the expected gradient computed using mini-batches under
+REINFORCE typically exhibit high variance, and without
+proper context-dependent normalization, is typically unsta-
+ble. The recent discovery that REINFORCE with proper
+bias correction using learned “baselines” is effective has
+led to a ﬂurry of work in applying REINFORCE to prob-
+lems in RL, supervised learning, and variational inference
+[16, 17, 18]. Actor-critic methods [14] , which instead train
+a second “critic” network to provide an estimate of the value
+of each generated word given the policy of an actor net-
+work, have also been investigated for sequence problems
+recently [19]. These techniques overcome the need to sam-
+ple from the policy’s (actor’s) action space, which can be
+enormous, at the expense of estimating future rewards, and
+training multiple networks based on one another’s outputs,
+which as [19] explore, can also be unstable.
+
+In this paper we present a new approach to se-
+quence training which we call self-critical sequence training
+(SCST), and demonstrate that SCST can improve the per-
+formance of image captioning systems dramatically. SCST
+is a REINFORCE algorithm that, rather than estimating the
+reward signal, or how the reward signal should be normal-
+ized, utilizes the output of its own test-time inference algo-
+rithm to normalize the rewards it experiences. As a result,
+only samples from the model that outperform the current
+test-time system are given positive weight, and inferior sam-
+ples are suppressed. Using SCST, attempting to estimate
+the reward signal, as actor-critic methods must do, and esti-
+mating normalization, as REINFORCE algorithms must do,
+is avoided, while at the same time harmonizing the model
+with respect to its test-time inference procedure. Empiri-
+cally we ﬁnd that directly optimizing the CIDEr metric with
+SCST and greedy decoding at test-time is highly effective.
+Our results on the MSCOCO evaluation sever establish a
+new state-of-the-art on the task, improving the best result in
+terms of CIDEr from 104.9 to 114.7.
+
+2. Captioning Models
+
+In this section we describe the recurrent models that we
+
+use for caption generation.
+
+FC models. Similarly to [3, 4], we ﬁrst encode the input
+image F using a deep CNN, and then embed it through a
+linear projection WI . Words are represented with one hot
+vectors that are embedded with a linear embedding E that
+has the same output dimension as WI . The beginning of
+each sentence is marked with a special BOS token, and the
+end with an EOS token. Under the model, words are gen-
+erated and then fed back into the LSTM, with the image
+treated as the ﬁrst word WI CN N (F ). The following up-
+dates for the hidden units and cells of an LSTM deﬁne the
+model [5]:
+
+(Input Gate)
+
+xt = E1wt−1 for t > 1, x1 = WI CN N (F )
+it = σ (Wixxt + Wihht
+−
+ft = σ (Wf xxt + Wf hht
+ot = σ (Woxxt + Wohht
+ct = it (cid:12)
+ht = ot (cid:12)
+st = Wsht,
+
+1 + bi)
+1 + bf ) (Forget Gate)
+−
+1 + bo) (Output Gate)
+ct
+1 + b⊗z ) + ft (cid:12)
+
+φ(W ⊗zxxt + W ⊗zhht
+tanh(ct)
+
+−
+
+−
+
+1
+
+−
+
+denotes
+where φ is a maxout non-linearity with 2 units (
+the units) and σ is the sigmoid function. We initialize h0
+and c0 to zero. The LSTM outputs a distribution over the
+next word wt using the softmax function:
+
+⊗
+
+wt ∼
+
+softmax (st)
+
+(1)
+
+In our architecture, the hidden states and word and image
+embeddings have dimension 512. Let θ denote the pa-
+rameters of the model. Traditionally the parameters θ are
+learned by maximizing the likelihood of the observed se-
+quence. Speciﬁcally, given a target ground truth sequence
+(w∗1, . . . , w∗T ), the objective is to minimize the cross en-
+tropy loss (XE):
+
+L(θ) =
+
+log(pθ(w∗t |
+
+w∗1, . . . w∗t
+−
+
+1)),
+
+(2)
+
+T
+(cid:88)
+
+−
+
+t=1
+
+where pθ(wt|
+model in Equation (1).
+
+w1, . . . wt
+
+−
+
+1) is given by the parametric
+
+Attention Model (Att2in). Rather than utilizing a static,
+spatially pooled representation of the image, attention mod-
+els dynamically re-weight the input spatial (CNN) features
+to focus on speciﬁc regions of the image at each time step.
+In this paper we consider a modiﬁcation of the architecture
+of the attention model for captioning given in [6], and input
+the attention-derived image feature only to the cell node of
+the LSTM.
+
+1 w0 = BOS
+(Input Gate)
+1 + bi)
+1 + bf ) (Forget Gate)
+−
+1 + bo) (Output Gate)
+
+≥
+
+xt = E1wt−1 for t
+it = σ (Wixxt + Wihht
+−
+ft = σ (Wf xxt + Wf hht
+ot = σ (Woxxt + Wohht
+ct = it (cid:12)
+ht = ot (cid:12)
+st = Wsht,
+
+−
+φ(W ⊗zxxt + W ⊗zI It + W ⊗zhht
+tanh(ct)
+
+1 + b⊗z ) + ft (cid:12)
+
+−
+
+ct
+
+1
+
+−
+
+×
+
+w1, . . . wt
+
+, It = (cid:80)N
+i=1 αi
+t = W tanh(WaI Ii + Wahht
+
+where It is the attention-derived image feature. This fea-
+ture is derived as in [6] as follows: given CNN features at
+tIi, where αt =
+N locations
+I1, . . . IN }
+{
+softmax(at + bα), and ai
+1 +
+−
+ba). In this work we set the dimension of W to 1
+512, and
+set c0 and h0 to zero. Let θ denote the parameters of the
+1) is again deﬁned by (1).
+model. Then pθ(wt|
+The parameters θ of attention models are also traditionally
+learned by optimizing the XE loss (2).
+Attention Model (Att2all). The standard attention model
+presented in [6] also feeds then attention signal It as an in-
+put into all gates of the LSTM, and the output posterior.
+In our experiments feeding It to all gates in addition to
+the input did not boost performance, but feeding It to both
+the gates and the outputs resulted in signiﬁcant gains when
+ADAM [20] was used.
+
+−
+
+3. Reinforcement Learning
+
+Sequence Generation as an RL problem. As described
+in the previous section, captioning systems are traditionally
+trained using the cross entropy loss. To directly optimize
+NLP metrics and address the exposure bias issue, we can
+cast our generative models in the Reinforcement Learning
+terminology as in [7]. Our recurrent models (LSTMs) intro-
+duced above can be viewed as an “agent” that interacts with
+an external “environment” (words and image features). The
+parameters of the network, θ, deﬁne a policy pθ, that re-
+sults in an “action” that is the prediction of the next word.
+After each action, the agent (the LSTM) updates its inter-
+nal “state” (cells and hidden states of the LSTM, attention
+weights etc). Upon generating the end-of-sequence (EOS)
+token, the agent observes a “reward” that is, for instance,
+the CIDEr score of the generated sentence—we denote this
+reward by r. The reward is computed by an evaluation met-
+ric by comparing the generated sequence to corresponding
+ground-truth sequences. The goal of training is to minimize
+the negative expected reward:
+
+L(θ) =
+
+Ews
+
+pθ [r(ws)] ,
+
+(3)
+
+−
+∼
+where ws = (ws
+T ) and ws
+t is the word sampled from
+the model at the time step t. In practice L(θ) is typically
+
+1, . . . ws
+
+estimated with a single sample from pθ:
+
+L(θ)
+
+r(ws), ws
+
+≈ −
+
+pθ.
+
+∼
+
+Policy Gradient with REINFORCE. In order to compute
+∇θL(θ), we use the REINFORCE algorithm
+the gradient
+[15](See also Chapter 13 in [14]). REINFORCE is based
+on the observation that the expected gradient of a non-
+differentiable reward function can be computed as follows:
+
+∇θL(θ) =
+
+−
+
+Ews
+
+pθ [r(ws)
+∼
+
+∇θ log pθ(ws)] .
+
+(4)
+
+In practice the expected gradient can be approximated using
+a single Monte-Carlo sample ws = (ws
+T ) from pθ,
+for each training example in the minibatch:
+
+1 . . . ws
+
+∇θL(θ)
+
+r(ws)
+
+∇θ log pθ(ws).
+
+≈ −
+
+REINFORCE with a Baseline. The policy gradient given
+by REINFORCE can be generalized to compute the reward
+associated with an action value relative to a reference re-
+ward or baseline b:
+
+∇θL(θ) =
+
+−
+
+Ews
+
+pθ [(r(ws)
+
+∼
+
+∇θ log pθ(ws)] .
+b)
+
+−
+
+(5)
+
+The baseline can be an arbitrary function, as long as it does
+not depend on the “action” ws [14], since in this case:
+
+Ews
+
+pθ [b
+
+∼
+
+∇θ log pθ(ws)] = b
+
+(cid:88)
+
+ws
+
+∇θpθ(ws)
+(cid:88)
+pθ(ws)
+
+= b
+
+∇θ
+
+ws
+
+= b
+
+∇θ1 = 0.
+
+(6)
+
+This shows that the baseline does not change the expected
+gradient, but importantly, it can reduce the variance of the
+gradient estimate. For each training case, we again approx-
+imate the expected gradient with a single sample ws
+pθ:
+∇θ log pθ(ws).
+b)
+
+∇θL(θ)
+
+(r(ws)
+
+≈ −
+
+(7)
+
+∼
+
+−
+
+Note that if b is function of θ or t as in [7], equation (6) still
+holds and b(θ) is a valid baseline.
+
+Final Gradient Expression. Using the chain rule, and the
+parametric model of pθ given in Section 2 we have:
+
+∇θL(θ) =
+
+T
+(cid:88)
+
+t=1
+
+∂L(θ)
+∂st
+
+∂st
+∂θ
+
+,
+
+where st is the input to the softmax function. Using RE-
+INFORCE with a baseline b the estimate of the gradient of
+∂L(θ)
+∂st
+
+is given by [17]:
+
+∂L(θ)
+
+∂st ≈
+
+(r(ws)
+
+b)(pθ(wt|
+
+ht)
+
+−
+
+−
+
+1ws
+
+t ).
+
+(8)
+
+4. Self-critical sequence training (SCST)
+
+The central idea of the self-critical sequence training
+(SCST) approach is to baseline the REINFORCE algorithm
+with the reward obtained by the current model under the
+inference algorithm used at test time. The gradient of the
+negative reward of a sample ws from the model w.r.t. to the
+softmax activations at time-step t then becomes:
+
+∂L(θ)
+∂st
+
+= (r(ws)
+
+r( ˆw))(pθ(wt|
+
+ht)
+
+−
+
+−
+
+1ws
+
+t ).
+
+(9)
+
+where r( ˆw) again is the reward obtained by the current
+model under the inference algorithm used at test time. Ac-
+cordingly, samples from the model that return higher reward
+than ˆw will be “pushed up”, or increased in probability,
+while samples which result in lower reward will be sup-
+pressed. Like MIXER [7], SCST has all the advantages of
+REINFORCE algorithms, as it directly optimizes the true,
+sequence-level, evaluation metric, but avoids the usual sce-
+nario of having to learn a (context-dependent) estimate of
+expected future rewards as a baseline. In practice we have
+found that SCST has much lower variance, and can be more
+effectively trained on mini-batches of samples using SGD.
+Since the SCST baseline is based on the test-time estimate
+under the current model, SCST is forced to improve the per-
+formance of the model under the inference algorithm used
+at test time. This encourages training/test time consistency
+like the maximum likelihood-based approaches “Data as
+Demonstrator” [8], “Professor Forcing” [9], and E2E [7],
+but importantly, it can directly optimize sequence metrics.
+Finally, SCST is self-critical, and so avoids all the inher-
+ent training difﬁculties associated with actor-critic methods,
+where a second “critic” network must be trained to estimate
+value functions, and the actor must be trained on estimated
+value functions rather than actual rewards.
+
+In this paper we focus on scenario of greedy decoding,
+
+where:
+
+ˆwt = arg max
+wt
+
+p(wt |
+
+ht)
+
+(10)
+
+This choice, depicted in Figure 1, minimizes the impact of
+baselining with the test-time inference algorithm on training
+time, since it requires only one additional forward pass, and
+trains the system to be optimized for fast, greedy decoding
+at test-time.
+Generalizations. The basic SCST approach described
+above can be generalized in several ways.
+
+One generalization is to condition the baseline on what
+has been generated (i.e. sampled) so far, which makes the
+baseline word-dependent, and further reduces the variance
+of the reward signal by making it dependent only on fu-
+ture rewards. This is achieved by baselining the reward for
+word ws
+t at timestep t with the reward obtained by the word
+ws
+, which is generated by sam-
+sequence ¯w =
+1:t
+{
+1, and then executing
+pling tokens for timesteps 1 : t
+
+1, ˆwt:T }
+
+−
+
+−
+
+the inference algorithm to complete the sequence. The re-
+sulting reward signal, r(ws)
+r( ¯w), is a baselined future
+−
+reward (advantage) signal that conditions on both the input
+image and the sequence ws
+1, and remains unbiased. We
+1:t
+call this variant time-dependent SCST (TD-SCST).
+
+−
+
+Another important generalization is to utilize the infer-
+ence algorithm as a critic to replace the learned critic of tra-
+ditional actor-critic approaches. Like for traditional actor-
+critic methods, this biases the learning procedure, but can be
+used to trade off variance for bias. Speciﬁcally, the primary
+reward signal at time t can be based on a sequence that sam-
+ples only n future tokens, and then executes the inference
+algorithm to complete the sequence. The primary reward is
+ws
+, and can further be
+then based on ˜w =
+1:t+n, ˆwt+n+1:T }
+{
+baselined in a time-dependent manner using TD-SCST. The
+resulting reward signal in this case is r( ˜w)
+r( ¯w). We call
+this variant True SCST.
+
+−
+
+We have experimented with both TD-SCST and “True”
+SCST as described above on the MSCOCO task, but found
+that they did not lead to signiﬁcant additional gain. We have
+also experimented with learning a control-variate for the
+SCST baseline on MSCOCO to no avail. Nevertheless, we
+anticipate that these generalizations will be important for
+other sequence modeling tasks, and policy-gradient-based
+RL more generally.
+
+5. Experiments
+
+Dataset. We evaluate our proposed method on the
+MSCOCO dataset [1]. For ofﬂine evaluation purposes we
+used the data splits from [21]. The training set contains
+113, 287 images, along with 5 captions each. We use a set
+of 5K image for validation and report results on a test set of
+5K images as well, as given in [21]. We report four widely
+used automatic evaluation metrics, BLEU-4, ROUGEL,
+METEOR, and CIDEr. We prune the vocabulary and drop
+any word that has count less then ﬁve, we end up with a
+vocabulary of size 10096 words.
+
+Image Features 1) FC Models. We use two type of
+Features: a) (FC-2k) features, where we encode each image
+with Resnet-101 (101 layers) [22]. Note that we do not
+Instead we encode the full
+rescale or crop each image.
+image with the ﬁnal convolutional layer of resnet, and apply
+average pooling, which results in a vector of dimension
+2048. b) (FC-15K) features where we stack average pooled
+13 layers of Resnet-101 (11
+2048). These
+×
+13 layers are the odd layers of conv4 and conv5, with the
+exception of the 23rd layer of conv4, which was omitted.
+This results in a feature vector of dimension 15360.
+2) Spatial CNN features for Attention models:
+(Att2in)
+We encode each image using the residual convolutional
+neural network Resnet-101 [22]. Note that we do not
+Instead we encode the full
+rescale or crop the image.
+
+1024 and 2
+
+×
+
+Figure 1: Self-critical sequence training (SCST). The weight put on words of a sampled sentence from the model is deter-
+mined by the difference between the reward for the sampled sentence and the reward obtained by the estimated sentence
+under the test-time inference procedure (greedy inference depicted). This harmonizes learning with the inference procedure,
+and lowers the variance of the gradients, improving the training procedure.
+
+image with the ﬁnal convolutional layer of Resnet-101,
+and apply spatially adaptive max-pooling so that the output
+2048. At each time step
+has a ﬁxed size of 14
+the attention model produces an attention mask over the
+196 spatial locations. This mask is applied and then the
+result is spatially averaged to produce a 2048 dimension
+representation of the attended portion of the image.
+
+14
+
+×
+
+×
+
+the XE criterion until eventually being subsumed). We have
+since realized that for the MSCOCO task CL is not required,
+and provides little to no boost in performance. The results
+reported here for the FC-2K and FC-15K models are trained
+with CL, while the attention models were trained directly on
+the entire sentence for all epochs after being initialized by
+the XE seed models.
+
+×
+
+10−
+
+Implementation Details. The LSTM hidden, image, word
+and attention embeddings dimension are ﬁxed to 512 for
+all of the models discussed herein. All of our models are
+trained according to the following recipe, except where oth-
+erwise noted. We initialize all models by training the model
+under the XE objective using ADAM [20] optimizer with an
+4. We anneal the learning rate
+initial learning rate of 5
+by a factor of 0.8 every three epochs, and increase the prob-
+ability of feeding back a sample of the word posterior by
+0.05 every 5 epochs until we reach a feedback probability
+0.25 [8]. We evaluate at each epoch the model on the devel-
+opment set and select the model with best CIDEr score as an
+initialization for SCST training. We then run SCST training
+initialized with the XE model to optimize the CIDEr met-
+ric (speciﬁcally, the CIDEr-D metric) using ADAM with a
+5 1. Initially when experimenting with
+learning rate 5
+FC-2k and FC-15k models we utilized curriculum learning
+(CL) during training, as proposed in [7], by increasing the
+number of words that are sampled and trained under CIDEr
+by one each epoch (the preﬁx of the sentence remains under
+
+10−
+
+×
+
+1In the case of the Att2all models, the XE model was trained for only
+
+20 epochs, and the learning rate was also annealed during RL training.
+
+Training
+Metric
+XE
+XE (beam)
+MIXER-B
+MIXER
+SCST
+
+Evaluation Metric
+CIDEr BLEU4 ROUGEL METEOR
+90.9
+94.0
+101.9
+104.9
+106.3
+
+24.1
+25.2
+24.9
+25.4
+25.5
+
+52.3
+52.6
+53.8
+54.3
+54.3
+
+28.6
+29.6
+30.9
+31.7
+31.9
+
+Table 1: Performance of self-critical sequence training
+(SCST) versus MIXER [7] and MIXER without a baseline
+(MIXER-B) on the test portion of the Karpathy splits when
+trained to optimize the CIDEr metric (FC-2K models). All
+improve the seed cross-entropy trained model, but SCST
+outperforms MIXER.
+5.1. Ofﬂine Evaluation
+
+Evaluating different RL training strategies.
+
+Table 1 compares the performance of SCST to MIXER
+[7] (test set, Karpathy splits). In this experiment, we utilize
+“curriculum learning” (CL) by optimizing the expected re-
+ward of the metric on the last n words of each training sen-
+tence, optimizing XE on the remaining sentence preﬁx, and
+
+MIXER-CL
+
+Metric
+113.2 ± 0.2 113.8 ± 0.3
+CIDEr
+33.8 ± 0.2 34.1 ± 0.1
+BLEU4
+55.6 ± 0.1 55.7 ± 0.1
+ROUGE
+METEOR 26.0 ± 0.04 26.5 ± 0.1 26.6 ± 0.04
+
+REINFORCE
+110.4 ± 0.5
+32.8 ± 0.1
+55.2 ± 0.1
+
+SCST
+
+Table 2: Mean/std. performance of SCST versus REIN-
+FORCE and REINFORCE with learned baseline (MIXER
+less CL), for Att2all models (4 seeds) on the Karpathy test
+set (CIDEr optimized). A one-sample t-test on the gain of
+SCST over MIXER less CL rejects the null hypothesis on
+all metrics except ROUGE for α = 0.1 (i.e. pnull < 0.1).
+
+slowly increasing n. The results reported were generated
+with the optimized CL schedule reported in [7]. We found
+that CL was not necessary to train both SCST and REIN-
+FORCE with a learned baseline on MSCOCO—turning off
+CL sped up training and yielded equal or better results. The
+gain of SCST over learned baselines was consistent, regard-
+less of the CL schedule and the initial seed. Figures 2 and 3
+and table 2 compare the performance of SCST and MIXER
+less CL for Att2all models on the Karpathy validation and
+test splits, respectively. Figure 4 and 5 further compare their
+gradient variance and word posterior entropy on the Karpa-
+thy training set. While both techniques are unbiased, SCST
+in general has lower gradient variance, which translates to
+improved training performance.
+Interestingly, SCST has
+much higher gradient variance than MIXER less CL during
+the ﬁrst epoch of training, as most sampled sentences ini-
+tially score signiﬁcantly lower than the sentence produced
+by the test-time inference algorithm.
+
+Training on different metrics.
+
+We experimented with training directly on the evaluation
+metrics of the MSCOCO challenge. Results for FC-2K
+models are depicted in table 3.
+In general we can see
+that optimizing for a given metric during training leads
+to the best performance on that same metric at test time,
+an expected result. We experimented with training on
+multiple test metrics, and found that we were unable to
+outperform the overall performance of the model trained
+only on the CIDEr metric, which lifts the performance of
+all other metrics considerably. For this reason most of our
+experimentation has since focused on optimizing CIDEr.
+
+Single FC-Models Versus Attention Models. We trained
+FC models (2K and 15 K), as well as attention models
+(Att2in and Att2all) using SCST with the CIDEr metric. We
+trained 4 different models for each FC and attention type,
+starting the optimization from four different random seeds
+2. We report in Table 4, the system with best performance
+
+2pls. consult the supp. material for further details on model training.
+
+Figure 2: Mean/std. CIDEr of SCST versus REINFORCE
+with learned baseline (MIXER less CL) with greedy decod-
+ing, for Att2all models (4 seeds) on the Karpathy validation
+set (CIDEr-D optimized).
+
+Figure 3: Mean/std. CIDEr of SCST versus REINFORCE
+with learned baseline (MIXER less CL) with beam search
+decoding, for Att2all models (4 seeds) on the Karpathy val-
+idation set (CIDEr-D optimized).
+
+for each family of models on the test portion of Karpathy
+splits [21]. We see that the FC-15K models outperform the
+FC-2K models. Both FC models are outperformed by the
+attention models, which establish a new state of the art for
+a single model performance on Karpathy splits. Note that
+this quantitative evaluation favors attention models is inline
+with our observation that attention models tend to general-
+ize better and compose outside of the context of the training
+
+Training
+Metric
+XE
+XE (beam)
+CIDEr
+BLEU
+ROUGEL
+METEOR
+
+Evaluation Metric
+CIDEr BLEU4 ROUGEL METEOR
+90.9
+94.0
+106.3
+94.4
+97.7
+80.5
+
+28.6
+29.6
+31.9
+33.2
+31.6
+25.3
+
+52.3
+52.6
+54.3
+53.9
+55.4
+51.3
+
+24.1
+25.2
+25.5
+24.6
+24.5
+25.9
+
+Table 3: Performance on the test portion of the Karpathy
+splits [21] as a function of training metric ( FC-2K models).
+Optimizing the CIDEr metric increases the overall perfor-
+mance under the evaluation metrics the most signiﬁcantly.
+The performance of the seed cross-entropy (XE) model is
+also depicted. All models were decoded greedily, with the
+exception of the XE beam search result, which was opti-
+mized to beam 3 on the validation set.
+
+don’t do any ﬁne-tuning of the Resnet. NIC [23], in con-
+trast, used an ensemble of 15 models with ﬁne-tuned CNNs.
+
+5.2. Online Evaluation on MS-COCO Server
+
+Table 6 reports the performance of two variants of 4 en-
+sembled attention models trained with self-critical sequence
+training (SCST) on the ofﬁcial MSCOCO evaluation server.
+The previous best result on the leaderboard (as of April 10,
+2017) is also depicted. We outperform the previous best
+system on all evaluation metrics.
+6. Example of Generated Captions
+
+Here we provide a qualitative example of the captions
+generated by our systems for the image in ﬁgure 6. This
+picture is taken from the objects out-of-context (OOOC)
+dataset of images [24]. It depicts a boat situated in an un-
+usual context, and tests the ability of our models to compose
+descriptions of images that differ from those seen during
+training. The top 5 captions returned by the XE and SCST-
+trained FC-2K, FC-15K, and attention model ensembles
+when deployed with a decoding “beam” of 5 are depicted in
+ﬁgure 7 3. On this image the FC models fail completely, and
+the SCST-trained ensemble of attention models is the only
+system that is able to correctly describe the image. In gen-
+eral we found that the performance of all captioning systems
+on MSCOCO data is qualitatively similar, while on images
+containing objects situated in an uncommon context [24]
+(i.e. unlike the MSCOCO training set) our attention mod-
+els perform much better, and SCST-trained attention mod-
+els output yet more accurate and descriptive captions. In
+general we qualitatively found that SCST-trained attention
+models describe images more accurately, and with higher
+
+3pls. consult the the supp. material for further details on beam search.
+
+Figure 4: Mean/std. gradient variance of SCST versus
+REINFORCE with learned baseline (MIXER less CL),
+for Att2all models (4 seeds) on the Karpathy training set
+(CIDEr-D optimized).
+
+Figure 5: Mean/std. word posterior entropy of SCST ver-
+sus REINFORCE with learned baseline (MIXER less CL),
+for Att2all models (4 seeds) on the Karpathy training set
+(CIDEr-D optimized).
+
+of MSCOCO, as we will see in Section 6.
+Model Ensembling. In this section we investigate the per-
+formance of ensembling over 4 random seeds of the XE
+and SCST-trained FC models and attention models. We see
+in Table 5 that ensembling improves performance and con-
+ﬁrms the supremacy of attention modeling, and establishes
+yet another state of the art result on Karpathy splits [21].
+Note that in our case we ensemble only 4 models and we
+
+Single Best Models (XE)
+
+Ensembled Models (XE)
+
+Single Best Models (SCST unless noted o.w.)
+
+Ensembled Models (SCST unless o.w. noted)
+
+Model
+Type
+
+FC-2K
+
+FC-15K
+
+Att2in
+
+Att2all
+(RL seed)
+
+Evaluation Metric
+
+Search
+Method CIDEr BLEU4 ROUGEL METEOR
+greedy
+beam
+greedy
+beam
+greedy
+beam
+greedy
+beam
+
+90.9
+94.0
+94.1
+96.1
+99.0
+101.3
+97.9
+99.4
+
+52.3
+52.6
+52.9
+52.9
+53.8
+54.3
+53.4
+53.4
+
+28.6
+29.6
+29.5
+30.0
+30.6
+31.3
+29.3
+30.0
+
+24.1
+25.2
+24.4
+25.2
+25.2
+26.0
+25.4
+25.9
+
+Model
+Type
+
+FC-2K
+
+FC-15K
+
+Att2in
+
+4 Att2all
+(REINF.)
+4 Att2all
+(MIXER-CL)
+
+Att2all
+
+Evaluation Metric
+
+Search
+Method CIDEr BLEU4 ROUGEL METEOR
+greedy
+beam
+greedy
+beam
+greedy
+beam
+greedy
+beam
+greedy
+beam
+greedy
+beam
+
+106.3
+106.3
+106.4
+106.6
+111.3
+111.4
+110.2
+110.5
+112.9
+113.0
+113.7
+114.0
+
+25.5
+25.5
+25.5
+25.6
+26.3
+26.3
+26.0
+26.1
+26.4
+26.5
+26.6
+26.7
+
+31.9
+31.9
+32.2
+32.4
+33.3
+33.3
+32.7
+32.8
+34.0
+34.1
+34.1
+34.2
+
+54.3
+54.3
+54.6
+54.7
+55.2
+55.3
+55.1
+55.2
+55.5
+55.5
+55.6
+55.7
+
+Table 4: Performance of the best XE and corr. SCST-trained
+single models on the Karpathy test split (best of 4 random
+seeds). The results obtained via the greedy decoding and
+optimized beam search are depicted. Models learned using
+SCST were trained to directly optimize the CIDEr metric.
+MIXER less CL results (MIXER-) are also included.
+
+conﬁdence, as reﬂected in Figure 7, where the average of
+the log-likelihoods of the words in each generated caption
+are also depicted. Additional examples can be found in the
+supplementary material. Note that we found that Att2in at-
+tention models actually performed better than our Att2all
+models when applied to images “from the wild”, so here we
+focus on demonstrating them.
+
+7. Discussion and Future Work
+
+In this paper we have presented a simple and efﬁcient
+approach to more effectively baselining the REINFORCE
+algorithm for policy-gradient based RL, which allows us
+to more effectively train on non-differentiable metrics, and
+leads to signiﬁcant improvements in captioning perfor-
+mance on MSCOCO—our results on the MSCOCO eval-
+uation sever establish a new state-of-the-art on the task.
+The self-critical approach, which normalizes the reward ob-
+
+Model
+Type
+
+4 FC-2K
+
+4 FC-15K
+
+4 Att2in
+
+Att2all
+(RL seeds)
+
+Model
+Type
+
+4 FC-2K
+
+4 FC-15K
+
+4 Att2in
+
+4 Att2all
+(REINF.)
+4 Att2all
+(MIXER-CL)
+
+4 Att2all
+
+Evaluation Metric
+
+Search
+Method CIDEr BLEU4 ROUGEL METEOR
+greedy
+beam
+greedy
+beam
+greedy
+beam
+greedy
+beam
+
+96.3
+99.2
+97.7
+100.7
+102.8
+106.5
+102.0
+104.7
+
+30.1
+31.2
+30.7
+31.7
+32.0
+32.8
+31.2
+32.2
+
+53.5
+53.9
+53.8
+54.2
+54.7
+55.1
+54.4
+54.8
+
+24.8
+25.8
+25.0
+26.0
+25.7
+26.7
+26.0
+26.7
+
+Evaluation Metric
+
+Search
+Method CIDEr BLEU4 ROUGEL METEOR
+greedy
+beam
+greedy
+beam
+greedy
+beam
+greedy
+beam
+greedy
+beam
+greedy
+beam
+
+108.9
+108.9
+110.4
+110.4
+114.7
+115.2
+113.8
+113.6
+116.6
+116.7
+116.8
+117.5
+
+33.1
+33.2
+33.4
+33.4
+34.6
+34.8
+34.2
+33.9
+34.9
+35.1
+35.2
+35.4
+
+54.9
+54.9
+55.4
+55.4
+56.2
+56.3
+56.0
+55.9
+56.3
+56.4
+56.5
+56.6
+
+25.7
+25.7
+26.1
+26.2
+26.8
+26.9
+26.5
+26.5
+26.9
+26.9
+27.0
+27.1
+
+Table 5: Performance of Ensembled XE and SCST-trained
+models on the Karpathy test split (ensembled over 4 random
+seeds). The models learned using self-critical sequence
+training (SCST) were trained to optimize the CIDEr met-
+ric. MIXER less CL results (MIXER-) are also included.
+
+Ensemble
+SCST models
+Ens. 4 (Att2all)
+Ens. 4 (Att2in)
+Previous best
+
+Evaluation Metric
+CIDEr BLEU4 ROUGEL METEOR
+114.7
+112.3
+104.9
+
+27.0
+26.8
+26.6
+
+56.3
+55.9
+55.2
+
+35.2
+34.4
+34.3
+
+Table 6: Performance of 4 ensembled attention mod-
+els trained with self-critical sequence training (SCST)
+(5 refer-
+on the ofﬁcial MSCOCO evaluation server
+result on the
+ence captions).
+leaderboard (as of 04/10/2017)
+is also depicted (
+http://mscoco.org/dataset/#captions-leaderboard, Table C5,
+Watson Multimodal).
+
+The previous best
+
+tained by sampled sentences with the reward obtained by
+the model under the test-time inference algorithm is intu-
+itive, and avoids having to estimate both action-dependent
+and action-independent reward functions.
+
+Figure 6: An image from the objects out-of-context (OOOC) dataset of images from [24].
+
+Figure 7: Captions generated for the image depicted in Figure 6 by the various models discussed in the paper. Beside each
+caption we report the average log probability of the words in the caption. On this image, which presents an object situated in
+an atypical context [24], the FC models fail to give an accurate description, while the attention models handle the previously
+unseen image composition well. The models trained with SCST return a more accurate and more detailed summary of the
+image.
+
+[16] John Schulman, Philipp Moritz, Sergey Levine, Michael Jor-
+dan, and Pieter Abbeel. High-dimensional continuous con-
+trol using generalized advantage estimation. arXiv preprint
+arXiv:1506.02438, 2015. 2
+
+[17] Wojciech Zaremba and Ilya Sutskever. Reinforcement learn-
+
+ing neural turing machines. Arxiv, 2015. 2, 3
+
+[18] Andriy Mnih and Karol Gregor. Neural variational in-
+arXiv preprint
+
+ference and learning in belief networks.
+arXiv:1402.0030, 2014. 2
+
+[19] Dzmitry Bahdanau, Philemon Brakel, Kelvin Xu, Anirudh
+Goyal, Ryan Lowe, Joelle Pineau, Aaron C. Courville, and
+Yoshua Bengio. An actor-critic algorithm for sequence pre-
+diction. Arxiv, 2016. 2
+
+[20] Diederik P. Kingma and Jimmy Ba. Adam: A method for
+
+stochastic optimization. ICLR, 2015. 3, 5
+
+[21] Andrej Karpathy and Fei-Fei Li. Deep visual-semantic align-
+ments for generating image descriptions. In CVPR, 2015. 4,
+6, 7
+
+[22] Kaiming He, Xiangyu Zhang, Shaoqing Ren, and Jian Sun.
+In CVPR,
+
+Deep residual learning for image recognition.
+2016. 4
+
+[23] Oriol Vinyals, Alexander Toshev, Samy Bengio, and Du-
+mitru Erhan. Show and tell: Lessons learned from the 2015
+MSCOCO image captioning challenge. PAMI, 2016. 7
+
+[24] Myung Jinchoi, Antonio Torralba, and Alan S. Willsky. Con-
+
+text models and out-of-context objects. 7, 9, 11, 13, 15, 16
+
+References
+
+[1] Tsung-Yi Lin, Michael Maire, Serge J. Belongie, Lubomir D.
+Bourdev, Ross B. Girshick, James Hays, Pietro Perona, Deva
+Ramanan, Piotr Doll´ar, and C. Lawrence Zitnick. Microsoft
+COCO: common objects in context. EECV, 2014. 1, 4
+
+[2] Kyunghyun Cho, Bart van Merrienboer, C¸ aglar G¨ulc¸ehre,
+Fethi Bougares, Holger Schwenk,
+and Yoshua Ben-
+gio. Learning phrase representations using RNN encoder-
+decoder for statistical machine translation. EMNLP, 2014.
+1
+
+[3] Oriol Vinyals, Alexander Toshev, Samy Bengio, and Du-
+mitru Erhan. Show and tell: A neural image caption gen-
+erator. CVPR, 2015. 1, 2
+
+[4] Andrej Karpathy and Fei-Fei Li. Deep visual-semantic align-
+ments for generating image descriptions. CVPR, 2015. 1, 2
+
+[5] Sepp Hochreiter and J¨urgen Schmidhuber. Long short-term
+
+memory. Neural Comput., 1997. 1, 2
+
+[6] Kelvin Xu, Jimmy Ba, Ryan Kiros, Kyunghyun Cho,
+Aaron C. Courville, Ruslan Salakhutdinov, Richard S.
+Zemel, and Yoshua Bengio. Show, attend and tell: Neural
+In ICML,
+image caption generation with visual attention.
+2015. 1, 2, 3
+
+[7] Marc’Aurelio Ranzato, Sumit Chopra, Michael Auli, and
+Wojciech Zaremba. Sequence level training with recurrent
+neural networks. ICLR, 2015. 1, 2, 3, 4, 5, 6, 11
+
+[8] Samy Bengio, Oriol Vinyals, Navdeep Jaitly, and Noam
+Shazeer. Scheduled sampling for sequence prediction with
+recurrent neural networks. In NIPS, 2015. 1, 4, 5, 11
+
+[9] Alex Lamb, Anirudh Goyal, Ying Zhang, Saizheng Zhang,
+Aaron Courville, and Yoshua Bengio. Professor forcing: A
+new algorithm for training recurrent networks. Neural Infor-
+mation Processing Systems (NIPS) 2016, 2016. 1, 4
+
+[10] Kishore Papineni, Salim Roukos, Todd Ward, and Wei-Jing
+Zhu. Bleu: A method for automatic evaluation of machine
+translation. In ACL, 2002. 2
+
+[11] Chin-Yew Lin. Rouge: A package for automatic evalua-
+In Text summarization branches out:
+tion of summaries.
+Proceedings of the ACL-04 workshop, volume 8. Barcelona,
+Spain, 2004. 2
+
+[12] Satanjeev Banerjee and Alon Lavie. Meteor: An automatic
+metric for mt evaluation with improved correlation with hu-
+man judgments. In Proceedings of the acl workshop on in-
+trinsic and extrinsic evaluation measures for machine trans-
+lation and/or summarization, volume 29, pages 65–72, 2005.
+2
+
+[13] Ramakrishna Vedantam, C. Lawrence Zitnick, and Devi
+Parikh. Cider: Consensus-based image description evalua-
+tion. In CVPR, 2015. 2, 11
+
+[14] Richard S. Sutton and Andrew G. Barto. Reinforcement
+
+learning: An introduction. MIT Press, 1998. 2, 3
+
+[15] Ronald J. Williams. Simple statistical gradient-following al-
+In Ma-
+
+gorithms for connectionist reinforcement learning.
+chine Learning, pages 229–256, 1992. 2, 3
+
+Self-critical Sequence Training for Image Captioning:
+Supplementary Material
+
+A. Beam search
+
+Throughout the paper and in this supplementary material we often refer to caption results and evaluation metric results
+obtained using “beam search”. This section brieﬂy summarizes our beam search procedure. While decoding the image to
+generate captions that describe it, rather than greedily selecting the most probable word (N = 1), we can maintain a list of
+the N most probable sub-sequences generated so far, generate posterior probabilities for the next word of each of these sub-
+sequences, and then again prune down to the N -best sub-sequences. This approach is widely referred to as a beam search,
+where N is the width of the decoding “beam”. In our experiments we additionally prune away hypotheses within the N -best
+list that have a log probability that is below that of the maximally probable partial sentence by more than ∆log = 5. For all
+reported results, the value of N is tuned on a per-model basis on the validation set (of the Karpathy splits). On MSCOCO
+data, N = 2 is typically optimal for cross-entropy (XE) trained models and SCST-trained models, but in the latter case beam
+search provides only a very small boost in performance. For our captioning demonstrations we set N = 5 for all models
+for illustrative purposes, and because we have qualitatively observed that for test images that are substantially different from
+those encountered during training, beam search is important.
+
+B. Performance of XE versus SCST trained models
+
+In tables 4 and 5 of the main text we compared the performance of models trained to optimize the CIDEr metric with
+self-critical sequence training (SCST) with that of their corresponding bootstrap models, which were trained under the cross-
+entropy (XE) criterion using scheduled sampling [8]. We provide some additional details about these experiments here. For
+all XE models, the probability pf of feeding forward the maximally probable word rather than the ground-truth word was
+increased by 0.05 every 5 epochs until reaching a maximum value of 0.25. The XE model with the best performance on the
+validation set of the Karpathy splits was then selected as the bootstrap model for SCST (with the exception of the Att2all
+attention models, where CE training was intentionally terminated prematurely to encourage more exploration during early
+epochs of RL training).
+
+For all models, the performance of greedily decoding each word at test time is reported, as is the performance of beam
+search as described in the previous section. As reported in [7], we found that beam search using RL-trained models resulted
+in very little performance gain. Figure 8 depicts the performance of our best Att2in model, which is trained to directly
+optimize the CIDEr metric, as a function of training epoch and evaluation metric, on the validation portion of the Karpathy
+splits. Optimizing CIDEr clearly improves all of the MSCOCO evaluation metrics substantially.
+
+C. Examples of Generated Captions
+
+Figures 9-16 depict demonstrations of the captioning performance of all systems. In general we found that the perfor-
+mance of all captioning systems on MSCOCO data is qualitatively similar, while on images containing objects situated in an
+uncommon context [24] (i.e. unlike the MSCOCO training set) our attention models perform much better, and SCST-trained
+attention models output yet more accurate and descriptive captions.
+
+D. Further details and analysis of SCST training
+
+One detail that was crucial to optimizing CIDEr to produce better models was to include the EOS tag as a word. When the
+EOS word was omitted, trivial sentence fragments such as “with a” and “and a” were dominating the metric gains, despite
+the “gaming” counter-measures (sentence length and precision clipping) that are included in CIDEr-D [13], which is what
+we optimized. Including the EOS tag substantially lowers the reward allocated to incomplete sentences, and completely
+resolved this issue. Another more obvious detail that is important is to associate the reward for the sentence with the ﬁrst
+EOS encountered. Omitting the reward from the ﬁrst EOS fails to reward sentence completion which leads to run-on, and
+rewarding any words that follow the ﬁrst EOS token is inconsistent with the decoding procedure.
+
+This work has focused on optimizing the CIDEr metric, since, as discussed in the paper, optimizing CIDER substantially
+improves all MSCOCO evaluation metrics, as was shown in tables 4 and 5 and is depicted in ﬁgure 8. Nevertheless, directly
+optimizing another metric does lead to higher evaluation scores on that same metric as shown, and so we have started to
+experiment with including models trained on Bleu, Rouge-L, and METEOR in our Att2in ensemble to attempt to improve it
+
+Figure 8: Performance of our best Att2in model, which is trained to directly optimize the CIDEr metric, as a function of
+training epoch on the validation portion of the Karpathy splits, for the CIDEr, BLEU-4, ROUGE-L, and METEOR MSCOCO
+evaluation metrics. Optimizing CIDEr improves all of these evaluation metrics substantially.
+
+further. So far we have not been able to substantially improve performance w.r.t. the other metrics without more substantially
+degrading CIDEr.
+
+Figure 9: Picture of a common object in MSCOCO (a giraffe) situated in an uncommon context (out of COCO domain) [24].
+
+Figure 10: Captions generated by various models discussed in the paper to describe the image depicted in ﬁgure 9. Beside
+each caption we report the average of the log probabilities of each word, normalized by the sentence length. Notice that
+the attention models trained with SCST give an accurate description of this image with high conﬁdence. Attention models
+trained with XE are less conﬁdent about the correct description. FC models trained with CE or SCST fail at giving an accurate
+description.
+
+Figure 11: An image from the MSCOCO test set (Karpathy splits).
+
+Figure 12: Captions generated for the image depicted in Figure 11 by various models discussed in the paper. Beside each
+caption we report the average log probability of the words in the caption. All models perform well on this test image from the
+MSCOCO distribution. More generally we have observed that qualitatively, all models perform comparably on the MSCOCO
+test images.
+
+Figure 13: An image from the objects out-of-context (OOOC) dataset of images from [24].
+
+Figure 14: Captions generated for the image depicted in Figure 13 by the various models discussed in the paper. Beside each
+caption we report the average log probability of the words in the caption. On this image, which presents an object situated in
+an atypical context [24], the FC models fail to give an accurate description, while the attention models handle the previously
+unseen image composition well. The models trained with SCST return a more accurate and more detailed summary of the
+image.
+
+Figure 15: An image from the objects out-of-context (OOOC) dataset of images from [24].
+
+Figure 16: Captions generated for the image depicted in Figure 15 by the various models discussed in the paper. Beside each
+caption we report the average log probability of the words in the caption. On this image, which presents an object situated in
+an atypical context [24], the FC models fail to give an accurate description, while the attention models handle the previously
+unseen image composition well. The models trained with SCST return a more accurate and more detailed summary of the
+image.
+

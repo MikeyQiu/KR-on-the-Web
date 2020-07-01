@@ -1,0 +1,953 @@
+Efﬁcient Segmental Cascades for Speech Recognition
+
+Hao Tang, Weiran Wang, Kevin Gimpel, Karen Livescu
+
+Toyota Technological Institute at Chicago
+{haotang,wwang5,kgimpel,klivescu}@ttic.edu
+
+6
+1
+0
+2
+ 
+g
+u
+A
+ 
+2
+ 
+ 
+]
+L
+C
+.
+s
+c
+[
+ 
+ 
+1
+v
+9
+2
+9
+0
+0
+.
+8
+0
+6
+1
+:
+v
+i
+X
+r
+a
+
+Abstract
+
+Discriminative segmental models offer a way to incorporate
+ﬂexible feature functions into speech recognition. However,
+their appeal has been limited by their computational require-
+ments, due to the large number of possible segments to consider.
+Multi-pass cascades of segmental models introduce features of
+increasing complexity in different passes, where in each pass a
+segmental model rescores lattices produced by a previous (sim-
+pler) segmental model. In this paper, we explore several ways
+of making segmental cascades efﬁcient and practical: reducing
+the feature set in the ﬁrst pass, frame subsampling, and various
+pruning approaches.
+In experiments on phonetic recognition,
+we ﬁnd that with a combination of such techniques, it is possi-
+ble to maintain competitive performance while greatly reducing
+decoding, pruning, and training time.
+Index Terms: segmental conditional random ﬁelds, discrimi-
+native segmental cascades, structure prediction cascades, multi-
+pass decoding
+
+1. Introduction
+
+Segmental models have been proposed for automatic speech
+recognition (ASR) as a way to enable ASR systems to use infor-
+mative features at the segment level, such as duration, trajectory
+information, and segment-level classiﬁers [1, 2]. Discriminative
+segmental models such as segmental conditional random ﬁelds
+(SCRFs) [2] and segmental structured support vector machines
+(SSVMs) [3] allow for ﬂexible integration of a variety of such
+information sources via feature functions with learned weights.
+One of the main impediments to the broad use of segmental
+models is their computational requirements. Since, in principle,
+each edge in the graph of potential segmentations must be con-
+sidered separately, segmental models involve a great deal more
+computation than do frame-based models. This challenge has
+made it difﬁcult to apply segmental models in ﬁrst-pass decod-
+ing, and most segmental ASR work has been done by rescoring
+lattices produced by ﬁrst-pass frame-based systems [2, 4, 5].
+In recent work on phonetic recognition, it has been shown that
+it is possible to achieve high-quality ﬁrst-pass recognition with
+segmental models [6, 7, 8], but computation is still a concern.
+It is possible to obtain large speed improvements through clev-
+erly constrained feature functions [9], but in the general case of
+arbitrary segmental feature functions the problem remains.
+
+In recent work we introduced discriminative segmental cas-
+cades (DSC) [10], a multi-pass approach in which each pass is a
+segmental model. This avoids any reliance on frame-based sys-
+tems to produce lattices and allows the use of arbitrary segmen-
+tal feature functions, while still producing roughly real-time de-
+coding for phonetic recognition. This is achieved by delaying
+the more expensive feature functions to later passes, and using
+deep network compression to further reduce computational re-
+quirements. Discriminative segmental cascades allow us to shift
+
+features between passes, giving us greater ﬂexibility in trading
+off performance and speed. In this paper, we further explore
+this capability for more efﬁcient segmental cascades.
+
+If we can shift features to later passes, we can reduce prun-
+ing time in the ﬁrst pass. If k segments are pruned in the ﬁrst
+pass, then the time saved for the second pass is O(kd) where d
+is the number of features. Even though the second pass uses
+many more features than the ﬁrst pass, the decoding time is
+vastly lower due to sparseness of the lattices.
+
+Another expense is feeding forward in neural networks used
+to compute the feature functions. For example, in our im-
+plementation it takes about 0.33× real-time to feed forward
+in a three-layer bidirectional long short-term memory network
+(LSTM) [11].
+
+The total recognition time is the sum of the decoding and
+feed-forward times. In this paper, we reduce both. By making
+the ﬁrst pass extremely simple and pushing complex features to
+later passes, in combination with frame skipping and high-speed
+pruning, we are able to obtain several-fold speedups in recog-
+nition and training. Ultimately, we obtain a segmental system
+that runs in roughly 1/8 real time and takes roughly 3 hours to
+train on TIMIT, not counting feeding forward. Feeding forward
+alone takes about 1/6 real time, and training LSTMs takes about
+30 hours. In sum, our proposed system decodes in about 1/3 real
+time and takes 33 hours to train with a single four-core CPU.
+
+2. Segmental cascades
+
+Before deﬁning segmental models, we ﬁrst set up the following
+notation. A segment e is a tuple (s, t, ℓ), where s is the start
+time, t is the end time, and ℓ is its label. Let y be a sequence of
+segments ((s1, t1, ℓ1), . . . , (sK, tK, ℓK)). A sequence of con-
+nected segments is also called a path.
+
+Let X be the set of sequences of input acoustic vectors. For
+any x ∈ X , let Y(x) be the set of paths that cover x. We call
+Y(x) the hypothesis space of x. Let E be the set of all possible
+segments. A segmental model is a tuple (θ, φ), where θ ∈ Rd
+are the model parameters and φ : X × E → Rd is a vector of
+feature functions. For any segmental model, we can use it to
+predict (decode) by ﬁnding the best-scoring path:
+
+argmax
+y∈Y(x)
+
+θ⊤φ(x, y),
+
+(1)
+
+where φ(x, y) = Pe∈y φ(x, e) (here we treat the sequence y
+as a set and e enumerates over the segments).
+
+For efﬁcient decoding, we will encode a hypothesis space
+Y(x) as a ﬁnite-state transducer (FST). A ﬁnite-state transducer
+is a tuple (V, E, I, F, tail, head, i, o, w), where V is a set of ver-
+tices, E is a set of edges, I is a set of starting vertices, F is a set
+of ending vertices, tail : E → V is a function that maps an edge
+to its starting vertex, head : E → V is a function that maps an
+edge to its ending vertex, i : E → Σ is a function that maps an
+
+edge to an input symbol in the input symbol set Σ, o : E → Λ
+is a function that maps an edge to an output symbol in the out-
+put symbol set Λ, and w : E → R is a function that maps an
+edge to a weight. We also deﬁne adj(v) = {e : tail(e) = v},
+the set of edges that start at vertex v. We deliberately reuse E
+in this deﬁnition since edges in the FST correspond to segments
+in the hypothesis space.
+
+A segmental cascade [10] is a multi-pass system, consist-
+ing of a sequence of segmental models A1, A2, . . . , AM . Given
+x ∈ X , we ﬁrst train A1 = (θ1, φ1) on Y1 = Y(x), and use A1
+to prune Y1 to produce Y2. In general, for any i, we train Ai
+on Yi and produce Yi+1. In the end, we use the ﬁnal segmental
+model AM to predict by choosing the best scoring path in YM .
+The hypothesis spaces Y2, Y3, . . . are often called lattices.
+
+Based on [12]’s comparison of various losses and costs for
+training segmental models, we use hinge loss with overlap cost.
+In the next several sections, we introduce several ingredients
+that we explore for speeding up decoding and training.
+
+After computing the maximum and minimum, we use them to
+compute the threshold
+
+t = αbeamsmax + (1 − αbeam)smin,
+
+where αbeam controls the proportion of edges to be pruned.
+Edges are pruned locally while branching out according to the
+threshold. Edges that survived pruning are kept in the set
+
+Sv = {e ∈ adj(v) : d(v) + w(e) > t}.
+
+Paths are expanded as well:
+
+P ← [
+p∈P
+
+{pe : e ∈ Sv},
+
+where pe is the concatenation of p and e. The maximum scores
+are updated for every e ∈ Sv, and the algorithm keeps the ver-
+tices that are not pruned and moves on to the next reachable
+vertex:
+
+3. Efﬁciency measure 1: A simple
+two-feature ﬁrst-pass model
+
+d(head(e)) ← max(d(head(e)), d(tail(e)) + w(e))
+
+B ← (B \ {v}) ∪ {head(e) : e ∈ Sv}
+
+The ﬁrst efﬁciency measure we explore is a ﬁrst pass segmental
+model that is as simple as possible, in order to prune the initial
+In particular, to use as
+hypothesis space as fast as possible.
+few features as possible in the ﬁrst pass, we propose a two-
+feature segmental model that, as the name suggests, uses only
+two features: a label posterior feature deﬁned below, and a bias.
+We assume the existence of a neural network classiﬁer that
+produces a posterior for each possible label for each frame of
+acoustic input. For any segment (s, t, ℓ), the label posterior
+feature φp is the sum of the log posterior of the label ℓ (accord-
+ing to the frame classiﬁer) over the frames in the segment:
+
+Vertices not reachable from B are simply ignored. The set of
+paths P comprise the ﬁnal output lattice.
+
+4.2. Max-marginal edge pruning
+
+The max-marginal [15, 16] of an edge is deﬁned as the maxi-
+mum path score among the paths that pass through e:
+
+γ(e) = max
+y∋e
+
+θ⊤φ(x, y).
+
+(5)
+
+We prune an edge e if its max-marginal γ(e) is below a certain
+threshold. We use a threshold of the following form
+
+φp(x, (s, t, ℓ)) =
+
+log h(x)k,ℓ
+
+(2)
+
+t
+
+X
+k=s
+
+t = αedge max
+e∈E
+
+γ(e) + (1 − αedge)
+
+γ(e),
+
+1
+|E| X
+
+e∈E
+
+where h(x) is the sequence of output vectors of the network
+given x, and h(x)k,ℓ is the ℓ-th vector element at time k.
+
+4. Efﬁciency measure 2: Pruning
+
+One major component in segmental cascades is pruning. Differ-
+ent pruning methods produce lattices with different properties.
+We consider three pruning methods, described next, and will
+experimentally compare the quality of lattices they produce.
+
+4.1. Beam pruning
+
+Beam pruning [13] is a widely used pruning method, and it in-
+cludes many variants with different pruning criteria [14]. For
+a precise comparison, we describe in detail the beam pruning
+algorithm we use here.
+
+The algorithm keeps track of the maximum partial scores
+of paths reaching a vertex v, d(v); the vertices it will explore,
+B; and the paths explored so far, P. The algorithm starts with
+B ← I, P ← ∅, and d(i) = 0 for all i ∈ I. The vertices are
+traversed in topological order. Suppose v is traversed, and v ∈
+B. We calculate the maximum and minimum score branching
+out from v:
+
+smax = d(v) + max
+e∈adj(v)
+
+w(e)
+
+smin = d(v) + min
+
+w(e)
+
+e∈adj(v)
+
+(3)
+
+(4)
+
+where αedge controls the proportion of edges that are pruned.
+Max-marginal edge pruning has a guarantee that all paths left
+unpruned have higher scores than the threshold, while beam
+pruning has none. However, for max-marginal edge pruning,
+we need to enumerate the edges at least once, while for beam
+pruning, we are able to ignore some of the edges without even
+accessing them.
+
+4.3. Max-marginal vertex pruning
+
+The max-marginal of a vertex is deﬁned as
+
+γ(v) = max
+y∋v
+
+θ⊤φ(x, y).
+
+(6)
+
+In words, it is the maximum path score among the paths that
+pass through v. We prune a vertex v if its max-marginal γ(v)
+is below a certain threshold. Similarly to edge pruning, we use
+the threshold
+
+t = αvertex max
+v∈V
+
+γ(v) + (1 − αvertex)
+
+γ(v),
+
+1
+|V | X
+
+v∈V
+
+where αvertex controls the aggressiveness of the pruning.
+
+Because of the way we construct FSTs from hypothesis
+spaces, a vertex corresponds to the time of the boundary be-
+tween its two neighboring segments. When a vertex is pruned,
+it indicates that the corresponding time point is unlikely to be a
+true boundary between segments.
+
+5. Efﬁciency measure 3: Subsampling
+
+In our segmental models, we use deep bidirectional LSTMs
+trained separately with log loss to produce frame posteriors
+h1, . . . , hT given input vectors x1, . . . , xT and frame label
+hypotheses y1, . . . , yT . LSTMs are increasingly popular for
+speech recognition and, in recent work, have obtained excellent
+performance as feature generators for segmental models [8].
+Not surprisingly, feeding forward through the networks con-
+tributes a large part of the total computation time. Following
+[17, 18], we consider dropping half of the frames for any given
+utterance in order to save time on feeding forward. Speciﬁcally,
+we only use x2, x4, . . . , xT −2, xT to feed forward through the
+deep LSTM and generate h2, h4, . . . , hT −2, hT (assuming T
+is even, without loss of generality). We then copy each even-
+indexed output to its previous frame, i.e., hi−1 = hi for
+i = 2, 4, . . . , T − 2, T . During training, the log loss is cal-
+culated over all frames and propagated back. Speciﬁcally, let
+T
+Ei be the log loss at frame i, and E = P
+i=1 Ei. The gradient
+of hi is the sum of the gradients from the current frame and the
+copied frame. Dropping even-indexed frames is similar to drop-
+ping odd-indexed frames, except the outputs are copied from hi
+to hi+1 for i = 1, 3, . . . , T − 1.
+
+6. Experiments
+
+We test our proposed efﬁciency measures for the task of pho-
+netic recognition on the TIMIT dataset. An utterance in TIMIT
+is about 3 seconds on average, so absolute wall-clock time cor-
+responding to 1 times real-time is 3 seconds per utterance.
+
+For the following experiments, the running time is mea-
+sured on a machine with a Core i7-2600 3.4 GHz quad-core
+CPU. All pruning and decoding experiments are done with a
+single thread, and all neural network feeding forward and back-
+propagating are done with four threads.
+
+6.1. LSTM frame classiﬁcation
+
+Most of our segmental features are computed from the outputs
+of an LSTM, so we ﬁrst explore its performance. We build a
+frame classiﬁer by stacking 3 layers of bidirectional LSTM. The
+cell and hidden vectors have 256 units. We train the frame clas-
+siﬁer with frame-wise log-loss and optimize with AdaGrad [19]
+with mini-batch size of 1 and step size 0.01 for 30 epochs. We
+choose the best-performing model on the development set (early
+stopping).
+
+We compare training the LSTM with and without dropout.
+Following [20], we use dropout on the input vectors of the sec-
+ond and third layer. The results are shown in Figure 1. Without
+dropout, we observe that the frame error rates on the develop-
+ment set slightly increase toward the end, while with dropout,
+the frame error rates improve by about 1% absolute.
+
+Next we consider the effect of frame subsampling. When
+training LSTMs with subsampling, we alternate between drop-
+ping even- and odd-numbered frames every other epoch. Other
+training hyper-parameters remain the same. We observe that
+with subsampling the model converges more slowly than with-
+out, in terms of number of epochs. However, by the end of
+epoch 30, there is almost no loss in frame error rates when we
+drop half of the frames. Considering the more important mea-
+sure of training time rather than number of epochs, the LSTMs
+with frame subsampling converge twice as fast as those without
+subsampling. For the remaining experiments, we use the log
+posteriors at each frame of the subsampled LSTM outputs as
+the inputs to the segmental models.
+
+)
+
+%
+
+(
+ 
+e
+t
+a
+r
+ 
+r
+o
+r
+r
+e
+ 
+e
+m
+a
+r
+f
+
+34
+
+32
+
+30
+
+28
+
+26
+
+24
+
+22
+
+)
+
+%
+
+(
+ 
+e
+t
+a
+r
+ 
+r
+o
+r
+r
+e
+ 
+e
+m
+a
+r
+f
+
+34
+
+32
+
+30
+
+28
+
+26
+
+24
+
+22
+
+)
+
+%
+
+(
+ 
+R
+E
+P
+ 
+e
+l
+c
+a
+r
+o
+
+7
+6
+5
+4
+3
+2
+1
+0
+
+0
+
+5
+
+10 15 20 25 30
+
+epoch
+
+0 1 2 3 4 5 6 7 8
+real-time factor
+
+Figure 1: Development set frame error rates vs. number of
+epochs (left) and vs. training real-time factor (time spent train-
+dropout
+ing / duration of training set, right).
+
+vanilla
+
+subsampling+dropout
+
+)
+
+%
+
+(
+ 
+R
+E
+P
+ 
+e
+l
+c
+a
+r
+o
+
+7
+6
+5
+4
+3
+2
+1
+0
+0.06 0.07 0.08 0.09 0.10
+real-time factor
+
+0
+
+400
+800
+lattice density
+(edges per gold edge)
+
+1200
+
+Figure 2:
+Left: Densities versus oracle error rates of lat-
+tices generated by different pruning methods. Right: Time
+spent on generating the lattices with different pruning methods.
+
+edge pruning
+
+vertex pruning
+
+beam pruning
+
+6.2. Segmental cascade experiments
+
+Our baseline system is a discriminative segmental model R
+based on [10], which is a ﬁrst-pass segmental model using the
+following segment features: log posterior averages, log poste-
+rior samples, log posteriors at the boundaries, segment length
+indicators, and bias. See [10] for more complete descriptions
+of the features. All features are lexicalized with label unigrams.
+The baseline system is trained by optimizing hinge loss with
+AdaGrad using mini-batch size 1, step size 0.1, and early stop-
+ping for 50 epochs.
+
+Recall that the proposed two-feature ﬁrst-pass system is a
+segmental model A1 with just the label posterior and bias fea-
+tures. We use hinge loss optimized with AdaGrad with mini-
+batch size 1 and step size 1. None of the features are lexical-
+ized. Since we only have two features, learning converges very
+quickly, in only three epochs. We take the model from the third
+epoch to produce lattices for subsequent passes in the cascade.
+Given A1, we compare lattices generated by A1 with differ-
+ent pruning methods. We consider αedge ∈ {0.8, 0.85, 0.9} for
+edge pruning, αvertex ∈ {0.925, 0.95, 0.975} for vertex prun-
+ing, and αbeam ∈ {0.93, 0.94, 0.95, 0.96} for beam pruning.
+The results are shown in Figure 2. We observe that edge prun-
+ing generally gives the best density-oracle error rate tradeoff.
+Beam search is inferior in terms of speed and lattice quality.
+
+We also measure real-time factors for different pruning
+methods, shown in Figure 2. We can see that all pruning meth-
+ods can obtain oracle error rates less than 2% within 0.1 × real-
+time. No single pruning method is signiﬁcantly faster than the
+others. Intuitively, while max-marginal pruning requires more
+computation per edge, it makes more informed decisions. The
+bottom line is that max-marginal pruning produces less-dense
+lattices with the same performance in the same amount of time.
+Based on the above experiments, we use lattices produced
+by edge pruning with αedge = 0.85 for the remaining experi-
+ments, because the lattices are sparse and have only 1.4% ora-
+cle error rate. We train a second-pass model A2 with the same
+
+Table 1: Real-time factors for decoding per sample and hours for training the system.
+
+decoding (RT)
+1st
+pass
+0.33
+0.11
+
+2nd
+pass
+0.01
+0.02
+
+3rd
+pass
+
+0.01
+
+baseline
+proposed
+
+total
+decoding
+0.34
+0.14
+
+feeding
+forward
+0.33
+0.17
+
+total
+overall
+0.67
+0.31
+
+training (hours)
+1st
+pass
+49.5
+1.0
+
+2nd
+pass
+0.6
+1.2
+
+3rd
+pass
+
+0.6
+
+total
+training
+50.1
+2.8
+
+feeding
+forward
+59.4
+29.7
+
+total
+overall
+109.5
+32.5
+
+40
+
+35
+
+30
+
+25
+
+)
+
+%
+
+(
+ 
+R
+E
+P
+
+20
+
+0.0
+
+0.4
+
+0.8
+
+1.2
+
+real-time factor
+
+Figure 3: Learning curve of the proposed two-pass system
+compared with the baseline system. The time gap between
+the ﬁrst pass and the second pass is the time spent on prun-
+proposed 1st pass (A1)
+ing.
+
+baseline 1st pass (R)
+
+proposed 2nd pass (A2)
+
+features as the baseline system R except that we add a “lattice
+score” feature corresponding to the segment score given by the
+two-feature system A1. Hinge loss is optimized with AdaGrad
+with mini-batch size 1, step size 0.1, and early stopping for 20
+epochs.
+
+The learning curve comparing R and A1 followed by A2 is
+shown in Figure 3. We observe that the learning time per epoch
+of the two-feature system A1 is only one-third of the baseline
+system R. We also observe that training of A2 converges faster
+than training R, despite the fact that they use almost identical
+feature functions. The baseline system achieves the best result
+at epoch 49. In contrast, the two-pass system is done before the
+baseline even ﬁnishes the third epoch.
+
+Following [10], given the ﬁrst-pass baseline, we apply max-
+marginal edge pruning to produce lattices for the second-pass
+baseline with αedge = 0.8. The second-pass baseline features
+are the lattice score from the ﬁrst-pass baseline, a bigram lan-
+guage model score, ﬁrst-order length indicators, and a bias.
+Hinge loss is optimized with AdaGrad with mini batch size
+1, step size 0.01, and early stopping for 20 epochs. For the
+proposed system, we produce lattices with edge pruning and
+αedge = 0.3 for the third-pass system. We use the same set of
+features and hyper-parameters as the second-pass baseline for
+the third pass.
+
+Phone error rates of all passes are shown in Table 2. First, if
+we compare the one-pass baseline with the proposed two-pass
+system, our system is on par with the baseline. Second, we
+observe a healthy improvement by just adding the bigram lan-
+guage model score to the second-pass baseline. The improve-
+ment for our third-pass system is small but brings our ﬁnal per-
+formance to within 0.4 of the baseline second pass.
+
+Next we report on the speedups in training and decoding ob-
+tained with our proposed approach. Table 1 shows the real-time
+factors for decoding with the baseline and proposed systems.
+In terms of decoding time alone, we achieve a 2.4 time speedup
+compared to the baseline. If the time of feeding forward LSTMs
+is included, then our proposed system is two times faster than
+
+Table 2: Phone error rates (%) of proposed and baseline sys-
+tems.
+
+baseline
+
+proposed
+
+dev
+test
+dev
+test
+
+1st pass
+21.9
+24.0
+33.6
+
+2nd pass
+21.0
+23.0
+21.5
+23.7
+
+3rd pass
+
+21.3
+23.4
+
+the baseline.
+
+Table 1 shows the times needed to train a system to get to
+the performance in Table 2. The speedup mostly comes from
+the fast convergence of the ﬁrst pass. In terms of training the
+segmental models alone, we achieve an 18.0-fold speedup. If
+the time to train the LSTMs is included, then we obtain a 3.4-
+fold speedup compared to the baseline.
+
+To summarize some of the above results: With a combina-
+tion of the ﬁrst-pass two-feature system and edge pruning, we
+prune 95% of the segments in the ﬁrst-pass hypothesis space,
+leading to signiﬁcant speedup in both decoding and training.
+The feed-forward time for our LSTMs is halved through frame
+subsampling.
+In the end, with a single four-core CPU, we
+achieve 0.31 times real-time decoding including feeding for-
+ward, which is 2.2 times faster than the baseline, and 32.5
+hours in total to obtain our ﬁnal model including LSTM train-
+ing, which is 3.4 times faster than the baseline. Excluding the
+LSTMs, the segmental model decoding alone is 2.4 times faster
+than the baseline, and training the segmental models alone is 18
+times faster than the baseline.
+
+7. Conclusion
+
+We have studied efﬁciency improvements to segmental speech
+recognition structured as a discriminative segmental cascade.
+Segmental cascades allow us to push features around between
+different passes to optimize speed and performance. We have
+taken advantage of this and proposed an extremely simple ﬁrst-
+pass segmental model with just two features, a label posterior
+and a bias, which is intuitively like a segmental analogue of
+a typical hybrid model. We have also compared pruning ap-
+proaches and ﬁnd that max-marginal edge pruning is the most
+effective in terms of time, lattice density, and oracle error rates.
+With the combination of these measures and frame subsampling
+for our input LSTMs, we obtain large gains in decoding and
+training speeds. With decoding and training now being much
+faster, future work will explore even richer feature functions
+and larger-scale tasks such as word recognition.
+
+8. Acknowledgements
+
+This research was supported by a Google faculty research award
+and NSF grant IIS-1433485. The opinions expressed in this
+work are those of the authors and do not necessarily reﬂect the
+views of the funding agency. The GPUs used for this research
+were donated by NVIDIA.
+
+[20] W. Zaremba, I. Sutskever, and O. Vinyals, “Recurrent neural net-
+work regularization,” arXiv preprint arXiv:1409.2329, 2014.
+
+9. References
+[1] J. Glass, “A probabilistic framework for segment-based speech
+recognition,” Computer Speech & Language, vol. 17, no. 2, pp.
+137–152, 2003.
+
+[2] G. Zweig and P. Nguyen, “A segmental CRF approach to large
+vocabulary continuous speech recognition,” in IEEE Workshop on
+Automatic Speech Recognition & Understanding, 2009, pp. 152–
+157.
+
+[3] S.-X. Zhang, A. Ragni, and M. J. F. Gales, “Structured log linear
+models for noise robust speech recognition,” Signal Processing
+Letters, IEEE, vol. 17, no. 11, pp. 945–948, 2010.
+
+[4] G. Zweig, P. Nguyen, D. V. Compernolle, K. Demuynck, L. Atlas,
+P. Clark, G. Sell, M. Wang, F. Sha, H. Hermansky, D. Karakos,
+A. Jansen, S. Thomas, G. Sivaram, S. Bowman, and J. Kao,
+“Speech recognition with segmental conditional random ﬁelds: A
+summary of the JHU CLSP 2010 summer workshop,” in IEEE
+International Conference on Acoustics, Speech and Signal Pro-
+cessing, 2011, pp. 5044–5047.
+
+[5] M. D. Wachter, M. Matton, K. Demuynck, P. Wambacq, R. Cools,
+and D. V. Compernolle, “Template-based continuous speech
+recognition,” Audio, Speech, and Language Processing, IEEE
+Transactions on, vol. 15, no. 4, pp. 1377–1390, 2007.
+
+[6] O. Abdel-Hamid, L. Deng, D. Yu, and H. Jiang, “Deep segmen-
+tal neural networks for speech recognition.” in Proceedings of the
+Annual Conference of International Speech Communication As-
+sociation, 2013, pp. 1849–1853.
+
+[7] Y. He, “Segmental models with an exploration of acoustic and
+lexical grouping in automatic speech recognition,” Ph.D. disserta-
+tion, Ohio State University, 2015.
+
+[8] L. Lu, L. Kong, C. Dyer, N. A. Smith, and S. Renals, “Segmen-
+tal recurrent neural networks for end-to-end speech recognition,”
+arXiv preprint arXiv:1603.00223, 2016.
+
+[9] Y. He and E. Fosler-Lussier, “Efﬁcient segmental conditional ran-
+dom ﬁelds for phone recognition,” in Proceedings of the Annual
+Conference of the International Speech Communication Associa-
+tion, 2012, pp. 1898–1901.
+
+[10] H. Tang, W. Wang, K. Gimpel, and K. Livescu, “Discriminative
+segmental cascades for feature-rich phone recognition,” in IEEE
+Workshop on Automatic Speech Recognition & Understanding,
+2015.
+
+[11] S. Hochreiter and J. Schmidhuber, “Long short-term memory,”
+
+Neural computation, vol. 9, no. 8, pp. 1735–1780, 1997.
+
+[12] H. Tang, K. Gimpel, and K. Livescu, “A comparison of training
+approaches for discriminative segmental models,” in Proceedings
+of the Annual Conference of International Speech Communication
+Association, 2014.
+
+[13] V. Steinbiss, B.-H. Tran, and H. Ney, “Improvements in beam
+
+search,” in ICSLP, vol. 94, no. 4, 1994, pp. 2143–2146.
+
+[14] X. L. Aubert, “An overview of decoding techniques for large
+vocabulary continuous speech recognition,” Computer Speech &
+Language, vol. 16, no. 1, pp. 89–114, 2002.
+
+[15] A. Sixtus and S. Ortmanns, “High quality word graphs using
+forward-backward pruning,” in IEEE International Conference on
+Acoustics, Speech and Signal Processing, 1999, pp. 593–596.
+
+[16] D. Weiss, B. Sapp, and B. Taskar, “Structured prediction cas-
+
+cades,” 2012, arXiv:1208.3279 [stat.ML].
+
+[17] V. Vanhoucke, M. Devin, and G. Heigold, “Multiframe deep neu-
+ral networks for acoustic modeling,” in IEEE International Con-
+ference on Acoustics, Speech and Signal Processing (ICASSP).
+IEEE, 2013, pp. 7582–7585.
+
+[18] Y. Miao, J. Li, Y. Wang, S. Zhang, and Y. Gong, “Simplifying
+long short-term memory acoustic models for fast training and de-
+coding,” in IEEE International Conference on Acoustics, Speech
+and Signal Processing, 2015.
+
+[19] J. Duchi, E. Hazan, and Y. Singer, “Adaptive subgradient methods
+for online learning and stochastic optimization,” The Journal of
+Machine Learning Research, vol. 12, pp. 2121–2159, 2011.
+

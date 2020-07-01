@@ -1,0 +1,1879 @@
+8
+1
+0
+2
+ 
+y
+a
+M
+ 
+6
+1
+ 
+ 
+]
+L
+M
+
+.
+t
+a
+t
+s
+[
+ 
+ 
+4
+v
+5
+4
+4
+1
+0
+.
+6
+0
+7
+1
+:
+v
+i
+X
+r
+a
+
+Batched Large-scale Bayesian Optimization in High-dimensional Spaces
+
+Zi Wang
+MIT CSAIL
+
+Clement Gehring
+MIT CSAIL
+
+Pushmeet Kohli
+DeepMind
+
+Stefanie Jegelka
+MIT CSAIL
+
+Abstract
+
+Bayesian optimization (BO) has become an effec-
+tive approach for black-box function optimization
+problems when function evaluations are expensive
+and the optimum can be achieved within a rela-
+tively small number of queries. However, many
+cases, such as the ones with high-dimensional in-
+puts, may require a much larger number of obser-
+vations for optimization. Despite an abundance of
+observations thanks to parallel experiments, cur-
+rent BO techniques have been limited to merely
+a few thousand observations. In this paper, we
+propose ensemble Bayesian optimization (EBO)
+to address three current challenges in BO simul-
+taneously: (1) large-scale observations; (2) high
+dimensional input spaces; and (3) selections of
+batch queries that balance quality and diversity.
+The key idea of EBO is to operate on an ensem-
+ble of additive Gaussian process models, each of
+which possesses a randomized strategy to divide
+and conquer. We show unprecedented, previously
+impossible results of scaling up BO to tens of
+thousands of observations within minutes of com-
+putation.
+
+1
+
+Introduction
+
+Global optimization of black-box and non-convex functions
+is an important component of modern machine learning.
+From optimizing hyperparameters in deep models to solv-
+ing inverse problems encountered in computer vision and
+policy search for reinforcement learning, these optimiza-
+tion problems have many important applications in ma-
+chine learning and its allied disciplines. In the past decade,
+Bayesian optimization has become a popular approach for
+global optimization of non-convex functions that are expen-
+sive to evaluate. Recent work addresses better query strate-
+gies (Kushner, 1964; Mo˘ckus, 1974; Srinivas et al., 2012;
+
+Proceedings of the 21st International Conference on Artiﬁcial Intel-
+ligence and Statistics (AISTATS) 2018, Lanzarote, Spain. PMLR:
+Volume 84. Copyright 2018 by the author(s).
+
+Hennig and Schuler, 2012; Hern´andez-Lobato et al., 2014;
+Wang et al., 2016a; Kawaguchi et al., 2015), techniques for
+batch queries (Desautels et al., 2014; Gonz´alez et al., 2016),
+and algorithms for high dimensional problems (Wang et al.,
+2016b; Kandasamy et al., 2015).
+
+Despite the above-mentioned successes, Bayesian optimiza-
+tion remains somewhat impractical, since it is typically
+coupled with expensive function estimators (Gaussian pro-
+cesses) and non-convex acquisition functions that are hard
+to optimize in high dimensions and sometimes expensive to
+evaluate. To alleviate these difﬁculties, recent work explored
+the use of random feature approximations (Snoek et al.,
+2015; Lakshminarayanan et al., 2016) and sparse Gaus-
+sian processes (McIntire et al., 2016), but, while improving
+scalability, these methods still suffer from misestimation
+of conﬁdence bounds (an essential part of the acquisition
+functions), and expensive or inaccurate Gaussian process
+(GP) hyperparameter inference. Indeed, to the best of our
+knowledge, Bayesian optimization is typically limited to a
+few thousand evaluations (Lakshminarayanan et al., 2016).
+Yet, reliable search and estimation for complex functions
+in very high-dimensional spaces may well require more
+evaluations. With the increasing availability of parallel com-
+puting resources, large number of function evaluations are
+possible if the underlying approach can leverage the paral-
+lelism. Comparing to the millions of evaluations possible
+(and needed) with local methods like stochastic gradient de-
+scent, the scalability of global Bayesian optimization leaves
+large room for desirable progress. In particular, the lack of
+scalable uncertainty estimates to guide the search is a major
+roadblock for huge-scale Bayesian optimization.
+
+In this paper, we propose ensemble Bayesian optimization
+(EBO), a global optimization method targeted to high dimen-
+sional, large scale parameter search problems whose queries
+are parallelizable. Such problems are abundant in hyper
+and control parameter optimization in machine learning and
+robotics (Calandra, 2017; Snoek et al., 2012). EBO relies
+on two main ideas that are implemented at multiple levels:
+(1) we use efﬁcient partition-based function approximators
+(across both data and features) that simplify and acceler-
+ate search and optimization; (2) we enhance the expressive
+power of these approximators by using ensembles and a
+stochastic approach. We maintain an evolving (posterior)
+
+Batched Large-scale Bayesian Optimization in High-dimensional Spaces
+
+distribution over the (inﬁnite) ensemble and, in each itera-
+tion, draw one member to perform search and estimation.
+
+In particular, we use a new combination of three types of
+partition-based approximations: (1-2) For improved GP esti-
+mation, we propose a novel hierarchical additive GP model
+based on tile coding (a.k.a. random binning or Mondrian
+forest features). We learn a posterior distribution over ker-
+nel width and the additive structure; here, Gibbs sampling
+prevents overﬁtting. (3) To accelerate the sampler, which
+depends on the likelihood of the observations, we use an ef-
+ﬁcient, randomized block approximation of the Gram matrix
+based on a Mondrian process. Sampling and query selection
+can then be parallelized across blocks, further accelerating
+the algorithm.
+
+As a whole, this combination of simple, tractable structure
+with ensemble learning and randomization improves efﬁ-
+ciency, uncertainty estimates and optimization. Moreover,
+we show that our realization of these ideas offers an alter-
+native explanation for global optimization heuristics that
+have been popular in other communities, indicating possible
+directions for further theoretical analysis. Our empirical
+results demonstrate that EBO can speed up the posterior
+inference by 2-3 orders of magnitude (400 times in one
+experiment) compared to the state-of-the-art, without sacri-
+ﬁcing quality. Furthermore, we demonstrate the ability of
+EBO to handle sample-intensive hard optimization problems
+by applying it to real-world problems with tens of thousands
+of observations.
+
+Related Work There has been a series of works address-
+ing the three big challenges in BO: selecting batch evalua-
+tions (Contal et al., 2013; Desautels et al., 2014; Gonz´alez
+et al., 2016; Wang et al., 2017; Daxberger and Low, 2017),
+high-dimensional input spaces (Wang et al., 2016b; Djo-
+longa et al., 2013; Li et al., 2016; Kandasamy et al., 2015;
+Wang et al., 2017; Wang and Jegelka, 2017), and scalability
+(Snoek et al., 2015; Lakshminarayanan et al., 2016; McIn-
+tire et al., 2016). Although these three problems tend to
+co-occur, this paper is the ﬁrst (to the best of our knowledge)
+to address all three challenges jointly in one framework.
+
+Most closely related to parts of this paper is (Wang et al.,
+2017), but our algorithm signiﬁcantly improves on that work
+in terms of scalability (see Sec. 4.1 for an empirical compar-
+ison), and has fundamental technical differences. First, the
+Gibbs sampler by Wang et al. (2017) only learns the additive
+structure but not the kernel parameters, while our sampler
+jointly learns both of them. Second, our proposed algorithm
+partitions the input space for scalability and parallel infer-
+ence. We achieve this by a Mondrian forest. Third, as a
+result, our method automatically generates batch queries,
+while the other work needs an explicit batch strategy.
+
+input space via a Mondrian tree and aggregates trees into a
+forest. The closely related Mondrian kernels (Balog et al.,
+2016) use random features derived from Mondrian forests
+to construct a kernel. Such a kernel, in fact, approximates
+a Laplace kernel. In fact, Mondrian forest features can be
+considered a special case of the popular tile coding features
+widely used in reinforcement learning (Sutton and Barto,
+1998; Albus et al., 1975). Lakshminarayanan et al. (2016)
+showed that, in low-dimensional settings, Mondrian forest
+kernels scale better than the regular GP and achieve good
+uncertainty estimates in many low-dimensional problems.
+
+Besides Mondrian forests, there is a rich literature on sparse
+GP methods to address the scalability of GP regression
+(Seeger et al., 2003; Snelson and Ghahramani, 2006; Titsias,
+2009; Hensman et al., 2013). However, these methods are
+mostly only shown to be useful when the input dimension
+is low and there exist redundant data points, so that induc-
+ing points can be selected to emulate the original posterior
+GP well. However, data redundancy is usually not the case
+in high-dimensional Bayesian optimization. Recent appli-
+cations of sparse GPs in BO (McIntire et al., 2016) only
+consider experiments with less than 80 function evaluations
+in BO and do not show results on large scale observations.
+Another approach to tackle large scale GPs distributes the
+computation via local experts (Deisenroth and Ng, 2015).
+However, this is not very suitable for the acquisition function
+optimization needed in Bayesian optimization, since every
+valid prediction needs to synchronize the predictions from
+all the local experts. Our paper is also related to Gramacy
+and Lee (2008). While Gramacy and Lee (2008) focuses on
+modeling non-stationary functions with treed partitions, our
+work integrates tree structures and Bayesian optimization in
+a novel way.
+
+2 Background and Challenges
+
+Consider a simple but high-dimensional search space X =
+[0, R]D ⊆ RD. We aim to ﬁnd a maximizer x∗ ∈
+arg maxx∈X f (x) of a black-box function f : X → R.
+
+Gaussian processes. Gaussian processes (GPs) are pop-
+ular priors for modeling the function f in Bayesian opti-
+mization. They deﬁne distributions over functions where
+any ﬁnite set of function values has a multivariate Gaussian
+distribution. A Gaussian process GP(µ, κ) is fully speciﬁed
+by a mean function µ(·) and covariance (kernel) function
+κ(·, ·). Let f be a function sampled from GP(0, κ). Given
+observations Dn = {(xt, yt)}n
+t=1 where yt ∼ N (f (xt), σ),
+we obtain the posterior mean and variance of the function as
+
+µn(x) = κn(x)T(Kn + σ2I)−1yn,
+(2.1)
+n(x) = κ(x, x) − κn(x)T(Kn + σ2I)−1κn(x) (2.2)
+σ2
+
+Other parts of our framework are inspired by the Mondrian
+forest (Lakshminarayanan et al., 2016), which partitions the
+
+via the kernel matrix Kn = [κ(xi, xj)]xi,xj ∈Dn
+and
+κn(x) = [κ(xi, x)]xi∈Dn (Rasmussen and Williams,
+
+Zi Wang, Clement Gehring, Pushmeet Kohli, Stefanie Jegelka
+
+2006). The log data likelihood for Dn is given by
+
+log p(Dn) = −
+
+1
+2
+log |Kn + σ2I| −
+
+n(Kn + σ2I)−1yn
+yT
+n
+2
+
+log 2π.
+
+−
+
+1
+2
+
+(2.3)
+
+While GPs provide ﬂexible, broadly applicable function
+estimators, the O(n3) computation of the inverse (Kn +
+σ2I)−1 and determinant |Kn + σ2I| can become major
+bottlenecks as n grows, for both posterior function value
+predictions and data likelihood estimation.
+
+(cid:54)= j, i, j ∈ [M ]. As a result,
+
+Additive structure. To reduce the complexity of the
+vanilla GP, we assume a latent decomposition of the
+input dimensions [D] = {1, . . . , D} into disjoint sub-
+spaces, namely, (cid:83)M
+m=1 Am = [D] and Ai ∩ Aj = ∅
+for all i
+the func-
+tion f decomposes as f (x) = (cid:80)
+m∈[M ] fm(xAm) (Kan-
+If each component fm is drawn
+dasamy et al., 2015).
+independently from GP(µ(m), κ(m)) for all m ∈ [M ],
+the resulting f will also be a sample from a GP: f ∼
+GP(µ, κ), with µ(x) = (cid:80)
+m∈[M ] µm(xAm ), κ(x, x(cid:48)) =
+(cid:80)
+m∈[M ] κ(m)(xAm , x(cid:48)Am ).
+
+The additive structure reduces sample complexity and helps
+BO to search more efﬁciently and effectively since the ac-
+quisition function can be optimized component-wise. But it
+remains challenging to learn a good decomposition structure
+{Am}. Recently, Wang et al. (2017) proposed learning via
+Gibbs sampling. This sampler takes hours for merely a few
+hundred points, because it needs a vast number of expensive
+data likelihood computations.
+
+It
+
+Random features.
+is possible use random fea-
+tures (Rahimi et al., 2007) to approximate the GP kernel and
+alleviate the O(n3) computation in Eq. (2.1) and Eq. (2.3).
+Let φ : X (cid:55)→ RDR be the (scaled) random feature opera-
+tor and Φn = [φ(x1), · · · , φ(xn)]T ∈ Rn×DR . The GP
+posterior mean and variance can be written as
+
+µn(x) = σ−2φ(x)TΣnΦT
+σ2
+n(x) = φ(x)TΣnφ(x),
+
+nyn,
+
+(2.4)
+
+(2.5)
+
+nΦnσ−2 + I)−1. By the Woodbury matrix
+where Σn = (ΦT
+identity and the matrix determinant lemma, the log data
+likelihood becomes
+
+log p(Dn) =
+
+σ−4
+2
+
+−
+
+log |Σ−1
+
+n | −
+
+1
+2
+
+nyn
+
+nΦnΣnΦT
+yT
+σ−2
+2
+
+yT
+nyn −
+
+n
+2
+
+log 2πσ2.
+
+(2.6)
+
+The number of random features necessary to approximate
+the GP well in general increases with the number of observa-
+tions (Rudi et al., 2017). Hence, for large-scale observations,
+we cannot expect to solely use a ﬁxed number of features.
+
+Moreover, learning hyperparameters for random features is
+expensive: for Fourier features, the computation of Eq. (2.6)
+means re-computing the features, plus O(D3
+R) for the in-
+verse and determinant. With Mondrian features (Laksh-
+minarayanan et al., 2016), we can learn the kernel width
+efﬁciently by adding more Mondrian blocks, but this proce-
+dure is not well compatible with learning additive structure,
+since the whole structure of the sampled Mondrian features
+will change. In addition, we typically need a forest of trees
+for a good approximation.
+
+Tile coding. Tile coding (Sutton and Barto, 1998; Albus
+et al., 1975) is a k-hot encoding widely used in reinforce-
+ment learning as an efﬁcient set of non-linear features. In
+its simplest form, tile coding is deﬁned by k partitions, re-
+ferred to as layers. An encoded data point becomes a binary
+vector with a non-zero entry for each bin containing the data
+point. There exists methods for sampling random partitions
+that allow to approximate various kernels, such as the ‘hat’
+kernel (Rahimi et al., 2007), making tile coding well suited
+for our purposes.
+
+Variance starvation.
+It is probably not surprising that us-
+ing ﬁnite random features to learn the function distribution
+will result in a loss in accuracy (Forster, 2005). For example,
+we observed that, while the mean predictions are preserved
+reasonably well around regions where we have observations,
+both mean and conﬁdence bound predictions can become
+very bad in regions where we do not have observations, once
+there are more observations than features. We refer to this
+underestimation of variance scale compared to mean scale,
+illustrated in Fig. 1, as variance starvation.
+
+3 Ensemble Bayesian Optimization
+
+Next, we describe an approach that scales Bayesian Op-
+timization when parallel computing resources are avail-
+able. We name our approach, outlined in Alg.1, Ensemble
+Bayesian optimization (EBO). At a high level, EBO uses a
+(stochastic) series of Mondrian trees to partition the input
+space, learn the kernel parameters of a GP locally, and ag-
+gregate these parameters. Our forest hence spans across BO
+iterations.
+
+In the t-th iteration of EBO in Alg. 1, we use a Mondrian
+process to randomly partition the search space into J parts
+(line 4), where J can be dependent on the size of the ob-
+servations Dt−1. For the j-th partition, we have a subset
+Dj
+t−1 of observations. From those observations, we learn
+a local GP with random tile coding and additive structure,
+via Gibbs sampling (line 6). For conciseness, we refer to
+such GPs as TileGPs. The probabilistic tile coding can be
+replaced by a Mondrian grid that approximates a Laplace
+kernel (Balog and Teh, 2015). Once a TileGP is learned lo-
+cally, we can run BO with the acquisition function η in each
+partition to generate a candidate set of points, and, from
+
+Batched Large-scale Bayesian Optimization in High-dimensional Spaces
+
+Figure 1: We use 1000 Fourier features to approximate a 1D GP with a squared exponential kernel. The observations are
+samples from a function f (red line) drawn from the GP with zero mean in the range [−10, 0.5]. (a) Given 100 sampled
+observations (red circles), the Fourier features lead to reasonable conﬁdence bounds. (b) Given 1000 sampled observations
+(red circles), the quality of the variance estimates degrades. (c) With additional samples (5000 observations), the problem is
+exacerbated. The scale of the variance predictions relative to the mean prediction is very small. (d) For comparison, the
+proper predictions of the original full GP conditioned on the same 5000 observations as (c). Variance starvation becomes a
+serious problem for random features when the size of data is close to or larger than the size of the features.
+
+those, select a batch that is both informative (high-quality)
+and diverse (line 14).
+
+D
+
+f
+
+j=1 ←MONDRIAN([0, R]D, z, k, J)
+
+Algorithm 1 Ensemble Bayesian Optimization (EBO)
+1: function EBO (f, D0)
+Initialize z, k
+2:
+for t = 1, · · · , T do
+3:
+4:
+5:
+6:
+7:
+8:
+9:
+10:
+
+zj, kj ← GIBBSSAMPLING(z, k | Dj
+ηj
+t−1(·) ←ACQUISITION (Dj
+{Am}M
+for m = 1, · · · , M do
+
+{Xj}J
+parfor j = 1, · · · , J do
+
+m=1 ← DECOMPOSITION(zj)
+
+t−1, zj, kj)
+
+tj ← arg maxx∈X Am
+
+ηj
+t−1(x)
+
+t−1)
+
+j
+
+j=1), k ← SYNC({kj}J
+
+j=1)
+
+b=1 ← FILTER ({xtj}J
+
+j=1 | z, k)
+
+xAm
+end for
+end parfor
+z ← SYNC({zj}J
+{xtb}B
+parfor b = 1, · · · , B do
+
+ytb ← f (xtb)
+
+end parfor
+Dt ← Dt−1 ∪ {xtb, ytb}B
+
+b=1
+
+11:
+12:
+13:
+14:
+15:
+16:
+17:
+18:
+19:
+20: end function
+
+end for
+
+Since, in each iteration, we draw an input space partition
+and update the kernel width and the additive structure, the
+algorithm may be viewed as implicitly and stochastically
+running BO on an ensemble of GP models. In the following,
+we describe our model and the procedures of Alg. 1 in
+detail. In the Appendix, we show an illustration how EBO
+optimizes a 2D function.
+
+3.1 Partitioning the input space via a Mondrian
+
+process
+
+When faced with a “big” problem, a natural idea is to divide
+and conquer. For large scale Bayesian optimization, the
+question is how to divide without losing the valuable local
+
+appendix.
+
+β
+
+λ
+
+k
+
+L
+
+θ
+
+α
+
+z
+
+D
+
+x
+
+y
+
+Figure 2: The graphical model for TileGP, a GP with ad-
+ditive and tile kernel partitioning structure. The parameter
+λ controls the rate for the number of cuts k of the tilings
+(inverse of the kernel bandwidth); the parameter z controls
+the additive decomposition of the input feature space.
+
+information that gives good uncertainty measures. In EBO,
+we use a Mondrian process to divide the input space and the
+observed data, so that nearby data points remain together in
+one partition, preserving locality1. The Mondrian process
+uses axis-aligned cuts to divide the input space [0, R]D into
+a set of partitions {Xj}J
+j=0 where ∪jXj = [0, R]D and
+Xi ∩ Xj = ∅, ∀i (cid:54)= j. Each partition Xj can be conveniently
+described by a hyperrectangle [lj
+D], which
+facilitates the efﬁcient use of tile coding and Mondrian grids
+in a TileGP. In the next section, we deﬁne a TileGP and
+introduce how its parameters are learned.
+
+1]×· · ·×[lj
+
+D, hj
+
+1, hj
+
+3.2 Learning a local TileGP via Gibbs sampling
+
+1, hj
+
+For the j-th hyperrectangle partition Xj = [lj
+1] × · · · ×
+D, hj
+[lj
+D], we use a TileGP to model the function f locally.
+We use the acronym “TileGP” to denote the Gaussian pro-
+cess model that uses additive kernels, with each component
+represented by tilings. We show the details of the genera-
+tive model for TileGP in Alg. 2 and the graphical model in
+Fig. 3.2 with ﬁxed hyper-parameters α, β0, β1. The main
+difference to the additive GP model used in (Wang et al.,
+
+1We include the algorithm for input space partitioning in the
+
+Zi Wang, Clement Gehring, Pushmeet Kohli, Stefanie Jegelka
+
+2017) is that TileGP constructs a hierarchical model for the
+random features (and hence, the kernels), while Wang et al.
+(2017) do not consider the kernel parameters to be part of
+the generative model. The random features are based on tile
+coding or Mondrian grids, with the number of cuts gener-
+ated by D Poisson processes on [lj
+d] for each dimension
+d = 1, · · · , D. On the i-th layer of the tilings, tile coding
+samples the offset δ from a uniform distribution U [0, hj
+d−lj
+]
+kdi
+and places the cuts uniformly starting at δ + lj
+d. The Mon-
+drian grid samples kdi cut locations uniformly randomly
+from [lj
+d]. Because of the data partition, we always have
+more features than observations, which can alleviate the
+variance starvation problem described in Section 2.
+
+d, hj
+
+d, hj
+
+d
+
+We can use Gibbs sampling to efﬁciently learn the cut pa-
+rameter k and decomposition parameter z by marginalizing
+out λ and θ. Notice that both k and z take discrete values;
+hence, unlike other continuous GP parameterizations, we
+only need to sample discrete variables for Gibbs sampling.
+
+Algorithm 2 Generative model for TileGP
+1: Draw mixing proportions θ ∼ DIR(α)
+2: for d = 1, · · · , D do
+3:
+4:
+5:
+6:
+
+Draw additive decomposition zd ∼ MULTI(θ)
+Draw Poisson rate parameter λd ∼ GAMMA(β0, β1)
+for i = 1, · · · , L do
+
+Draw number of cuts kdi ∼ POISSON(λd(hj
+Draw offset δ ∼ U [0, hj
+Draw cut locations b ∼ U [lj
+
+Tile Coding
+d] Mondrian Grids
+
+]
+d, hj
+
+d − lj
+
+d−lj
+kdi
+
+(cid:40)
+
+7:
+
+d
+
+d))
+
+end for
+
+8:
+9: end for
+10: Construct the feature projection φ and the kernel κ = φTφ
+
+from z and sampled tiles
+11: Draw function f ∼ GP(0, κ)
+12: Given input x, draw function value y ∼ N (f (x), σ)
+
+Given the observations Dt−1 in the j-th hyperrectangle par-
+tition, the posterior distribution of the (local) parameters
+λ, k, z, θ is
+
+p(λ, k, z, θ | Dt−1; α, β)
+
+∝ p(Dt−1 | z, k)p(z | θ)p(k | λ)p(θ; α)p(λ; β).
+
+Marginalizing over the Poisson rate parameter λ and the
+mixing proportion θ gives
+
+p(k, z | Dt−1; α, β)
+
+∝ p(Dt−1|z, k)
+
+p(z|θ)p(θ; α) dθ
+
+p(k|λ)p(λ; β) dλ
+
+(cid:90)
+
+(cid:90)
+
+∝ p(Dt−1 | z, k)
+
+(cid:89)
+
+Γ(|Am| + αm)
+Γ(αm)
+
+m
+Γ(β1 + |kd|)
+i=1 kdi!)(β0 + L)β1+|kd|
+
+(cid:89)
+
+×
+
+((cid:81)L
+
+d
+
+where |kd| = (cid:80)L
+i=1 kdi. Hence, we only need to sample k
+and z when learning the hyperparameters of the TileGP ker-
+
+nel. For each dimension d, we sample the group assignment
+zd according to
+
+p(zd = m | Dt−1, k, z¬d; α) ∝ p(Dt−1 | z, k)p(zd | z¬d)
+(3.1)
+
+∝ p(Dt−1 | z, k)(|Am| + αm).
+
+We sample the number of cuts kdi for each dimension d and
+each layer i from the posterior
+
+p(kdi | Dt−1, k¬di, z; β) ∝ p(Dt−1 | z, k)p(kdi | k¬di)
+
+∝
+
+p(Dn | z, k)Γ(β1 + |kd|)
+(β0 + L)kdi kdi!
+
+.
+
+(3.2)
+
+If distributed computing is available, each hyperrectangle
+partition of the input space is assigned a worker to manage
+all the computations within this partition. On each worker,
+we use the above Gibbs sampling method to learn the ad-
+ditive structure and kernel bandwidth jointly. Conditioned
+on the observations associated with the partition on the
+worker, we use the learned posterior TileGP to select the
+most promising input point in this partition, and eventually
+send this candidate input point back to the main process
+together with the learned decomposition parameter z and
+the cut parameter k. In the next section, we introduce the
+acquisition function we used in each worker and how to
+ﬁlter the recommended candidates from all the partitions.
+
+3.3 Acquisition functions and ﬁltering
+
+In this paper, we mainly focus on parameter search prob-
+lems where the objective function is designed by an expert
+and the global optimum or an upper bound on the function
+is known. While any BO acquisition functions can be used
+within the EBO framework, we use an acquisition function
+from (Wang and Jegelka, 2017) to exploit the knowledge
+of the upper bound. Let f ∗ be such an upper bound, i.e.,
+∀x ∈ X , f ∗ ≥ f (x). Given the observations Dj
+t−1 associ-
+ated with the j-th partition of the input space, we minimize
+f ∗−µj
+the acquisition function ηj
+t−1(x) =
+σj
+kernel is additive, we can optimize ηj
+t−1(·) separately for
+each additive component. Namely, for the m-th compo-
+nent of the additive structure, we optimize ηj
+t−1(·) only on
+the active dimensions Am. This resembles a block coordi-
+nate descent, and greatly facilitates the optimization of the
+acquisition function.
+
+. Since the
+
+t−1(x)
+
+t−1(x)
+
+Filtering. Once we have a proposed uery point from
+each partition, we select B of them according to the scor-
+ing function ξ(X) = log det KX − (cid:80)B
+b=1 η(xb) where
+X = {xb}B
+b=1. We use the log determinant term to force di-
+versity and η to maintain quality. We maximize this function
+greedily. In some cases, the number of partitions J can be
+smaller than the batch size B. In this case, one may either
+use just J candidates, or use batch BO on each partition.
+We use the latter, and discuss details in the appendix.
+
+Batched Large-scale Bayesian Optimization in High-dimensional Spaces
+
+Figure 3: Posterior mean function (a, c) and GP-UCB acquisition function (b, d) for an additive GP in 2D. The maxima
+of the posterior mean and acquisition function are at the points resulting from an exchange of coordinates between “good”
+observed points (-1,0) and (2,2).
+
+3.4 Efﬁcient data likelihood computation and
+
+parameter synchronization
+
+For the random features, we use tile coding due to its sparsity
+and efﬁciency. Since non-zero features can be found and
+computed by binning, the computational cost for encoding
+a data point scales linearly with dimensions and number of
+layers. The resulting representation is sparse and convenient
+to use. Additionally, the number of non-zero features is
+quite small, which allows us to efﬁciently compute a sparse
+Cholesky decomposition of the inner product (Gram matrix)
+or the outer product of the data. This allows us to efﬁciently
+compute the data likelihoods.
+
+In each iteration t, after the batch workers return the learned
+decomposition indicator zb and the number of tiles kb, b ∈
+[B], we synchronize these two parameters (line 13 of Alg. 1).
+For the number of tiles k, we set kd to be the rounded
+mean of {kb
+b=1 for each dimension d ∈ [D]. For the
+decomposition indicator, we use correlation clustering to
+cluster the input dimensions.
+
+d}B
+
+POISSON(λdR) be the number of cuts in the Mon-
+drian grids of TileGP for dimension d ∈ [D] and
+The TileGP kernel κL satisﬁes
+layer i ∈ [L].
+m=1 eλdR|xAm −x(cid:48)Am |, where
+lim
+L→∞
+{Am}M
+
+κL(x, x(cid:48)) = 1
+M
+m=1 is the additive decomposition.
+
+(cid:80)M
+
+We prove the lemma in the appendix. Balog et al. (2016)
+showed that in practice, the Mondrian kernel constructed
+from Mondrian features may perform slightly better than
+random binning in certain cases. Although it would be
+possible to use a Mondrian partition for each layer of tile
+coding, we only consider uniform, grid based binning with
+random offests because this allows the non-zero features to
+be computed more efﬁciently (O(1) instead of O(log k)).
+Note that as more dimensions are discretized in this man-
+ner, the number of features grows exponentially. However,
+the number of non-zero entries can be independently con-
+trolled, allowing to create sparse representations that remain
+computationally tractable.
+
+3.5 Relations to Mondrian kernels, random binning
+
+and additive Laplace kernels
+
+Our model described in Section 3.2 can use tile coding and
+Mondrian grids to construct the kernel. Tile coding and
+Mondrian grids are also closely related to Mondrian Fea-
+tures and Random Binning: All of the four kinds of random
+features attempt to ﬁnd a sparse random feature representa-
+tion for the raw input x based on the partition of the space
+with the help of layers. We illustrate the differences between
+one layer of the features constructed by tile coding, Mon-
+drian grids, Mondrian features and random binning in the
+appendix. Mondrian grids, Mondrian features and random
+binning all converge to the Laplace kernel as the number of
+layers L goes to inﬁnity. The tile coding kernel, however,
+does not approximate a Laplace kernel. Our model with
+Mondrian grids approximates an additive Laplace kernel:
+
+Lemma 3.1. Let
+
+the
+
+random variable kdi
+
+∼
+
+3.6 Connections to evolutionary algorithms
+
+Next, we make some observations that connect our random-
+ized ensemble BO to ideas for global optimization heuristics
+that have successfully been used in other communities. In
+particular, these connections offer an explanation from a BO
+perspective and may aid further theoretical analysis.
+
+Evolutionary algorithms (Back, 1996) maintain an ensem-
+ble of “good” candidate solutions (called chromosomes)
+and, from those, generate new query points via a number
+of operations. These methods too, implicitly, need to bal-
+ance exploration with local search in areas known to have
+high function values. Hence, there are local operations
+(mutations) for generating new points, such as random per-
+turbations or local descent methods, and global operations.
+While it is relatively straightforward to draw connections be-
+tween those local operations and optimization methods used
+in machine learning, we here focus on global exploration.
+
+Zi Wang, Clement Gehring, Pushmeet Kohli, Stefanie Jegelka
+
+A popular global operation is crossover: given two “good”
+points x, y ∈ RD, this operation outputs a new point z
+whose coordinates are a combination of the coordinates of
+x and y, i.e., zi ∈ {xi, yi} for all i ∈ [D]. In fact, this
+operation is analogous to BO with a (randomized) additive
+kernel: the crossover strategy implicity corresponds to the
+assumption that high function values can be achieved by
+combining coordinates from points with high function val-
+ues. For comparison, consider an additive kernel κ(x, x(cid:48)) =
+(cid:80)M
+m=1 f m(xAm ).
+Since each sub-kernel κ(m) is “blind” to the dimensions
+in the complement of Am, any point x(cid:48) that is close to an ob-
+served high-value point x in the dimensions Am will receive
+a high value f m(x), independent of the other dimensions,
+and, as a result, looks like a “good” candidate.
+
+m=1 κ(m)(xAm, x(cid:48)Am ) and f (x) = (cid:80)M
+
+We illustrate this reasoning with a 2D toy example. Figure 3
+shows the posterior mean prediction and GP-UCB crite-
+rion ˆf (x) + 0.1σ(x) for an additive kernel with A1 = {1},
+A2 = {2} and κm(xm, ym) = exp(−2(xm − ym)2). High
+values of the observed points generalize along the dimen-
+sions “ignored” by the sub-kernels. After two good observa-
+tions (−1, 0) and (2, 2), the “crossover” points (−1, 2) and
+(2, 0) are local maxima of GP-UCB and the posterior mean.
+
+In real data, we do not know the best ﬁtting underlying
+grouping structure of the coordinates. Hence, crossover
+does a random search over such partitions by performing
+random coordinate combinations, whereas our adaptive BO
+approach maintains a posterior distribution over partitions
+that adapts to the data.
+
+4 Experiments
+
+We empirically verify the scalability of EBO and its effec-
+tiveness of using random adaptive Mondrian partitions, and
+ﬁnally evaluate EBO on two real-world problems.2
+
+4.1 Scalability of EBO
+
+We compare EBO with a recent, state-of-the-art additive ker-
+nel learning algorithm, Structural Kernel Learning (SKL)
+(Wang et al., 2017). EBO can make use of parallel resources
+both for Gibbs sampling and BO query selections, while
+SKL can only parallelize query selections but not sampling.
+Because the kernel learning part is the computationally dom-
+inating factor of large scale BO, we compare the time each
+method needs to run 10 iterations of Gibbs sampling with
+100 to 50000 observations in 20 dimensions. We show the
+timing results for the Gibbs samplers in Fig. 4(a), where
+EBO uses 240 cores via the Batch Service of Microsoft
+Azure. Due to a time limit we imposed, we did not ﬁnish
+SKL for more than 1500 observations. EBO runs more
+than 390 times faster than SKL when the observation size
+
+2Our code is publicly available at https://github.com/
+
+zi-w/Ensemble-Bayesian-Optimization.
+
+Figure 4: (a) Timing for the Gibbs sampler of EBO and
+SKL. EBO is signiﬁcantly faster than SKL when the ob-
+servation size N is relatively large. (b) Speed-up of EBO
+with 100, 240, 500 cores over EBO with 10 cores on 30,000
+observations. Running EBO with 240 cores is almost 20
+times faster than with 10 cores.
+
+is 1500. Comparing the quality of learned parameter z for
+the additive structure, SKL has a Rand Index of 96.3% and
+EBO has a Rand Index of 96.8%, which are similar. In
+Fig. 4(b), we show speed-ups for different number of cores.
+EBO with 500 cores is not signiﬁcantly faster than with
+240 cores because EBO runs synchronized parallelization,
+whose runtime is decided by the slowest core. It is often the
+case that most of the cores have ﬁnished while the program
+is waiting for the slowest 1 or 2 cores to ﬁnish.
+
+4.2 Effectiveness of EBO
+
+Figure 5: Averaged results of the regret of BO-SVI, BO-
+Add-SVI, PBO and EBO on 4 different functions drawn
+from a 50D GP with an additive Laplace kernel. BO-SVI
+has the highest regret for all functions. Using an additive
+GP within SVI (BO-Add-SVI) signiﬁcantly improves over
+the full kernel. In general, EBO ﬁnds a good point much
+faster than the other methods.
+
+Optimizing synthetic functions We verify the effective-
+ness of using ensemble models for BO on 4 functions ran-
+domly sampled from a 50-dimensional GP with an addi-
+tive Laplace kernel. The hyperparameter of the Laplace
+kernel is known. In each iteration, each algorithm evalu-
+ates a batch of parameters of size B in parallel. We de-
+note ˜rt = maxx∈X f (x) − maxb∈[B] f (xt,b) as the im-
+
+Batched Large-scale Bayesian Optimization in High-dimensional Spaces
+
+We describe a problem instance by deﬁning a start posi-
+tion s and a goal position g as well as a cost function
+over the state space. Trajectories are described by a set
+of points on which a BSpline is to be ﬁtted. By integrat-
+ing the cost function over a given trajectory, we can com-
+pute the trajectory cost c(x) of a given trajectory solution
+x ∈ [0, 1]60. We deﬁne the reward of this problem to be
+f (x) = c(x) + λ((cid:107)x0,1 − s(cid:107)1 + (cid:107)x59,60 − g(cid:107)1) + b. This
+reward function is non smooth, discontinuous, and con-
+cave over the ﬁrst two and last two dimensions of the input.
+These 4 dimensions represent the start and goal position
+of the trajectory. The results in Fig. 7 showed that CEM
+was able to achieve better results than the BO methods on
+these functions, while EBO was still much better than the
+BO alternatives using SVI. More details can be found in the
+appendix.
+
+mediate regret obtained by the batch at iteration t, and
+rT = mint≤T ˜rt as the regret, which captures the minimum
+gap between the best point found and the global optimum
+of the black-box function f .
+
+We compare BO using SVI (Hensman et al., 2013) (BO-
+SVI), BO using SVI with an additive GP (BO-Add-SVI)
+and a distributed version of BO with a ﬁxed partition (PBO)
+against EBO with a randomly sampled partition in each
+iteration. PBO has the same 1000 Mondrian partitions in all
+the iterations while EBO can have at most 1000 Mondrian
+partitions. BO-SVI uses a Laplace isotropic kernel without
+any additive structure, while BO-Add-SVI, PBO, EBO all
+use the known prior. More detailed experimental settings
+can be found in the appendix. Our experimental results in
+Fig. 5 shows that EBO is able to ﬁnd a good point much
+faster than BO-SVI and BO-Add-SVI; and, randomization
+and the ensemble of partitions matters: EBO is much better
+than PBO.
+
+Optimizing control parameters for robot pushing We
+follow Wang et al. (2017) and test our approach, EBO, on a
+14 dimensional control parameter tuning problem for robot
+pushing. We compare EBO, BO-SVI, BO-Add-SVI and
+CEM Szita and L¨orincz (2006) with the same 104 random
+observations and repeat each experiment 10 times. We run
+all the methods for 200 iterations, where each iteration has
+a batch size of 100. We plot the median of the best re-
+wards achieved by CEM and EBO at each iteration in Fig. 6.
+More details on the experimental setups and the reward
+function can be found in the appendix. Overall CEM and
+EBO performed comparably and much better than the sparse
+GP methods (BO-SVI and BO-Add-SVI). We noticed that
+among all the experiments, CEM achieved a maximum re-
+ward of 10.19 while EBO achieved 9.50. However, EBO
+behaved slightly better and more stable than CEM as re-
+ﬂected by the standard deviation on the rewards.
+
+Figure 6: Comparing BO-SVI, BO-Add-SVI, CEM and
+EBO on a control parameter tuning task with 14 parameters.
+
+Optimizing rover trajectories To further explore the per-
+formance of our method, we consider a trajectory optimiza-
+tion task in 2D, meant to emulate a rover navigation task.
+
+Figure 7: Comparing BO-SVI, BO-Add-SVI, CEM and
+EBO on a 60 dimensional trajectory optimization task.
+
+5 Conclusion
+
+Many black box function optimization problems are intrin-
+sically high-dimensional and may require a huge number of
+observations in order to be optimized well. In this paper, we
+propose a novel framework, ensemble Bayesian optimiza-
+tion, to tackle the problem of scaling Bayesian optimization
+to both large numbers of observations and high dimensions.
+To achieve this, we propose a new framework that jointly in-
+tegrates randomized partitions at various levels: our method
+is a stochastic method over a randomized, adaptive ensem-
+ble of partitions of the input data space; for each part, we use
+an ensemble of TileGPs, a new GP model we propose based
+on tile coding and additive structure. We also developed an
+efﬁcient Gibbs sampling approach to learn the latent vari-
+ables. Moreover, our method automatically generates batch
+queries. We empirically demonstrate the effectiveness and
+scalability of our method on high dimensional parameter
+search tasks with tens of thousands of observation data.
+
+Zi Wang, Clement Gehring, Pushmeet Kohli, Stefanie Jegelka
+
+Acknowledgements
+
+We gratefully acknowledge support from NSF CAREER
+award 1553284, NSF grants 1420927 and 1523767, from
+ONR grant N00014-14-1-0486, and from ARO grant
+W911NF1410433. Any opinions, ﬁndings, and conclusions
+or recommendations expressed in this material are those of
+the authors and do not necessarily reﬂect the views of our
+sponsors.
+
+References
+
+James S Albus et al. A new approach to manipulator control:
+The cerebellar model articulation controller (CMAC).
+Journal of Dynamic Systems, Measurement and Control,
+97(3):220–227, 1975.
+
+Thomas Back. Evolutionary algorithms in theory and prac-
+tice: evolution strategies, evolutionary programming, ge-
+netic algorithms. Oxford university press, 1996.
+
+Matej Balog and Yee Whye Teh. The Mondrian process
+for machine learning. arXiv preprint arXiv:1507.05181,
+2015.
+
+Matej Balog, Balaji Lakshminarayanan, Zoubin Ghahra-
+mani, Daniel M Roy, and Yee Whye Teh. The Mondrian
+kernel. In Uncertainty in Artiﬁcial Intelligence (UAI),
+2016.
+
+Roberto Calandra. Bayesian Modeling for Optimization and
+Control in Robotics. PhD thesis, Technische Universit¨at,
+2017.
+
+Emile Contal, David Buffoni, Alexandre Robicquet, and
+Nicolas Vayatis. Parallel Gaussian process optimization
+with upper conﬁdence bound and pure exploration. In
+Joint European Conference on Machine Learning and
+Knowledge Discovery in Databases, 2013.
+
+Erik A Daxberger and Bryan Kian Hsiang Low. Distributed
+batch Gaussian process optimization. In International
+Conference on Machine Learning (ICML), 2017.
+
+Marc Peter Deisenroth and Jun Wei Ng. Distributed Gaus-
+sian processes. arXiv preprint arXiv:1502.02843, 2015.
+
+Thomas Desautels, Andreas Krause, and Joel W Burdick.
+Parallelizing exploration-exploitation tradeoffs in Gaus-
+sian process bandit optimization. Journal of Machine
+Learning Research, 2014.
+
+Josip Djolonga, Andreas Krause, and Volkan Cevher. High-
+dimensional Gaussian process bandits. In Advances in
+Neural Information Processing Systems (NIPS), 2013.
+
+Malcolm R Forster. Notice: No free lunches for anyone,
+bayesians included. Department of Philosophy, Univer-
+sity of Wisconsin–Madison Madison, USA, 2005.
+
+Robert B Gramacy and Herbert K H Lee. Bayesian treed
+Gaussian process models with an application to computer
+modeling. Journal of the American Statistical Associa-
+tion, 103(483):1119–1130, 2008.
+
+Philipp Hennig and Christian J Schuler. Entropy search
+for information-efﬁcient global optimization. Journal of
+Machine Learning Research, 13:1809–1837, 2012.
+
+James Hensman, Nicolo Fusi, and Neil D Lawrence. Gaus-
+sian processes for big data. In Uncertainty in Artiﬁcial
+Intelligence (UAI), 2013.
+
+Jos´e Miguel Hern´andez-Lobato, Matthew W Hoffman, and
+Zoubin Ghahramani. Predictive entropy search for efﬁ-
+cient global optimization of black-box functions. In Ad-
+vances in Neural Information Processing Systems (NIPS),
+2014.
+
+Kirthevasan Kandasamy, Jeff Schneider, and Barnabas Poc-
+zos. High dimensional Bayesian optimisation and bandits
+via additive models. In International Conference on Ma-
+chine Learning (ICML), 2015.
+
+Kenji Kawaguchi, Leslie Pack Kaelbling, and Tom´as
+Lozano-P´erez. Bayesian optimization with exponential
+convergence. In Advances in Neural Information Process-
+ing Systems (NIPS), 2015.
+
+Harold J Kushner. A new method of locating the maximum
+point of an arbitrary multipeak curve in the presence
+of noise. Journal of Fluids Engineering, 86(1):97–106,
+1964.
+
+Balaji Lakshminarayanan, Daniel M Roy, and Yee Whye
+Teh. Mondrian forests for large-scale regression when
+uncertainty matters. In International Conference on Arti-
+ﬁcial Intelligence and Statistics (AISTATS), 2016.
+
+Chun-Liang Li, Kirthevasan Kandasamy, Barnab´as P´oczos,
+and Jeff Schneider. High dimensional Bayesian optimiza-
+tion via restricted projection pursuit models. In Interna-
+tional Conference on Artiﬁcial Intelligence and Statistics
+(AISTATS), 2016.
+
+Mitchell McIntire, Daniel Ratner, and Stefano Ermon.
+Sparse Gaussian processes for Bayesian optimization.
+In Uncertainty in Artiﬁcial Intelligence (UAI), 2016.
+
+J. Mo˘ckus. On Bayesian methods for seeking the extremum.
+In Optimization Techniques IFIP Technical Conference,
+1974.
+
+Ali Rahimi, Benjamin Recht, et al. Random features for
+large-scale kernel machines. In Advances in Neural In-
+formation Processing Systems (NIPS), 2007.
+
+Carl Edward Rasmussen and Christopher KI Williams.
+
+Gaussian Processes for Machine Learning. 2006.
+
+Javier Gonz´alez, Zhenwen Dai, Philipp Hennig, and Neil D
+Lawrence. Batch Bayesian optimization via local penal-
+International Conference on Artiﬁcial Intelli-
+ization.
+gence and Statistics (AISTATS), 2016.
+
+Alessandro Rudi, Raffaello Camoriano, and Lorenzo
+Rosasco. Generalization properties of learning with ran-
+dom features. In Advances in Neural Information Pro-
+cessing Systems (NIPS), 2017.
+
+Batched Large-scale Bayesian Optimization in High-dimensional Spaces
+
+Matthias Seeger, Christopher Williams, and Neil Lawrence.
+Fast forward selection to speed up sparse Gaussian pro-
+cess regression. In Artiﬁcial Intelligence and Statistics 9,
+2003.
+
+Edward Snelson and Zoubin Ghahramani. Sparse Gaussian
+processes using pseudo-inputs. In Advances in Neural
+Information Processing Systems (NIPS), 2006.
+
+Jasper Snoek, Hugo Larochelle, and Ryan P Adams. Practi-
+cal Bayesian optimization of machine learning algorithms.
+In Advances in Neural Information Processing Systems
+(NIPS), 2012.
+
+Jasper Snoek, Oren Rippel, Kevin Swersky, Ryan Kiros,
+Nadathur Satish, Narayanan Sundaram, Mostofa Patwary,
+Mr Prabhat, and Ryan Adams. Scalable Bayesian opti-
+mization using deep neural networks. In International
+Conference on Machine Learning, 2015.
+
+Niranjan Srinivas, Andreas Krause, Sham M Kakade, and
+Matthias W Seeger. Information-theoretic regret bounds
+for Gaussian process optimization in the bandit setting.
+IEEE Transactions on Information Theory, 2012.
+
+Richard S Sutton and Andrew G Barto. Reinforcement
+learning: An introduction. MIT press Cambridge, 1998.
+
+Istv´an Szita and Andr´as L¨orincz. Learning tetris using the
+noisy cross-entropy method. Learning, 18(12), 2006.
+
+Michalis K Titsias. Variational learning of inducing vari-
+ables in sparse Gaussian processes. In International Con-
+ference on Artiﬁcial Intelligence and Statistics (AISTATS),
+2009.
+
+Zi Wang and Stefanie Jegelka. Max-value entropy search
+for efﬁcient Bayesian optimization. In International Con-
+ference on Machine Learning (ICML), 2017.
+
+Zi Wang, Bolei Zhou, and Stefanie Jegelka. Optimization
+as estimation with Gaussian processes in bandit settings.
+In International Conference on Artiﬁcial Intelligence and
+Statistics (AISTATS), 2016a.
+
+Zi Wang, Chengtao Li, Stefanie Jegelka, and Pushmeet
+Kohli. Batched high-dimensional Bayesian optimization
+via structural kernel learning. In International Conference
+on Machine Learning (ICML), 2017.
+
+Ziyu Wang, Frank Hutter, Masrour Zoghi, David Matheson,
+and Nando de Feitas. Bayesian optimization in a billion
+dimensions via random embeddings. Journal of Artiﬁcial
+Intelligence Research, 55:361–387, 2016b.
+
+Zi Wang, Clement Gehring, Pushmeet Kohli, Stefanie Jegelka
+
+A An Illustration of EBO
+
+3.1.
+
+We give an illustration of the proposed EBO algorithm on a
+2D function shown in Fig. 8. This function is a sample from
+a 2D TileGP, where the decomposition parameter is z =
+[0, 1], the cut parameter is (inverse bandwidth) k = [10, 10],
+and the noise parameter is σ = 0.01.
+
+while |V | < Np do
+
+Algorithm 3 Mondrian Partitioning
+1: function MONDRIANPARTITIONING (V, Np, S)
+2:
+3:
+4:
+5:
+6:
+7:
+
+pj ← length(vj) · max(0, |Dj| − S), ∀vj ∈ V
+if pj = 0, ∀j then
+
+break
+
+(cid:80)
+
+j pj
+
+end if
+Sample vj ∼ pj
+, vj ∈ V
+Sample a dimension d ∼ hj
+d−lj
+d−lj
+d hj
+d, hj
+d ∼ U [lj
+Sample cut location uj
+d]
+d] × · · · × ×[lj
+d, uj
+1] × · · · × [lj
+vj(lef t) ← [lj
+1, hj
+d]×· · ·××[lj
+d, hj
+1]×· · ·×[uj
+1, hj
+vj(right) ← [lj
+V ← V ∪ {vj(lef t), vj(right)} \ vj
+
+, d ∈ [D]
+
+(cid:80)
+
+8:
+
+d
+
+d
+
+9:
+10:
+11:
+12:
+end while
+13:
+return V
+14:
+15: end function
+
+D, hj
+D]
+D, hj
+D]
+
+1 − (cid:15), hj
+
+1 + (cid:15)] × · · · × [lj
+
+In particular, we denote the maximum number of Mondrian
+partitions by Np (usually the worker pool size in the exper-
+iments) and the minimum number of data points in each
+partition to be S. The set of partitions computed by the
+Mondrian tree (a.k.a. the leaves of the tree), V , is initial-
+ized to be the function domain V = {[0, R]D}, the root of
+the tree. For each vj ∈ V described by a hyperrectangle
+[lj
+D, hj
+1] × · · · × [lj
+1, hj
+D], the length of vj is computed to
+be length(vj) = (cid:80)D
+d=1(hj
+d − lj
+d). The observations asso-
+ciated with vj is Dj. Here, for all (x, y) ∈ Dj, we have
+x ∈ [lj
+D + (cid:15)], where (cid:15) controls
+the how many neighboring data points to consider for the
+partition vj. In our experiments, (cid:15) is set to be 0. Alg. 3
+is different from Algorithm 1 and 2 of Lakshminarayanan
+et al. (2016) in the stop criterion. Lakshminarayanan et al.
+(2016) uses an exponential clock to count down the time of
+splitting the leaves of the tree, while we split the leaves until
+the number of Mondrian partitions reaches Np or there is
+no partition that have more than S data points. We designed
+our stop criterion this way to balance the efﬁciency of EBO
+and the quality of selected points. Usually EBO is faster
+with larger number of partitions Np (i.e., more parallel com-
+puting resources) and the quality of the selections are better
+with larger size of observations on each partition (S).
+
+D − (cid:15), hj
+
+C Budget allocation and batched BO
+
+In the EBO algorithm, we ﬁrst use a batch of workers to
+learn the local GPs and recommend potential good candidate
+points from the local information. Then we aggregate the
+information of all the workers, and use a ﬁlter to select the
+points to evaluate from the set of points recommended by
+all the workers based on the aggregated information on the
+function.
+
+There are two important details we did not have space to dis-
+
+Figure 8: The 2D additive function we optimized in Fig. 9.
+The global maximum is marked with “+”.
+
+The global maximum of this function is at (0.27, 0.41). In
+this example, EBO is conﬁgured to have at least 20 data
+points on each partition, at most 50 Mondrian partitions, and
+100 layers of tiles to approximate the Laplace kernel. We
+run EBO for 10 iterations with 20 queries each batch. The
+results are shown in Fig. 9. In the ﬁrst iteration, EBO has
+no information about the function; hence it spreads the 10
+queries (blue dots) “evenly” in the input domain to collect
+information. In the 2nd iteration, based on the evaluations
+on the selected points (yellow dots), EBO chooses to query
+batch points (blue dots) that have high acquisition values,
+which appear to be around the global optimum and some
+other high valued regions. As the number of evaluations
+exceeds 20, the minimum number of data points on each
+partition, EBO partitions the input space with a Mondrian
+process in the following iterations. Notice that each iteration
+draws a different partition (shown as the black lines) from
+the Mondrian process so that the results will not “over-ﬁt”
+to one partition setting and the computation can remain
+efﬁcient. In each partition, EBO runs the Gibbs sampling
+inference algorithm to ﬁt a local TileGP and uses batched
+BO select a few candidates. Then EBO uses a ﬁlter to decide
+the ﬁnal batch of candidate queries (blue dots) among all
+the recommended ones from each partition as described in
+Sec. C.
+
+B Partitioning the input space via a
+
+Mondrian process
+
+Alg. 3 shows the full ‘Mondrian partitioning” algorithm, i.e.,
+the input space partitioning strategy mentioned in Section
+
+Batched Large-scale Bayesian Optimization in High-dimensional Spaces
+
+Figure 9: An example of 10 iterations of EBO on a 2D toy example plotted in Fig. 8. The selections in each iteration are
+blue and the existing observations orange. EBO quickly locates the region of the global optimum while still allocating
+budget to explore regions that appear promising (e.g. around the local optimum (1.0, 0.4)).
+
+cuss in the main paper: (1) how many points to recommend
+from each local worker (budget allocation); and (2) how to
+select a batch of points from the Mondrian partition on each
+worker. Usually in the beginning of the iterations, we do not
+have a lot of Mondrian partitions (since we stop splitting a
+partition once it reaches a minimum number of data points).
+Hence, it is very likely that the number of partitions J is
+smaller than the size of the batch. Hence we need to allocate
+the budget of recommendations from each worker properly
+and use batched BO for each Mondrian partition.
+
+Budget allocation In our current version of EBO, we did
+the budget allocation using a heuristic, where we would
+like to generate at least 2B recommendations from all the
+workers, and each worker gets the budget proportional to a
+score, the sum of the Mondrian partition volume (volume of
+the domain of the partition) and the best function value of
+the partition.
+
+Batched BO For batched BO, we also use a heuristic
+where the points achieving the top n acquisition function
+values are always included and the other ones come from
+random points selected in that partition. For the optimiza-
+tion of the acquisition function over each block of dimen-
+sions, we sample 1000 points in the low dimensional space
+associated with the additive component and minimize the
+acquisition function via L-BFGS-B starting from the point
+that gives the best acquisition value. We add the optimized
+arg min to the 1000 points and sort them according to their
+acquisition values, and then select the top n random ones,
+and combine with the sorted selections from other additive
+components. Other batched BO methods can also be used
+
+and can potentially improve upon our results.
+
+D Relations to Mondrian Kernels and
+
+Random Binning
+
+TileGP can use Mondrian grids or (our version of) tile cod-
+ing to achieve efﬁcient parameter inference for the decom-
+position z and the number of cuts k (inverse of kernel band-
+width). Mondrian grids and tile coding are closely related to
+Mondrian kernels and random binning, but there are some
+subtle differences. We illustrate the differences between one
+
+Figure 10: Illustrations of (our version of) tile coding, Mon-
+drian Grid, random binning and Mondrian feature.
+
+layer of the features constructed by tile coding, Mondrian
+grid, Mondrian feature and random binning in Fig. 10. For
+each layer of (our version of) tile coding, we sample a posi-
+tive integer k (number of cuts) from a Poisson distribution
+parameterized by λR, and then set the offset to be a constant
+uniformly randomly sampled from [0, R
+k ]. For each layer of
+the Mondrian grid, the number of cuts k is sampled tile in
+coding, but instead of using an offset and uniform cuts, we
+put the cuts at locations independently uniformly randomly
+from [0, R]. Random binning does not sample k cuts but
+samples the distance δ between neighboring cuts by drawing
+
+Zi Wang, Clement Gehring, Pushmeet Kohli, Stefanie Jegelka
+
+over-estimation of variance for each additive component if
+inferred independently from others. We conjecture that this
+over-estimation could result in an invalid regret bound for
+Add-GP-UCB (Kandasamy et al., 2015). Nevertheless, we
+found that using the block coordinate optimization for the
+acquisition function on the full GP is actually very help-
+ful. In Figure. 11, we compare the acquisition function
+we described in Section 3.3 (denoted as BlockOpt) with
+Add-GP-UCB (Kandasamy et al., 2015), Add-MES-R and
+Add-MES-G (Wang and Jegelka, 2017) on the same ex-
+periment described in the ﬁrst experiment of Section 6.5
+of (Wang and Jegelka, 2017), averaging over 20 functions.
+Notice that we used the maximum value of the function as
+part of our acquisition function in our approach (BlockOpt).
+Add-GP-UCB, ADD-MES-R and ADD-MES-G cannot use
+this max-value information even if they have access to it,
+because then they don’t have a strategy to deal with “credit
+assignment”, which assigns the maximum value to each
+additive component. We found that BlockOpt is able to ﬁnd
+a solution as well as or even better than the best of the three
+competing approaches.
+
+δ ∼ GAMMA(2, λR). Then, it samples the offset from [0, δ]
+and ﬁnally places the cuts. All of the above-mentioned three
+types of random features can work individually for each
+dimension and then combine the cuts from all dimensions.
+The Mondrian feature (Mondrian forest features to be ex-
+act), contrast, partitions the space jointly for all dimensions.
+More details of Mondrian features can be found in Laksh-
+minarayanan et al. (2016); Balog et al. (2016). For all of
+these four types of random features and for each layer of the
+total L layers, the kernel is κL(x, x(cid:48)) = 1
+l=1 χl(x, x(cid:48))
+L
+where
+
+(cid:80)L
+
+(cid:40)
+
+χl(x, x(cid:48)) =
+
+1 x and x(cid:48) are in the same cell on the layer l
+0
+
+otherwise
+
+(D.1)
+
+For the case where the kernel has M additive components,
+we simply use the tiling for each decomposition and nor-
+malize by LM instead of L. More precisely, we have
+κL(x, x(cid:48)) = 1
+LM
+
+l=1 χl(xAm, x(cid:48)Am ).
+
+(cid:80)M
+
+(cid:80)M
+
+m=1
+
+We next prove the lemma mentioned in Section 3.5.
+Lemma 3.1. Let the random variable kdi ∼ POISSON(λdR)
+be the number of cuts in the Mondrian grids of TileGP for
+dimension d ∈ [D] and layer i ∈ [L]. The kernel of TileGP
+m=1 eλdR|xAm −x(cid:48)Am |,
+κL satisﬁes lim
+L→∞
+where {Am}M
+m=1 is the additive decomposition.
+
+κL(x, x(cid:48)) = 1
+M
+
+(cid:80)M
+
+Proof. When constructing the Mondrian grid for each layer
+and each dimension, one can think of the process of getting
+another cut as a Poisson point process on the interval [0, R],
+where the time between two consecutive cuts is modeled as
+an exponential random variable. Similar to Proposition 1
+κ(m)
+L (xAm , x(cid:48)Am ) =
+in Balog et al. (2016), we have lim
+L→∞
+E[no cut between xd and x(cid:48)
+=
+d, ∀d ∈ Am]
+e−λdR|xAm −x(cid:48)Am |. By the additivity of the kernel, we have
+lim
+L→∞
+
+m=1 eλdR|xAm −x(cid:48)Am |.
+
+κL(x, x(cid:48)) = 1
+M
+
+(cid:80)M
+
+Figure 11: Comparing different acquisition functions for
+BO with an additive GP. Our strategy, BlockOpt, achieves
+comparable or better results than other methods.
+
+E Experiments
+
+Verifying the acquisition function As introduced in Sec-
+tion 3.3, we used a different acquisition function optimiza-
+tion technique from (Kandasamy et al., 2015; Wang and
+Jegelka, 2017).
+In (Kandasamy et al., 2015; Wang and
+Jegelka, 2017), the authors used the fact that each additive
+component is by itself a GP. Hence, they did posterior infer-
+ence on each additive component and Bayesian optimization
+independently from other additive components. In this work,
+we use the full GP with the additive kernel to derive its ac-
+quisition function and optimize it with a block coordinate
+optimization procedure, where the blocks are selected ac-
+cording to the decomposition of the input dimensions. One
+reason we did this instead of following (Kandasamy et al.,
+2015; Wang and Jegelka, 2017) is that we observed the
+
+Scalability of EBO For EBO, the maximum number of
+Mondrian partitions is set to be 1000 and the minimum
+number of data points in each Mondrian partition is 100.
+The function that we used to test was generated from a fully
+partitioned 20 dimensional GP with an additive Laplace
+kernel (|Am| = 1, ∀m).
+
+Effectiveness of EBO In this experiment, we sampled 4
+functions from a 50-dimensional GP with additive kernel.
+Each component of the additive kernel is a Laplace kernel,
+whose lengthscale parameter is set to be 0.1, variance scale
+to be 1 and active dimensions are around 1 to 4. Namely,
+the kernel we used is κ(x, x(cid:48)) = (cid:80)M
+i=1 κ(m)(xAm , x(cid:48)Am)
+|xAm −x(cid:48)Am |
+where κ(m)(xAm , x(cid:48)Am) = e
+, ∀m. The domain
+0.1
+of the function is [0, 1]50. We implemented the BO-SVI and
+BO-Add-SVI using the same acquisition function and batch
+
+Batched Large-scale Bayesian Optimization in High-dimensional Spaces
+
+selection strategy as EBO but with SVI-GP (Hensman et al.,
+2013) and SVI-GP with additive kernels instead of TileGPs.
+We used the SVI-GP implemented in ? and deﬁned the
+additive Laplace kernel according to the priors of the tested
+functions. For both BO-SVI and BO-Add-SVI, we used
+100 batchsize, 200 inducing points and the parameters were
+optimized for 100 iterations. For EBO, we set the minimum
+size of data points on each Mondrian partition to be 100.
+We set the maximum number of Mondrian partitions to be
+1000 for both EBO and PBO. The evaluations of the test
+functions are negligible, so the timing results in Figure 5
+reﬂect the actual runtime of each method.
+
+Optimizing control parameters for robot pushing We
+implemented the simulation of pushing two objects
+with two robot hands in the Box2D physics engine ?.
+The 14 parameters speciﬁes the location and rotation of
+the robot hands, pushing speed, moving direction and
+pushing time. The lower limit of these parameters is
+[−5, −5, −10, −10, 2, 0, −5, −5, −10, −10, 2, 0, −5, −5]
+is
+upper
+and
+[5, 5, 10, 10, 30, 2π, 5, 5, 10, 10, 30, 2π, 5, 5].
+the
+initial positions of the objects be si0, si1 and the ending
+positions be se0, se1. We use sg0 and sg1 to denote the goal
+locations for the two objects. The reward is deﬁned to be
+r = (cid:107)sg0 − si0(cid:107) + (cid:107)sg1 − si1(cid:107) − (cid:107)sg0 − se0(cid:107) − (cid:107)sg1 − se1(cid:107),
+namely, the progress made towards pushing the objects to
+the goal.
+
+limit
+
+Let
+
+the
+
+We compare EBO, BO-SVI, BO-Add-SVI and CEM Szita
+and L¨orincz (2006) with the same 104 random observa-
+tions and repeat each experiment 10 times. All the methods
+choose a batch of 100 parameters to evaluate at each itera-
+tion. CEM uses the top 30% of the 104 initial observations
+to ﬁt its initial Gaussian distribution. At the end of each
+iteration in CEM, 30% of the new observations with top
+values were used to ﬁt the new distribution. For all the BO
+based methods, we use the maximum value of the reward
+function in the acquisition function. The standard deviation
+of the observation noise in the GP models is set to be 0.1.
+We set EBO to have Modrian partitions with fewer than 150
+data points and constrain EBO to have no more than 200
+Mondrian partitions. In EBO, we set the hyper parameters
+α = 1.0, β = [5.0, 5.0], and the Mondrian observation off-
+set (cid:15) = 0.05. In BO-SVI, we used 100 batchsize in SVI, 200
+inducing points and 500 iterations to optimize the data like-
+lihood with 0.1 step rate and 0.9 momentum. BO-Add-SVI
+used the same parameters as BO-SVI, except that BO-Add-
+SVI uses 3 outer loops to randomly select the decomposition
+parameter z and in each loop, it uses an inner loop of 50
+iterations to maximize the data likelihood over the kernel
+parameters. The batch BO strategy used in BO-SVI and
+BO-Add-SVI is identical to the one used in each Mondrian
+partition of EBO.
+
+We run all the methods for 200 iterations, where each itera-
+
+Figure 12: An example trajectory found by EBO.
+
+tion has a batch size of 100. In total, each method obtains
+2 × 104 data points in addition to the 104 initializations.
+
+Optimizing rover trajectories We illustrate the problem
+in Fig. 12 with an example trajectory found by EBO. We
+set the trajectory cost to be −20.0 for any collision, λ to be
+−10.0 and the constant b = 5.0. This reward function is
+non smooth, discontinuous, and concave over the ﬁrst two
+and last two dimensions of the input. These 4 dimensions
+represent the start and goal position of the trajectory. We
+maximize the reward function f over the points on the tra-
+jectory. All the methods choose a batch of 500 trajectories
+to evaluate. Each method is initialized with 104 trajecto-
+ries randomly uniformly selected from [0, 1]60 and their
+reward function values. We again compare EBO with BO-
+SVI, BO-Add-SVI and CEM (Szita and L¨orincz, 2006). All
+the methods choose a batch of 500 trajectories to evaluate.
+Each method is initialized with 104 trajectories randomly
+uniformly selected from [0, 1]60 and their reward function
+values. The initializations are the same for each method,
+and we repeat the experiments 5 times. CEM uses the top
+30% of the 104 initial observations to ﬁt its initial Gaussian
+distribution. At the end of each iteration in CEM, 30% of
+the new observations with top values were used to ﬁt the
+new distribution. For all the BO based methods, we use the
+maximum value of the reward function, 5.0, in the acqui-
+sition function. The standard deviation of the observation
+noise in the GP models is set to be 0.01. We set EBO to
+attempt to have Modrian partitions with fewer than 100
+data points, with a hard constraint of no more than 1000
+Mondrian partitions. In EBO, we set the hyper parameters
+α = 1.0, β = [2.0, 5.0], and the Mondrian observation off-
+set (cid:15) = 0.01. In BO-SVI, we used 100 batchsize in SVI, 200
+inducing points and 500 iterations to optimize the data like-
+lihood with 0.1 step rate and 0.9 momentum. BO-Add-SVI
+used the same parameters as BO-SVI, except that BO-Add-
+SVI uses 3 outer loops to randomly select the decomposition
+
+Zi Wang, Clement Gehring, Pushmeet Kohli, Stefanie Jegelka
+
+parameter z and in each loop, it uses an inner loop of 50
+iterations to maximize the data likelihood over the kernel
+parameters. The batch BO strategy used in BO-SVI and
+BO-Add-SVI is identical to the one used in each Mondrian
+partition of EBO.
+
+estimating conﬁdence bounds and avoid overﬁtting. How-
+ever, the scaling of Gaussian processes is hard in general.
+We would like to reinforce the awareness about the impor-
+tance of estimating conﬁdence of the model predictions on
+new queries, i.e., avoiding variance starvation.
+
+F.3 Future directions
+
+Possible future directions include analyzing theoretically
+what should be the best input space partition strategy, batch
+worker budget distribution strategy, better ways of predict-
+ing variance in a principled way (not necessarily GP), better
+ways of doing small scale BO and how to adapt it to large
+scale BO. Moreover, add-GP is only one way of reducing
+the function space, and there could be others suitable ones
+too.
+
+F Discussion
+
+F.1 Failure modes of EBO
+
+EBO is a general framework for running large scale batched
+BO in high-dimensional spaces. Admittedly, we made some
+compromises in our design and implementation to scale up
+BO to a degree that conventional BO approaches cannot
+deal with. In the following, we list some limitations and
+aspects that we can improve in EBO in our future work.
+
+• EBO partitions the space into smaller
+
+regions
+{[lj, hj]}J
+j=1 and only uses the observations within
+[lj − (cid:15), hj + (cid:15)] to do inference and Bayesian optimiza-
+tion. It is hard to determine the value of (cid:15). If (cid:15) is large,
+we may have high computational cost for the operations
+within each region. But if (cid:15) is very small, we found that
+some selected BO points are on the boundaries of the
+regions, partially because of the large uncertainty on
+the boundaries. We used (cid:15) = 0 in our experiments, but
+the results can be improved with a more appropriate (cid:15).
+
+• Because of the additive structure, we need to optimize
+the acquisition function for each additive component.
+As a result, EBO has increased computational cost
+when there are more than 50 additive components, and
+it becomes harder for EBO to optimize functions more
+than a few hundred dimensions. One solution is to
+combine the additive structure with a low dimensional
+projection approach (Wang et al., 2016b). We can also
+simply run block coordinate descent on the acquisition
+function, but it is harder to ensure that the acquisition
+function is fully optimized.
+
+F.2 Importance of avoiding variance starvation
+
+Neural networks have been applied in many applications and
+received success for tasks including regression and classiﬁ-
+cation. While researchers are still working on the theoretical
+understanding, one hyoothesis is that neural networks “over-
+ﬁt” ?. Due to the similarity between the test and training
+set in the reported experiments in, for example, the com-
+puter vision community, overﬁtting may seem to be less
+of a problem. However, in active learning (e.g. Bayesian
+optimization), we do not have a “test set”. We require the
+model to generalize well across the search space, and using
+the classic neural network may be detrimental to the data
+selection process, because of variance starvation (see Sec-
+tion 2). Gaussian processes, on the contrary, are good at
+

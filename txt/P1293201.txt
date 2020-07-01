@@ -5122,3 +5122,5127 @@ return ku ;
 
 Algorithm 6: LookUpAliasTable()
 
+7
+1
+0
+2
+ 
+g
+u
+A
+ 
+5
+1
+ 
+ 
+]
+L
+M
+
+.
+t
+a
+t
+s
+[
+ 
+ 
+3
+v
+4
+8
+7
+3
+0
+.
+6
+0
+5
+1
+:
+v
+i
+X
+r
+a
+
+SPARSE PARTIALLY COLLAPSED MCMC FOR PARALLEL INFERENCE IN TOPIC
+MODELS
+
+MÅNS MAGNUSSON, LEIF JONSSON, MATTIAS VILLANI AND DAVID BROMAN
+
+ABSTRACT. Topic models, and more speciﬁcally the class of Latent Dirichlet Allocation (LDA), are
+
+widely used for probabilistic modeling of text. MCMC sampling from the posterior distribution is
+
+typically performed using a collapsed Gibbs sampler. We propose a parallel sparse partially collapsed
+
+Gibbs sampler and compare its speed and efﬁciency to state-of-the-art samplers for topic models
+
+on ﬁve well-known text corpora of differing sizes and properties.
+
+In particular, we propose and
+
+compare two different strategies for sampling the parameter block with latent topic indicators. The
+
+experiments show that the increase in statistical inefﬁciency from only partial collapsing is smaller
+
+than commonly assumed, and can be more than compensated by the speedup from parallelization
+
+and sparsity on larger corpora. We also prove that the partially collapsed samplers scale well with the
+
+size of the corpus. The proposed algorithm is fast, efﬁcient, exact, and can be used in more modeling
+
+situations than the ordinary collapsed sampler.
+
+1. INTRODUCTION
+
+Latent Dirichlet allocation (LDA) Blei et al. [2003] is an immensely popular1 way to model text
+
+probabilistically. The basic LDA model generates documents as probabilistic mixtures of topics.
+
+The observed data is the set of words, or tokens, w, in a given corpus were wi,d is a token at position
+
+i in document d. Each document d is assigned a vector θd which is a probability distribution over
+
+K topics. Each topic is a probability distribution φk over a vocabulary of word types. Each token
+
+at position i in document d is accompanied by a latent topic indicator zi,d generated from θd, such
+that zi,d = k means that the token in the ith position in document d is generated from φk. Let Θ
+denote the set of all θd, z all zi,d in all documents, and let Φ be a K × V matrix whose kth row holds
+
+φk over a vocabulary of size V of word types v. The generative model for LDA can be found in
+
+Figure 1.1 and a summary of model notation in Table 1.
+
+Key words and phrases. Key words and phrases: Bayesian inference, Gibbs sampling, Latent Dirichlet Allocation, Mas-
+sive Data Sets, Parallel Computing, Computational complexity.
+Magnusson: Linköping University Jonsson: Ericsson AB and Linköping University Villani: Linköping University Broman:
+KTH Royal Institute of Technology.
+1The original paper has so far been cited roughly 1200 times per year, and the citation rate is sharply increasing after
+more than ten years since its publication.
+
+1
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+2
+
+Symbol Description
+
+Symbol Description
+
+V
+
+v
+
+K
+
+D
+
+N
+
+Nd
+
+zi,d
+
+wi,d
+
+The size of the vocabulary
+
+Word type
+
+The number of topics
+
+The number of documents
+
+The total number of tokens
+
+The number of tokens in document d
+
+Topic indicator for token i in document d
+
+Φ
+
+φk
+
+β
+n(w)
+Θ
+
+θd
+
+The matrix with word-topic probabilities : K × V
+
+The word probabilities for topic k: 1 × V
+The hyperparameter for the prior of Φ: 1 × 1
+
+The number topic indicators by topic and word type: K × V
+
+Document-topic proportions: D × K
+
+Topic probability for document d: 1 × K
+The hyperparameter for the prior of Θ: 1 × 1
+
+Token i in document d
+
+The number topic indicators by document and topic: D × K
+
+α
+n(d)
+TABLE 1. LDA model notation.
+
+α
+
+β
+
+D
+
+θ
+
+z
+
+w
+
+N
+
+φ
+
+K
+
+(1) For each topic k = 1, ..., K
+
+(a) Draw a distribution over words φk
+(2) For each observation/document d = 1, ..., D
+iid∼ DirK(α)
+
+(a) Draw topic proportions θd|α
+(b) For i = 1, ..., Nd
+
+iid∼ DirV(β)
+
+iid∼ Categorical(θd)
+(i) Draw topic assignment zi,d|θd
+indep
+(ii) Draw token wi,d|zi,d, φzi,d
+∼ Categorical(φzi,d )
+
+FIGURE 1.1. The generative LDA model.
+
+One of the most popular inferential techniques for topic models is Markov Chain Monte Carlo
+
+(MCMC) and the collapsed Gibbs sampler introduced by Grifﬁths and Steyvers [2004], where
+both Φ and Θ are marginalized out and the elements in z are sampled by Gibbs sampling. It
+
+is a useful building block to use in other more advanced topic models, but it suffers from its
+
+sequential nature, which makes the algorithm practically impossible to parallelize in a way that
+
+still generates samples from the correct invariant distribution. This sequentiality of the algorithm
+
+is a serious problem as textual data are growing at an increasing rate; some recent applications
+
+of topic models are counting the number of documents in the billions [Yuan et al., 2015]. The
+
+computational problem is further aggravated since large corpora typically enable more complex
+
+models and a greater number of topics.
+
+The response to these computational challenges has been to use approximations to parallelize
+
+the collapsed sampler, such as the popular AD-LDA algorithm by Newman et al. [2009]. AD-LDA
+
+samples the latent topic indicators z on different cores in isolation before a synchronization step,
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+3
+
+thereby ignoring that topic indicators in different documents are dependent after marginalizing
+out Θ and Φ. As a result, AD-LDA does not target the true posterior. The total approximation
+
+error for the joint posterior is unknown [Ihler and Newman, 2012], and the only way to check the
+
+accuracy in a given application is to compare the inferences to an exact MCMC sampler that is
+
+guaranteed to converge to the true posterior distribution.
+
+Instead, we propose a sparse partially collapsed approach to sampling in topic models, resulting
+
+in an exact MCMC sampler that will converge to the true posterior. This sampler is achieved by
+
+only collapsing over the topic distributions θ1, ..., θD in each document. The remaining parameters
+can then be sampled by Gibbs sampling by iterating between the two updates z|Φ and Φ|z, where
+
+the topic indicators zi,d are now conditionally independent between documents and the rows of
+the topic-word matrix Φ are independent given z. This independence means that the ﬁrst step can
+
+be parallelized with regard to documents, and the second step can be parallelized with regard to
+topics. Importantly, we also exploit that conditioning on Φ opens up several elegant ways to take
+
+advantage of sparsity and to reduce the time complexity in sampling the z’s within a document,
+
+as detailed below. Following the literature in the LDA community, we refer to our algorithm as
+
+a partially collapsed Gibbs sampler. This should not be confused with the partially collapsed
+
+Gibbs samplers of Van Dyk and Park [2008] where different parameters are marginalized in a
+
+different step of the Gibbs sampler. All partially collapsed samplers proposed here marginalize
+out Θ analytically and sample from the joint posterior of z and Φ using either Gibbs sampling
+
+or Metropolis-Hastings. The hyperparameters in the priors can be sampled in separate updating
+
+steps, but we have for simplicity kept them ﬁxed in the analysis.
+
+Partially collapsed and uncollapsed samplers for LDA are noted in Newman et al. [2009], but
+
+quickly dismissed because of lower MCMC efﬁciency compared to the collapsed sampler. How-
+
+ever, the efﬁciency improvement resulting from collapsing parameters is model speciﬁc and must
+
+here be weighed against the beneﬁts of parallelization. We show empirically that the efﬁciency
+
+loss from using a partially collapsed Gibbs sampler for LDA compared to a fully collapsed Gibbs
+
+sampler is small. This result is consistent across different well-known datasets and for various
+
+model settings, a result similar to that found by Tristan et al. [2014] for LDA models using GPU
+
+parallelization and by Ishwaran and James [2001] in the context of Dirichlet process mixtures.
+
+Furthermore, we show theoretically, under some mild assumptions, that despite the additional
+sampling of the Φ matrix, the complexity of our sampler is still only O(∑N
+
+i Kd(i)), where N is the
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+4
+
+total number of tokens in the corpus and Kd(i) is the number of existing topics in the document of
+token i. Importantly, the alternative partially collapsed sampler where Φ is integrated out instead
+of Θ (or a fully uncollapsed sampler) will not enjoy the same theoretical scalability with respect to
+
+corpus size. We also propose a Metropolis-Hastings based sampler with complexity O(N), similar
+
+in spirit to that of light-LDA Yuan et al. [2015].
+
+Several extensions and reﬁnements of the partially collapsed sampler are developed to reduce
+
+the sampling complexity of the algorithm. For example, we propose a Gibbs sampling version
+
+using the Walker-Alias tables proposed in Li et al. [2014], something that is only possible using
+
+a partially collapsed sampler. We also note that partial collapsing makes it possible to use more
+elaborate models on Φ for which the fully collapsed sampler cannot be applied. As an example,
+we develop a spike-and-slab prior in the Appendix where we set elements of Φ to zero using
+
+ordinary Gibbs sampling, a type of topic model that previously has been shown to improve topic
+
+model performance using variational Bayes inference methods [Chien and Chang, 2014].
+
+2. RELATED WORK
+
+The problems of parallelizing topic models have been studied extensively [Ihler and Newman,
+
+2012, Liu et al., 2011, Newman et al., 2009, Smola and Narayanamurthy, 2010, Yan et al., 2009,
+
+Ahmed et al., 2012, Tristan et al., 2014] together with ways of improving the sampling efﬁciency
+
+of the collapsed sampler [Porteous et al., 2008, Yao et al., 2009, Li et al., 2014, Yuan et al., 2015].
+
+The standard sampling scheme for the topic indicators is the collapsed Gibbs sampler of Grif-
+
+ﬁths and Steyvers [2004] where the topic indicator for word i, zi,d, is sampled from
+
+P(zi,d = j|z−i, w) ∝
+
+n
+
+n
+(cid:124)
+
++ β
+
+(w)
+−i,j,wi,d
+(·)
+−i,j + Vβ
+(cid:123)(cid:122)
+(cid:125)
+topic−word
+
+(cid:17)
+
+,
+
+(cid:16)
+
+n
+
+(d)
+−i,d,j + α
+(cid:125)
+(cid:123)(cid:122)
+(cid:124)
+document−topic
+
+where the scalars α and β are prior hyperparameters for θ and φ: θd
+
+iid∼ Dir(α) and φk
+
+iid∼ Dir(β).
+
+z−i are all other topic indicators in the corpus, n
+
+topic j, excluding topic indicator i. The n
+
+the word type of token wi,d. Similarly, n
+
+document d that contains token i. Both n
+
+(·)
+−i,j is the total number of topic indicators in
+
+is the number of topic indicators for topic j and
+
+(w)
+−i,j,wi,d
+(d)
+−i,d,j is the topic indicator count for topic j within the
+(w)
+(d)
+−i,d,j exclude the current topic indicator zi,d.
+−i,j,wi,d
+
+and n
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+5
+
+This sampler is sequential in nature since each topic indicator is conditionally dependent on all
+
+other topic indicators in the whole corpus.
+
+The Approximate Distributed LDA (AD-LDA) in Newman et al. [2009] is currently the most
+
+common way to parallelize topic models, both between machines (distributed) and using multi-
+
+ple cores with shared memory (multi-core) on one machine. The idea is that each processor or
+
+machine works in parallel with a given set of topic counts in the word-topic count matrix n(w).
+
+The word-topic matrices at the different processors are synced after each complete update cycle.
+
+This approach is an approximation of the collapsed sampler since the word-topic matrix available
+
+on each local processor is sampled in isolation from all other processors. The resulting algorithm
+
+is not guaranteed to converge to the target posterior distribution, and will in general not do so.
+
+However, Newman et al. [2009] ﬁnd that this approximation works rather well in practice. A
+
+bound for the error of the AD-LDA approximation for the sampling of each topic indicators has
+
+been derived by Ihler and Newman [2012]. They ﬁnd that the error of sampling each topic in-
+
+dicator increases with the number of topics and decreases with smaller batch sizes per processor
+
+and the total data size. They also conclude that the approximation error increases initially during
+
+sampling and then levels off to a steady state [Ihler and Newman, 2012].
+
+The fact that this approach to parallelize the collapsed Gibbs sampler will not converge to the
+
+true posterior has motivated our work to develop parallel algorithms for LDA type models that
+
+are both exact and fast. Partially collapsed and uncollapsed samplers for LDA have been studied
+
+by Tristan et al. [2014] as an alternative approach for GPU parallel topic models where uncollapsed
+
+samplers have shown to converge faster than the collapsed sampler.
+
+In addition to parallelizing topic models, there have been a couple of suggestions on how to
+
+improve the speed of sampling in topic models. Yao et al. [2009] reduce the iteration steps needed
+
+in sampling each token by using that n(w) and n(d) are sparse matrices. They also use the fact that
+
+the hyperparameters α and β are constant during sampling and that some calculations need to be
+
+performed only once per iteration. The idea are developed further by Li et al. [2014] who reduce
+
+the sampling complexity by combining Walker-Alias sampling (that can be done, amortized, in
+
+constant time) together with the sparsity of n(d). This algorithm reduces the complexity of the
+
+algorithm to O(∑N
+
+i Kd(i)), limiting the iterations to the number of topics in each document. But this
+
+approach requires Metropolis-Hastings sampling instead of sampling from the full conditional
+
+of each topic indicator. Yuan et al. [2015] reduce the complexity further to O(N) per sampling
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+6
+
+iteration by using a Metropolis-Hastings approach with clever cyclical proposal distributions. All
+
+these improvements are for the serial collapsed sampler with AD-LDA needed for parallelization;
+
+the resulting algorithms, therefore, all target an approximation to the true posterior distribution,
+
+and the total approximation error is unknown.
+
+Although the examples in this article are focused on the basic LDA model and multi-core par-
+
+allel inference for larger datasets, our ideas are easily extended to a broader class of models. First
+
+of all, these ideas can easily be used in other more elaborate topic models such as Rosen-Zvi et al.
+
+[2010]. Second, it can be used in predicting topic distributions in out-of-corpus documents for pre-
+
+dictions in supervised topic models (see Zhu et al. [2013] for an example). Third, it can be used to
+
+evaluate topic models [Wallach et al., 2009]. The same ideas can also be exploited in other models
+
+based on the multinomial-Dirichlet conjugacy properties outside the class of topic models such as
+
+Gibbs samplers for part-of-speech tagging [Gao and Johnson, 2008].
+
+3. PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+3.1. The basic partially collapsed Gibbs sampler. The basic partially collapsed sampler simu-
+lates from the joint posterior of z and Φ by iteratively sampling from the conditional posterior
+p(z|Φ) followed by sampling from p(Φ|z). Note that the topic proportions θ1, ..., θD have been
+
+integrated out in both updating steps and that both conditional posteriors can be obtained in an-
+
+alytical form due to conjugacy. Theadvantage of only collapsing over the θ’s is that the update
+from p(z|Φ) can be parallelized over documents (since they are conditionally independent under
+this model). In a similar way, the update from p(Φ|z) can be parallelized over topics (the rows of
+Φ are conditionally independent). These properties gives the following basic sampler where we
+
+ﬁrst sample the topic indicators for each document in parallel as
+
+p(zi,d = j|z−i,d, Φ, wi,d) ∝ φj,wi,d ·
+
+(cid:16)
+
+n
+
+(d)
+−i,d,j + α
+
+(cid:17)
+
+(3.1)
+
+(3.2)
+
+where z−i,d are all topic indicators in document d excluding topic indicator i, and then sample the
+rows of Φ in parallel as
+
+p(φk|z) ∼ Dir(n
+
+(w)
+k + β) .
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+7
+
+In the following subsections, we propose a number of improvements of the basic partially col-
+
+lapsed Gibbs sampler to reduce the complexity of the algorithm and to speed up computations.
+
+We will present the samplers for a symmetric hyperparameter α; extending it to an asymmetric
+
+prior with different α:s for different topics is straight forward.
+
+3.2. The sparse partially collapsed Gibbs sampler. The sampling of p(z|Φ) in the basic partially
+
+collapsed Gibbs sampler is of complexity O(K) per topic indicator, making the sampling time
+
+linear in the number of topics. We propose a sparse partially collapsed Gibbs sampler (PC-LDA)
+
+with several improvements of the sampling algorithm.
+
+The Alias-LDA method in Li et al. [2014] exploits the sparsity that is created by the topic model
+
+when each document only contains a small subset of different topics. This usage of topic sparsity
+
+in documents can be extended to the partially collapsed sampler by decomposing
+
+p(zi,d = j|z−i,d, Φ, wi,d) ∝ φj,wi,d ·
+
+(cid:16)
+
+α + n
+
+(d)
+−i,d,j
+
+(cid:17)
+
+= φj,wi,d · α + φj,wi,d · n
+
+(di)
+−i,d,j .
+
+To sample a topic indicator for a given token we ﬁrst need to calculate the normalizing constant
+
+qwi,d (z) =
+
+φk,wi,d
+
+·
+
+(cid:16)
+
+α + n
+
+(d)
+−i,d,k
+
+(cid:17)
+
+= σa,wi,d + σb,wi,d ,
+
+K
+∑
+k=1
+
+where σa,wi,d = ∑K
+
+k=1 φk,wi,d α and σb,wi,d
+
+= ∑K
+
+k=1 φk,wi,d n
+
+(d)
+−i,d,k.
+
+The importance of this decomposition is two-fold. First, following sparse-LDA [Yao et al., 2009],
+we can use the sparsity of the topic counts n(d) within a document to calculate σb,wi,d by only iter-
+ating over the non-zero topic counts. This iteration reduces the complexity of sampling one topic
+
+indicator from O(K) to O(Kd), where Kd is the number of non-zero topics in a given document.
+
+Second, following Alias-LDA by Li et al. [2014], we can exploit that σa,wi,d is constant over the
+
+sampling of topic indicators. Therefore we only need to compute σa,wi,d once for each sampling it-
+
+eration and once for each word type v resulting in an amortized O(1) algorithm (i.e., an algorithm
+
+which is O(1) for each zi,d after an initial cost common to all zi,d in a corpus). More speciﬁcally,
+
+drawing a single zi,d is performed as follows.
+
+First calculate σb,wi,d and the cumulative sum, sb = ∑
+
+in the document. Draw a U ∼ U (0, σa,wi,d + σb,wi,d
+
+(d)
+−i,d,k over non-zero topics
+). If U ≤ σa,wi,d, we use the Walker-Alias method
+
+φk,wi,d n
+
+(di )
+−i,k>0
+
+k∈n
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+8
+
+presented in Li et al. [2014] to sample a topic indicator with O(1) amortized. The Walker-Alias
+
+table method is a method to generate samples from an arbitrary categorical distribution efﬁciently.
+
+The method ﬁrst constructs an Alias table in O(K) time that it is used to draw a sample in O(1)
+
+time Walker [1977]. Algorithmic details on how to construct an Alias table and draw a sample
+
+from it can be found in Algorithm 5 and 6 in the Appendix. If U > σa,wi,d, we choose a topic
+indicator using binary search over sb with complexity O(log(Kd)) Xiao and Stibor [2010]. Overall,
+
+sampling a topic indicator with PC-LDA, therefore, has complexity O(Kd) amortized. The full
+
+algorithm is described in Algorithm 1 and 2 in the Appendix.
+
+Conditioning on Φ gives us a couple of advantages compared to the original Walker-Alias
+
+method for the collapsed sampler. First, the Walker-Alias method can be used in a Gibbs sam-
+
+pler for each topic indicator, unlike the approach of Yuan et al. [2015] that uses a proposal in a
+
+Metropolis-Hasting within Gibbs algorithm. Direct simulation from a full conditional is generally
+
+more efﬁcient than sampling from the full conditional posterior using a Metropolis-Hastings up-
+
+date (except in the very rare case where the proposal is explicitly set up to generate negatively
+
+autocorrelated draws, which is not the case here). Second, as a by-product of calculating the
+
+Walker-Alias tables, we also calculate the normalizing constants σa,wi,d for all word types that can
+
+be stored and reused in sampling z. Note that building the Alias table can also easily be paral-
+
+lelized by word type.
+
+To sample the Dirichlet distribution (as a normalized sum of gamma distributed variables), we
+
+use the method of Marsaglia and Tsang [2000] to generate gamma variables efﬁciently. With this
+
+sampler we can take advantage of the sparsity in the n(w) count matrix and increase the speed
+
+further by storing previous calculations when sampling φ for n(w) = 0.
+
+Another advantage of the PC-LDA approach in a multi-core setting is that since the topic indi-
+cators of different documents, zd, are conditionally independent given Φ it allows us to rearrange
+document sampling between cores freely during the sampling of p(z|Φ). By using a job steal-
+
+ing approach where workers that have ﬁnished sampling "their" documents can "steal" jobs from
+
+other cores we can balance the workload between workers during sampling [Lea, 2000]. This
+
+approach can probably be improved further, but it shows another straight-forward beneﬁt from
+conditioning on Φ.
+
+3.3. The light partially collapsed conditional Metropolis-Hastings sampler. Yuan et al. [2015]
+
+propose an alternative approach to sample topic models with larger K using Metropolis-Hastings
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+9
+
+(MH) sampling. They use a cyclical proposal distribution, alternating between a word proposal
+
+and document proposal to reduce sampling complexity. This approach showed great improve-
+
+ments in the distributed situation and can be straightforwardly extended to a partially collapsed
+
+sampler as follows.
+
+The word-proposal distribution of the proposed topic indicator z∗
+
+i,d is
+
+pw(z∗
+
+i,d = j|Φ, wi,d) ∝ φj,wi,d .
+
+This proposal can be sampled using the Walker-Alias method with complexity O(1) given a
+constructed Alias-table based on the word types in Φ in a similar fashion as the sparse sampler in
+
+the previous subsection. The acceptance probability of the proposed topic indicator z∗
+
+i,d is given
+
+by
+
+πw,i = min
+
+1,
+
+(cid:40)
+
+p(z∗
+p(zi,d|Φ, z−i,d, wi,d)pw(z∗
+
+i,d|Φ, z−i,d, wi,d)pw(zi,d|Φ, wi,d)
+i,d|Φ, wi,d)
+
+(cid:41)
+
+= min
+
+1,
+
+
+
+
+
+
+α + n
+
+α + n
+
+(d)
+−i,d,z∗
+i,d
+(d)
+−i,d,zi,d
+
+
+
+
+
+
+,
+
+where zi,d is the current draw, p(·) is the full conditional posterior, pw(·) is the word-proposal
+
+distribution and n
+
+is the number of topic indicators in document d and for topic z∗
+
+i,d but
+
+(di)
+−i,d,z∗
+i,d
+
+with the ith topic indicator excluded. If the proposed topic is more common in the document
+
+than the current topic indicator it will be accepted with probability 1. Otherwise, the acceptance
+
+probability will be roughly proportional to the ratio nd,z∗
+
+/nd,zi .
+
+i
+
+The second proposal in the sampler is the doc-proposal distribution. This is exactly the same
+
+proposal distribution as in Yuan et al. [2015] and is given by
+
+pd(z∗
+
+i,d = j|zd, wi,d) ∝ n
+
+(d)
+d,j + α .
+
+U ≤ αK we sample a topic indicator with O(1) from p(z∗
+
+This proposal is sampled using a two-phase approach. First draw U ∼ U (0, ∑K
+
+k α + nd,k). If
+i,d) ∝ α. If U > αK we propose z∗
+proportional to the distribution of topic indicators within the document by simply sample an
+
+i,d
+
+existing topic indicator as U(1, Nd) where Nd is the number of tokens in document d. In this way,
+we will draw with complexity O(1) from the proposal distribution p(z∗
+
+without any
+
+i,d) ∝ nd,z∗
+
+i,d
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+10
+
+need to create an Alias table. The acceptance probability is given by
+
+πd,i = min
+
+1,
+
+
+
+
+
+
+φz∗
+
+i,d,wi,d (α + n
+φzi,d,wi,d (α + n
+
+(d)
+−i,d,z∗
+i,d
+(d)
+−i,d,zi,d
+
+)(α + n
+
+)(α + n
+
+
+
+
+)
+
+)
+
+
+
+.
+
+(d)
+d,zi,d
+(d)
+d,z∗
+i,d
+
+To simplify further we can do a slight change in the document proposal and instead propose
+
+with
+
+sampler.
+
+Using this proposal distribution we will end up with the simpliﬁed acceptance probability
+
+˜pd(z∗
+
+i,d|z−i,d, wi,d) ∝ n
+
+(d)
+−i,d,z∗
+i,d
+
++ αz∗
+
+i,d
+
+.
+
+˜πd,i = min
+
+1,
+
+(cid:26)
+
+(cid:27)
+
+.
+
+φz∗
+i,d,wi,d
+φzi,d,wi,d
+
+This simpliﬁcation can also be done in the original light-LDA document proposal acceptance
+
+step. In our experiments, we use πd,i to enable a fair comparison with the original light-LDA
+
+These two proposals are then combined to a cyclical Metropolis-Hastings proposal where the
+
+two proposals are used for each topic indicator zi,d in each Gibbs iteration. The beneﬁt of this
+
+sampler is that the sampling complexity is reduced compared to the sparse approaches. But the
+
+downside is the inefﬁciency of the sampling and the fact that for each token it can be necessary to
+
+draw as many as four uniform variables, a relatively costly (but constant) operation. A complete
+
+description of the algorithm can be found in Algorithm 3 and 4 in Appendix C.
+
+3.4. Time complexity of the sampler. The original collapsed sampler of Grifﬁths and Steyvers
+
+[2004] has sampling complexity O(N · K) per iteration. By taking advantage of sparsity, the com-
+
+plexity of sparse-LDA in Yao et al. [2009] is reduced to O(∑N
+
+i maxi(Kd(i), Kw(i))) where Kd(i) is the
+
+number of existing topics in the document of token i and Kw(i) is the number of existing topics in
+the word type w. This complexity will reduce to O(N · K) and as N → ∞ [Li et al., 2014]. The light
+
+sampler proposed by Yuan et al. [2015] has the good property of being of complexity O(N) since
+
+sampling each topic indicator can be done in constant time.
+
+Sampling the topic indicators for the sparse PC-LDA sampler has complexity O(∑N
+
+i Kd(i)) and
+the light-PC-LDA sampler O(N), but unlike the fully collapsed sampler, we also need to sample
+Φ. It is therefore of interest to study how the Φ matrix (of size K × V) grows with the number
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+11
+
+of tokens (N), to determine the overall complexity of PC-LDA. In most languages, the number
+
+of word types follows quite closely to Heaps’ law Heaps [1978], which models the relationship
+
+between word types and tokens as V(N) = ξ N ϕ where 0 < ϕ < 1. Typical values of ϕ lies in the
+
+range of 0.4 to 0.6 and ξ varies between 5 and 50 depending on the corpus [Araujo et al., 1997].
+
+The number of topics, K, in large corpora is often modeled by a Dirichlet process mixture where
+
+the expected number of topics are E(K(N)) = γ log
+
+, where γ is the prior precision of the
+
+(cid:16)
+
+1 + N
+γ
+
+(cid:17)
+
+Dirichlet process [Teh, 2010].
+
+Proposition 1. Complexity of the sparse partially collapsed Gibbs sampler. Assuming a vocabulary
+
+size following Heaps’ law V = ξ N ϕ with ξ > 0, 0 < ϕ < 1 and the number of topics following the mean
+
+of a Dirichlet process mixture K = γ log
+
+with γ > 0, the complexity of the PC-LDA sampler is
+
+(cid:16)
+
+1 + N
+γ
+
+(cid:17)
+
+(cid:32) N
+∑
+i=1
+
+O
+
+(cid:33)
+
+Kd(i)
+
+.
+
+Proof. See Appendix A.
+
+Proposition 2. Complexity of the light partially collapsed conditional Metropolis-Hastings sam-
+
+pler. Assuming a vocabulary size following Heaps’ law V = ξ N ϕ with ξ > 0, 0 < ϕ < 1 and the number
+
+of topics following the mean of a Dirichlet process mixture K = γ log
+
+with γ > 0, the complexity
+
+(cid:16)
+
+1 + N
+γ
+
+(cid:17)
+
+for the light-PC-LDA sampler is
+
+O (N) .
+
+Proof. See Appendix A.
+
+Propositions 3.4 and 3.4 show that the proposed partially collapsed samplers have an equivalent
+computational complexity as the state-of-the-art fully collapsed samplers. The sampling of Φ is
+dominated by the sampling of z when N → ∞.
+
+These result also shed light on the importance of integrating out Θ. The Θ parameters will grow
+much faster than Φ as N → ∞. This property of Θ makes the partially collapsed sampler, where
+we integrate out Θ, the only viable option for larger corpora if we want a sampler with minimal
+
+computational complexity.
+
+(cid:3)
+
+(cid:3)
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+12
+
+TABLE 2. Summary statistics of training corpora.
+
+DATASET
+
+N
+
+D
+
+V
+
+NIPSa
+1 499 11 547
+~ 1.9 m
+Enrona
+~ 6.4 m
+39 860 27 791
+Wikipedia b
+~ 157 m ~ 1.36 m 7 700
+New York Times c ~ 400 m ~ 1.83 m 8 000
+PubMeda
+~ 761 m ~ 8.2 m 50 000
+
+ahttp://archive.ics.uci.edu/ml/datasets/Bag+of+Words
+bThe tokenized version has been used. Reese et al. [2010]
+http://www.cs.upc.edu/~nlp/wikicorpus/tagged.en.tgz
+cSandhaus [2008] https://catalog.ldc.upenn.edu/LDC2008T19
+
+4. EXPERIMENTS
+
+In the following sections, we study the characteristics of the PC-LDA samplers. We compare
+
+our algorithm with the sparse-LDA from Yao et al. [2009] parallelized using AD-LDA in Mallet
+
+2.0.7 (called AD-LDA in the experiments below) [McCallum, 2002]. Note that AD-LDA reduces to
+
+an exact sparse-LDA collapsed sampler when we are only using one core. The code for PC-LDA
+
+has been released as open source as a plug-in to the Mallet framework.2
+
+We use the same corpora as is used by Newman et al. [2009] to evaluate our PC-LDA sampler.
+
+We also use the New York Times corpus and a Wikipedia corpus to be able to compare with the
+
+results in Hoffman et al. [2013]. Following common practice, we remove the rarest word types in
+
+the corpus. We choose a rare word limit of 10 for the smaller corpora. For the larger corpora, we
+
+instead follow Hoffman et al. [2013] and use TF-IDF to choose the most relevant vocabulary, using
+
+50 000 terms for the PubMed corpus, 7 700 for the Wikipedia corpus, and 8 000 for the New York
+
+Times corpus.
+
+The choice of hyperparameters inﬂuences the sparsity of n(w) and n(d), and hence also the rela-
+
+tive speed of the studied samplers: sparse AD-LDA is mainly fast for sparse n(w) while PC-LDA
+
+beneﬁts from the sparsity of n(d). Since α inﬂuences the sparsity of n(d) while β inﬂuences the
+
+sparsity of n(w) we, therefore, ran experiments comparing the computing time per iteration. We
+
+ran the samplers for different combinations of α (0.1 and 0.01) and β (0.1 and 0.01) for the Enron
+
+corpus with K = 100 topics. These experiments were performed with six different initializations
+
+and the sampling time at the 1000th iteration for all six seeds. Figure 4.1 shows that the PC-LDA
+
+2https://github.com/lejon/PartiallyCollapsedLDA.
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+13
+
+sampler is only slower than Sparse AD-LDA when α = 0.1 and β = 0.01. To ensure that our
+
+results are conservative, we set α = 0.1 and β = 0.01 in all experiments to put PC-LDA in the least
+
+favorable situation.
+
+FIGURE 4.1. Average time per iteration (incl. standard errors) for Sparse AD-LDA
+and for PC-LDA using the Enron corpus and 100 topics.
+
+Finding suitable metrics for comparing sampler for topics models is a challenge for a number
+
+of reasons. First, our samplers (sparse PC-LDA and light PC-LDA) are proper MCMC methods
+
+known to converge to the target posterior. This is not true for the samplers that we compare to
+
+(AD-LDA and Light LDA using AD-LDA for parallelization) that at best converge to a reasonable
+
+approximation of the posterior. However, there is currently no theory to back up this claim. It
+
+is therefore not possible to compare samplers using the usual metrics from the MCMC literature
+
+(e.g., integrated autocorrelation time), except when using a single processor (in which case AD-
+
+LDA and Light-LDA are proper MCMC methods converging to the target posterior). Second,
+
+topic models are highly complex models with millions or even billions of latent discrete variables
+
+learned jointly with other high-dimensional continuous parameters. Like in any mixture model,
+
+the posterior is expected to have many local minor modes (even without considering the so-called
+
+label switching problem), and it is practically impossible to explore the full parameter space in
+
+any reasonable amount of time. The goal for any posterior sampling method in such models is
+
+therefore
+
+(1) to quickly locate the regions of dominant posterior mass and
+
+(2) to efﬁciently explore those major modes in proportions to their posterior density.
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+14
+
+The ﬁrst aim has not been studied much in the theoretical MCMC literature, except in explicit
+
+MCMC-based optimization algorithms such as simulated annealing where the second goal is not
+
+reached. One exception is Maciuca and Zhu [2006] who study the mean ﬁrst hitting time of the
+
+independence Metropolis-Hastings algorithm (i.e., the expected time to reach a given point in the
+
+parameter space). Only studying the ﬁrst aim of the posterior sampling method is though limited
+
+in evaluating Markov Chains. Hence, we will, therefore, analyze both the algorithm’s ability to
+
+ﬁnd the dominant modes quickly and its mixing properties via the integrated autocorrelation time.
+
+The integrated autocorrelation time does not depend on the number of parallel processors, and it
+
+is, therefore, sufﬁcient to compute it for the single processor case. As noted above, it also does not
+
+make sense to calculate it for methods using AD-LDA in the multi-processor setting.
+
+Following the evaluation of topic models in the machine learning literature (see also Villani
+
+et al. [2009] for similar evaluations for mixture-of-experts models), we evaluate the samplers and
+
+how well they reach the regions of high posterior density as well as the mixing properties using the
+
+integrated autocorrelation time. We are using the log joint posterior of the topic indicators (z) with
+Φ and Θ marginalized out; we refer to this quantity as the log marginalized posterior. Focusing
+
+only on the topic indicators makes the evaluation comparable across all algorithms. Since the
+
+behavior of the chain depends on the initialization state, we have used the same seed to initialize
+
+the different samplers to the exact same starting state (concerning z).
+
+The experiments are conducted using an HP Cluster Platform with DL170h G6 compute nodes
+
+with 4-core Intel Xeon E5520 processors at 2.2GHz (for the 8-core experiments) or 8-core Intel
+
+Xeon E5-2660 "Sandy Bridge" processors at 2.2GHz (speed experiments). All experiments use two
+
+sockets with 24 or 32 GB memory nodes, except for the parallelism experiment where we use an
+
+8-socket 64-core machine with 1024 GB memory.
+
+4.1. Efﬁciency loss from only partially collapsing. Liu [1994] proves that collapsing out param-
+
+eters improves the mixing rate of the MCMC chain for the remaining parameters. Contrary to
+
+often held beliefs (see, e.g., Newman et al. [2009]) Theorem 1 in Liu [1994] is not applicable to
+LDA when Φ (or Θ) is integrated out. This fact has recently been pointed out by Terenin et al.
+
+[2017] who give a simple counterexample to demonstrate this point. It is, therefore, an open ques-
+
+tion whether the mixing rate of a partially collapsed Gibbs sampler is worse than a fully collapsed
+
+sampler in the LDA context, and if so, by how much. We will here investigate this empirically
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+15
+
+on two well-known corpora where we compare the inefﬁciency factor (integrated autocorrelation
+
+time) of the fully collapsed and the PC-LDA sampler in a single core setting.
+
+Each experiment starts with a given random seed and runs for 10 000 iterations using the col-
+
+lapsed Gibbs sampler (the gold standard) to justify that we have reached the posterior region of
+
+interest to explore using a visual inspection of the traceplot for the log marginalized posterior.
+
+The topic indicators z in the last iteration is then used as initialization point for both a collapsed
+
+sampler and the PC-LDA sampler. We subsequently perform two sub-runs with the collapsed
+
+sampler and two with the PC-LDA sampler per experimental setup.
+
+The parameters Θ and Φ are subsequently sampled for each of the 2 000 z-draws. For the
+collapsed sampler p(Θ, Φ|z) are sampled while we sample p(Θ|z) for the PC-LDA sampler (we
+already have samples of Φ). We calculate the inefﬁciency for the 1 000 largest mean values of φk for
+
+each topic (the so-called top words) and all elements in θd for 1000 randomly chosen documents.
+This means that the inefﬁciency estimates are based on 1000 · K parameters for Θ (Table 3) and
+1000 · K for Φ (Table 4). To estimate the inefﬁciency factor (IF) for each parameter, we compute
+
+IF = L/ESS where L is the length of the Markov Chain and ESS is effective sample size computed
+
+with the coda package [Plummer et al., 2006] in R. Up to a certain lag, we ﬁnd this package to be
+
+much more precise than the estimator based on sample autocorrelations.
+
+TABLE 3. Mean inefﬁciency factors, IF, (standard deviation in parentheses) of Θ.
+
+TABLE 4. Mean inefﬁciency factors, IF, (standard deviation in parentheses) of Φ.
+
+DATA
+
+K Collapsed
+
+PC-LDA IF ratio
+
+Enron
+20
+Enron 100
+NIPS
+NIPS
+
+3.31 (4.8)
+2.21 (5.0)
+
+3.54 (6.1)
+2.29 (5.3)
+20 10.82 (32.0) 12.54 (47.2)
+7.45 (16.0)
+
+6.64 (14.1)
+
+100
+
+1.07
+1.04
+1.16
+1.12
+
+DATA
+
+K Collapsed
+
+PC-LDA IF ratio
+
+20
+
+Enron
+5.03 (14.7)
+5.00 (19.9)
+Enron 100 17.90 (49.2) 22.46 (58.0)
+20 28.20 (73.5) 31.47 (81.1)
+NIPS
+100 16.20 (43.1) 23.85 (55.6)
+NIPS
+
+1.01
+1.26
+1.12
+1.48
+
+The results of the ﬁrst experiment can be seen in Table 3 and 4; the other experiments gave
+
+very similar inefﬁciencies and are not reported. We conclude that the increase in inefﬁciency of
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+16
+
+the chains from not collapsing out Φ is small. The largest value, 1.48, can be found in the NIPS
+
+dataset. In Figure 4.2, we can see the effect this has on the speed of the chain to reach the region of
+
+high posterior density. Note that while a partially collapsed sampler has nearly the same mixing
+
+properties as the collapsed sampler, it can be parallelized to run substantially faster in a multi-core
+
+setting; this is demonstrated in Section 4.3.
+
+4.2. Posterior error using the AD-LDA approximation. AD-LDA is the most popular way of
+
+parallelizing LDA. It is known that the approximation will inﬂuence the sampling of each topic
+
+indicator [Ihler and Newman, 2012], but we have not found any studies of the effect on the joint
+
+posterior distribution. To explore this, we start the sampler with the same initial state with respect
+
+to the topic indicators z and then run the sampler with different numbers of cores/partitions to
+
+see the effect on the joint posterior distribution of the topic indicators p(z|w).
+
+FIGURE 4.2. Log marginalized posterior for the NIPS dataset with K = 20 (upper)
+and K = 100 (lower) for AD-LDA (left) and PC-LDA (right).
+
+As shown in Figure 4.2, there is a clear tendency for AD-LDA to converge to a lower poste-
+
+rior mode as more cores are used to parallelize the sampler. To get some more insights into this
+
+behavior of AD-LDA, Figure 4.3 displays the sparsity of the n(w) and n(d) matrices (the fraction
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+17
+
+FIGURE 4.3. The sparsity of n(w) (left) and n(d) (right) as a function of cores for the
+NIPS dataset with K = 20 (upper) and K = 100 (lower).
+
+of elements larger than zero) as a function of the number of cores. This effect is of interest for
+
+two reasons. First, this means that AD-LDA does not approximate the posterior with a worse
+
+log marginalized posterior, but it approximates the posterior with different properties, and how
+
+much the AD-LDA approximation differs with a MCMC approximation depends on the number
+
+of cores. Second, we can interpret these results as that using the AD-LDA approximation of the
+
+posterior will make the approximate posterior drift towards ﬁnding a better local approximation
+
+on each core (a more sparse n(d) matrix) and a less good global approximation (a less sparse n(w)
+
+matrix). Similar results are found for the Enron corpus (not shown).
+
+The second aspect of the partially collapsed sampler compared with the fully collapsed sampler
+
+is that the fully collapsed sampler seems to have a larger problem with getting stuck in local modes
+
+when it comes to n(w). As can be seen in Figure 4.3, the sparsity of n(w) for different initial states
+
+get stuck at various sparsity levels. In the case of Enron, this happened for one initial seed while in
+
+the NIPS 100 situation we can see that the sampler gets stuck at four different sparsity levels. The
+
+partially collapsed sampler on the other hand always ends up at the most sparse global solution.
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+18
+
+This result seems to indicate that the partially collapsed sampler is more robust to initial states
+
+and the number of cores used. It would be interesting to follow up these empirical observations
+
+by a careful theoretical analysis, but that is beyond the scope of this paper.
+
+4.3. Parallelism and execution time comparison. We compare our proposed samplers with two
+
+state-of-the-art samplers: sparse LDA (parallelized using AD-LDA) by Yao et al. [2009] using the
+
+original implementation in Mallet and light-LDA by Yuan et al. [2015], which we implemented in
+
+Mallet. Having implemented all samplers in the same Mallet framework makes for a fair com-
+
+parison between the samplers. There are still differences in that the work of Yuan et al. [2015]
+
+has focused on the distributed setting rather than a multicore shared-memory setting. We have
+
+chosen to not compare with Alias-LDA since it is similar to light-LDA in that it uses a conditional
+
+Metropolis-Hastings approach, but light-LDA has been shown to be faster [Yuan et al., 2015]. The
+
+samplers are compared using 10, 100, and 1000 topics for the full (100%) PubMed corpus and a
+
+subset (10%) of the corpus. As explained at the beginning of Section 4, we compare the samplers
+
+in how quickly they reach a region of high posterior density. We refer to this as the speed to reach
+
+a mode region.
+
+Figure 4.4 shows that PC-LDA is in general faster to reach the mode region than most other
+
+approaches, especially when the number of topics is large. The pattern is very similar for all cor-
+
+pora sizes. The different light-LDA approaches are increasing fast in log marginal posterior in the
+
+initial iterations when sparse-LDA still is working with a more dense matrix, making light-LDA
+
+quicker in the beginning. Yuan et al. [2015] show that light-LDA outperforms both sparse LDA
+
+and Alias-LDA, a result that differs from our results. We believe that this may be due to imple-
+
+mentation details (after personal correspondence with Jinhui Yuan). Yuan et al. [2015] work with a
+
+distributed, multi-machine approach while we have done the implementations in a shared mem-
+
+ory, multi-core setting. The shared-memory situation is relevant for many practitioners working
+
+with larger corpora.
+
+Light-LDA and similar approaches have been shown to work very well for a large number of
+
+topics. A very large number of topics may be needed for web-size applications like the proprietary
+
+Bing corpus, whereas a much more moderate number of topics is likely to be more useful in less
+
+extreme situations. For example, Hoffman et al. [2013] ﬁnd that a surprisingly small number of
+
+topics are optimal in several relatively large corpora of interest for practitioners. As a comparison,
+
+we evaluate the speed to the mode region of our samplers using the same settings as in Hoffman
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+19
+
+FIGURE 4.4. Log marginal posterior by runtime for PubMed 10% (left) and
+PubMed 100% (right) for 10, 100, and 1000 topics using 16 cores and 5 different
+random seeds.
+
+et al. [2013] on their Wikipedia corpus 3 (using 7,700 word types) and New York Times corpus
+
+(using 8,000 word types). Hoffman et al. [2013] conclude that 100 topics are the optimal number
+
+of topics for both corpora.
+
+As can be seen in Figure 4.5, most algorithms work well and can ﬁt these models with speeds
+
+comparable to that of Hoffman et al. [2013], using a 16 core machine. Since Hoffman et al. [2013]
+
+uses stochastic Variational Bayes to approximate the posterior, the speed of our provably correct
+
+MCMC samplers is quite impressive. We can also conclude that although the algorithms are quite
+
+similar in speed, the PC-LDA sampler is the winner when it comes to quickly ﬁnding the high-
+
+density region of the posterior distribution.
+
+3We could not ﬁnd the exact same Wikipedia corpus and used a smaller Wikipedia corpus. We still used 100 topics.
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+20
+
+FIGURE 4.5. Log marginal posterior by runtime for Wikipedia corpus (left) and the
+New York Times corpus (right) for 100 topics using 16 cores.
+
+To study how the samplers scale as we increase the number of topics, we run PC-LDA for 1000
+
+iterations on the larger PubMed corpus using 100 and 1000 topics and compare the speed until
+
+reaching the mode region on 16, 32, and, 64 cores.
+
+FIGURE 4.6. Log marginal posterior by runtime for the PubMed corpus for 100
+topics (left) and 1000 topics (right) using PC-LDA.
+
+From the data in Figure 4.6, we calculate the time it takes for the PC-LDA sampler to reach the
+
+mode region (where this region is deﬁned as 1 % of the top log marginalized posterior for the
+
+sampler for the respective number of topics). The results are presented in Table 5. By increasing
+
+the number of cores from 16 to 64, we can reduce the sampling time to reach the high-density
+
+Table 5 also shows that PC-LDA makes it possible to reach the interesting part of the posterior
+
+in an LDA model with 1000 topics for the large PubMed corpus in a little more than 2 hours on a
+
+region by 50%.
+
+64 core machine.
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+21
+
+TABLE 5. Runtime to reach the high density region for 100 and 1000 topics on 16,
+32, and 64 cores.
+
+No. Cores K
+
+Runtime (min)
+
+16
+32
+64
+16
+32
+64
+
+100
+100
+100
+1000
+1000
+1000
+
+49.2
+35.5
+27.5
+290
+201
+141
+
+5. DISCUSSION AND CONCLUSIONS
+
+We propose PC-LDA, a sparse partially collapsed Gibbs sampler for LDA. Contrary to state-
+
+of-the-art parallel samplers, such as AD-LDA, our sampler is guaranteed to converge to the true
+
+posterior. This guarantee is an important property as our experiments indicate that AD-LDA does
+
+not converge to the true posterior. This error seems to increase with the number of cores. Although
+
+the differences may be small in practice for the basic LDA model, they may very well be ampliﬁed
+
+in more complicated models or online approaches.
+
+O
+
+Our PC-LDA sampler is shown under reasonable assumptions to have the same complexity,
+(cid:16)
+
+, per iteration as other efﬁcient collapsed sparse samplers such as Alias-LDA, de-
+spite the additional sampling of Φ. The light-PC-LDA sampler is proved to have the same com-
+
+i=1 Kd(i)
+
+∑N
+
+(cid:17)
+
+plexity as light-LDA, O (N) per iteration. The reduced computational complexities of light-PC-
+
+LDA and light-LDA do not compensate for the decrease in sampling efﬁciency and the PC-LDA
+sampler with direct sampling from p(z|Φ) is, in general, the sampler which most quickly reaches
+
+the region around the dominant mode in our experiments.
+
+An effective sampler for topic models needs to balance three entities in an optimal way: sam-
+
+pling complexity, sampling efﬁciency, and constant factors; the time complexity of the sampler
+
+is important but is not the whole story. All Metropolis-Hastings samplers presented here are of
+
+complexity O(N), but this reduction in sampling complexity comes at the cost of reduced sam-
+
+pling efﬁciency. Light-LDA trades off the mixing efﬁciency of the chain to reduce the sampling
+
+complexity and PC-LDA trades off efﬁciency to enable a parallel sampler that converges to the
+
+true posterior. Lastly, even for large corpora, the constant factors are important. PC-LDA needs to
+sample Φ, and Light-LDA needs to draw multiple random variates per sampled topic indicator.
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+22
+
+We have for example seen that sparse samplers are having more difﬁculties in distributing the
+
+sampling workload between cores than the light samplers.
+
+Yuan et al. [2015] show that light-LDA outperforms both sparse LDA and Alias-LDA, a result
+
+that differs from our results. We believe that this may be due to implementation details (after
+
+personal correspondence). Yuan et al. [2015] work with a distributed, multi-machine approach
+
+while we have done the implementations in a shared memory, multi-core setting. The shared-
+
+memory situation is relevant for many practitioners working with larger corpora.
+
+We believe that the reason for the success of PC-LDA is three-fold: First, PC-LDA (like Alias-
+
+LDA) limits the sampling complexity to the number of topics in each document, which tends to
+
+be small in practice. Assuming that the number of tokens in the documents is ﬁnite, this complex-
+
+ity can be regarded as constant since the complexity is limited by the document size even when
+K → ∞. Second, PC-LDA (unlike light-PC-LDA, light-LDA, and Alias-LDA) is a Gibbs sampler
+
+that only needs to draw one random variable per token and iteration. Drawing random variates
+
+are relatively costly, so even if the computational complexity is reduced using light-PC-LDA or
+
+light-LDA, the constant cost of sampling a single token is larger. Third, contrary to common be-
+
+lief, we demonstrate on several commonly used corpora that a partially collapsed sampler has
+
+nearly the same MCMC efﬁciency as the gold standard sequential collapsed sampler, but enjoys
+
+the advantage of straightforward parallelization. Our results show speedups per iteration to at
+
+least 64 cores on the larger PubMed corpus, making it a good option for MCMC sampling in
+
+larger corpora.
+
+An important advantage of PC-LDA is that it also allows for more interesting non-conjugate
+models for Φ, such as regularized topic models [Newman et al., 2011] or using a distributed sto-
+
+chastic gradient MCMC approach as has been proposed in Ahn et al. [2014]. As an example of
+
+such an extension, Appendix B gives the details for a PC-LDA algorithm that allows for variable
+selection in the topics, where elements in Φ may be set to zero.
+
+In summary, we propose and evaluate new sparse partially collapsed Gibbs samplers for LDA
+
+with several algorithmic improvements. Our preferred algorithm, PC-LDA, is fast, efﬁcient, and
+
+exact. Compared to the popular collapsed AD-LDA sampler, PC-LDA is applicable to a larger
+
+class of extended LDA models as well as in other language models using the Dirichlet-multinomial
+
+conjugacy.
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+23
+
+ACKNOWLEDGEMENTS
+
+This research is in part ﬁnancially supported by the Swedish Foundation for Strategic Research
+
+(SSF) (project ASSEMBLE, RIT15-0012 and project Smart Systems: RIT 15-0097).
+
+REFERENCES
+
+Amr Ahmed, Mohamed Aly, Joseph Gonzalez, Shravan Narayanamurthy, and Alexander Smola.
+
+Scalable inference in latent variable models. In International Conference on Web Search and Data
+
+Mining, pages 123–132, 2012.
+
+Sungjin Ahn, Babak Shahbaba, and Max Welling. Distributed stochastic gradient mcmc. In Inter-
+
+national Conference on Machine Learning, pages 1044–1052, 2014.
+
+Márcio Drumond Araujo, Gonzalo Navarro, and Nivio Ziviani. Large text searching allowing
+
+errors. In 4th South American Workshop on String Processing, pages 2–20, 1997.
+
+David M Blei, Andrew Y Ng, and Michael I Jordan. Latent dirichlet allocation. Journal of machine
+
+Jen-Tzung Chien and Ying-Lan Chang. Bayesian sparse topic model. Journal of Signal Processing
+
+Learning research, 3(Jan):993–1022, 2003.
+
+Systems, 74(3):375–389, 2014.
+
+Jianfeng Gao and Mark Johnson. A comparison of bayesian estimators for unsupervised hidden
+
+markov model pos taggers. In Conference on Empirical Methods in Natural Language Processing,
+
+Thomas L Grifﬁths and Mark Steyvers. Finding scientiﬁc topics. Proceedings of the National Academy
+
+Harald Stanley Heaps. Information retrieval : computational and theoretical aspects. Academic P., New
+
+pages 344–352, 2008.
+
+of Sciences, 101(suppl 1):5228–5235, 2004.
+
+York, 1978. ISBN 0-12-335750-0.
+
+Matthew D Hoffman, David M Blei, Chong Wang, and John William Paisley. Stochastic variational
+
+inference. Journal of Machine Learning Research, 14(1):1303–1347, 2013.
+
+Alexander Ihler and David Newman. Understanding errors in approximate distributed latent
+
+dirichlet allocation. IEEE Transactions on Knowledge and Data Engineering, 24(5):952–960, 2012.
+
+Hemant Ishwaran and Lancelot F James. Gibbs sampling methods for stick-breaking priors. Jour-
+
+nal of the American Statistical Association, 96(453):161–173, 2001.
+
+Doug Lea. A java fork/join framework. In ACM 2000 Conference on Java Grande, pages 36–43, 2000.
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+24
+
+Aaron Q Li, Amr Ahmed, Sujith Ravi, and Alexander J Smola. Reducing the sampling complexity
+
+of topic models. In 20th ACM SIGKDD International Conference on Knowledge Discovery and Data
+
+Mining, pages 891–900, 2014.
+
+Jun S Liu. The collapsed gibbs sampler in bayesian computations with applications to a gene
+
+regulation problem. Journal of the American Statistical Association, 89(427):958–966, 1994.
+
+Zhiyuan Liu, Yuzhou Zhang, Edward Y. Chang, and Maosong Sun. Plda+. ACM Transactions on
+
+Intelligent Systems and Technology, 2(3):1–18, 2011.
+
+Romeo Maciuca and Song-Chun Zhu. First hitting time analysis of the independence metropolis
+
+sampler. Journal of Theoretical Probability, 19(1):235–261, 2006.
+
+George Marsaglia and Wai Wan Tsang. A simple method for generating gamma variables. ACM
+
+Transactions on Mathematical Software, 26(3):363–372, 2000.
+
+Andrew K McCallum. Mallet: A machine learning for language toolkit, 2002.
+
+URL
+
+http://mallet.cs.umass.edu.
+
+David Newman, Arthur Asuncion, Padhraic Smyth, and Max Welling. Distributed algorithms for
+
+topic models. The Journal of Machine Learning Research, 10:1801–1828, 2009.
+
+David Newman, Edwin V Bonilla, and Wray Buntine. Improving topic coherence with regularized
+
+topic models. In Advances in neural information processing systems, pages 496–504, 2011.
+
+Kai Wang Ng, Guo-Liang Tian, and Man-Lai Tang. Dirichlet and Related Distributions: Theory,
+
+Methods and Applications, volume 888. John Wiley & Sons, 2011.
+
+Martyn Plummer, Nicky Best, Kate Cowles, and Karen Vines. Coda: Convergence diagnosis and
+
+output analysis for mcmc. R News, 6(1):7–11, 2006.
+
+Ian Porteous, David Newman, Alexander Ihler, Arthur Asuncion, Padhraic Smyth, and Max
+
+Welling. Fast collapsed gibbs sampling for latent dirichlet allocation.
+
+In ACM SIGKDD In-
+
+ternational Conference on Knowledge Discovery and Data Mining, pages 569–577. ACM, 2008.
+
+Samuel Reese, Gemma Boleda Torrent, Montserrat Cuadros Oller, Lluís Padró, and German
+
+Rigau Claramunt. Word-sense disambiguated multilingual wikipedia corpus. In 7th Interna-
+
+tional Conference on Language Resources and Evaluation, 2010.
+
+Michal Rosen-Zvi, Chaitanya Chemudugunta, Thomas Grifﬁths, Padhraic Smyth, and Mark
+
+Steyvers. Learning author-topic models from text corpora. ACM Transactions on Information
+
+Systems, 28(1):4, 2010.
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+25
+
+Evan Sandhaus. The new york times annotated corpus. Linguistic Data Consortium, Philadelphia,
+
+Alexander Smola and Shravan Narayanamurthy. An architecture for parallel topic models. Pro-
+
+ceedings of the VLDB Endowment, 3(1-2):703–710, 2010.
+
+Yee Whye Teh. Dirichlet process. In Encyclopedia of machine learning, pages 280–287. Springer, 2010.
+
+Alexander Terenin, Måns Magnusson, Leif Jonsson, and David Draper. Pólya urn latent dirichlet
+
+allocation: a sparse massively parallel sampler. manuscript in preparation, 2017.
+
+Jean-Baptiste Tristan, Daniel Huang, Joseph Tassarotti, Adam C Pocock, Stephen Green, and Guy L
+
+Steele. Augur: Data-parallel probabilistic modeling. In Advances in Neural Information Processing
+
+Systems, pages 2600–2608, 2014.
+
+David A Van Dyk and Taeyoung Park. Partially collapsed gibbs samplers: Theory and methods.
+
+Journal of the American Statistical Association, 103(482):790–796, 2008.
+
+Mattias Villani, Robert Kohn, and Paolo Giordani. Regression density estimation using smooth
+
+adaptive gaussian mixtures. Journal of Econometrics, 153(2):155–173, 2009.
+
+Alastair J Walker. An efﬁcient method for generating discrete random variables with general
+
+distributions. ACM Transactions on Mathematical Software (TOMS), 3(3):253–256, 1977.
+
+Hanna M Wallach, Iain Murray, Ruslan Salakhutdinov, and David Mimno. Evaluation methods
+
+for topic models. In 26th Annual International Conference on Machine Learning, pages 1105–1112,
+
+2008.
+
+2009.
+
+Han Xiao and Thomas Stibor. Efﬁcient collapsed gibbs sampling for latent dirichlet allocation. In
+
+Asian Conference on Machine Learning, volume 13, 2010.
+
+Feng Yan, Ningyi Xu, and Yuan Qi. Parallel inference for latent dirichlet allocation on graphics
+
+processing units. In Advances in Neural Information Processing Systems, pages 2134–2142, 2009.
+
+Limin Yao, David Mimno, and Andrew McCallum. Efﬁcient methods for topic model inference
+
+on streaming document collections. In ACM SIGKDD International Conference on Knowledge Dis-
+
+covery and Data Mining, pages 937–946, 2009.
+
+Jinhui Yuan, Fei Gao, Qirong Ho, Wei Dai, Jinliang Wei, Xun Zheng, Eric Po Xing, Tie-Yan Liu,
+
+and Wei-Ying Ma. Lightlda: Big topic models on modest computer clusters. In Proceedings of the
+
+24th International Conference on World Wide Web, pages 1351–1361. ACM, 2015.
+
+Jun Zhu, Ning Chen, Hugh Perkins, and Bo Zhang. Gibbs max-margin topic models with fast
+
+sampling algorithms. In 30th International Conference on Machine Learning, pages 124–132, 2013.
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+26
+
+APPENDIX A. PROOFS
+
+Complexity of the sparse partially collapsed Gibbs sampler. Assuming a vocabulary size following
+
+Heaps’ law V = ξ N ϕ with ξ > 0, 0 < ϕ < 1 and the number of topics following the mean of a Dirichlet
+
+process mixture K = γ log
+
+with γ > 0, the complexity of the PC-LDA sampler is
+
+(cid:16)
+
+1 + N
+γ
+
+(cid:17)
+
+Proof. Under the assumptions in the proposition, the complexity of PC-LDA for large N is
+
+(cid:32) N
+∑
+i=1
+
+O
+
+(cid:33)
+
+Kd(i)
+
+.
+
+Kd(i) + γξ log
+
+1 +
+
+(cid:18)
+
+(cid:19)
+
+N
+γ
+
+N ϕ.
+
+N
+∑
+i
+
+We, therefore, want to prove that there exists a c > 0 and a N0 ≤ N such that
+
+or, equivalently,
+
+N
+∑
+i
+
+Kd(i) + γξ log
+
+1 +
+
+N ϕ ≤ c
+
+Kd(i),
+
+(cid:18)
+
+(cid:19)
+
+N
+γ
+
+N
+∑
+i
+
+1 + γξ log
+
+1 +
+
+N ϕ/
+
+Kd(i) ≤ c,
+
+(cid:18)
+
+(cid:19)
+
+N
+γ
+
+N
+∑
+i
+
+for all N ≥ N0. Since N ≤ ∑N
+
+i Kd(i) we have
+
+1 + γξ log
+
+1 +
+
+N ϕ/
+
+Kd(i) ≤ 1 + γξ log
+
+1 +
+
+N ϕ/N .
+
+(cid:18)
+
+(cid:19)
+
+N
+γ
+
+N
+∑
+i
+
+(cid:18)
+
+(cid:19)
+
+N
+γ
+
+It is, therefore, enough to show that for N ≥ N0 = 1, there exist a c such that
+
+Let
+
+and note that
+
+by the standard limit
+
+1 + γξ log
+
+1 +
+
+N ϕ/N ≤ c .
+
+(cid:18)
+
+(cid:19)
+
+N
+γ
+
+f (N) = log
+
+1 +
+
+/N1−ϕ ,
+
+(cid:18)
+
+(cid:19)
+
+N
+γ
+
+f (1) = log(1 + γ−1) > 0 and lim
+N→∞
+
+f (N) = 0
+
+(cid:19)
+
+(cid:18) log(x)
+xb
+
+lim
+x→∞
+
+= 0 for b > 0.
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+27
+
+There exist an R such that for all N > R, f (N) < f (1). Using the extreme value theorem we know
+
+that at the interval [1, R] there exist a M = sup f (N). Hence, for N ≥ N0 = 1, there exists a c such
+(cid:3)
+
+that c = 1 + γξ M, which completes the proof.
+
+Proposition 2. Complexity of the light partially collapsed conditional Metropolis-Hastings sam-
+
+pler. Assuming a vocabulary size following Heaps’ law V = ξ N ϕ with ξ > 0, 0 < ϕ < 1 and the number
+
+of topics following the mean of a Dirichlet process mixture K = γ log
+
+with γ > 0, the complexity
+
+(cid:16)
+
+1 + N
+γ
+
+(cid:17)
+
+for the light-PC-LDA sampler is
+
+Proof. Under the assumptions in the proposition, the complexity of light-PC-LDA for large N is
+
+and we, therefore, need to prove that the exists a c > 0 and N0 ≤ N such that
+
+O (N) .
+
+(cid:18)
+
+(cid:18)
+
+(cid:19)
+
+N
+γ
+
+(cid:19)
+
+N
+γ
+
+(cid:18)
+
+N + γξ log
+
+1 +
+
+(cid:19)
+
+N
+γ
+
+N ϕ ,
+
+N + γξ log
+
+1 +
+
+N ϕ ≤ cN
+
+1 + γξ log
+
+1 +
+
+N ϕ/N ≤ c
+
+or equivalently
+
+for all N ≥ N0. The rest of the proof follows the proof of Proposition 1 exactly.
+
+(cid:3)
+
+APPENDIX B. VARIABLE SELECTION IN Φ
+
+Partially collapsed sampling of topic models has the additional advantage that more complex
+models can be used to model Φ. As an example, we derive a Gibbs sampler for a topic model with
+a spike-and-slab type prior for Φ that assigns point masses at zero to a subset of the parameters
+in Φ. Variable selection for LDA has previously been proposed by Chien and Chang [2014] using
+
+variational Bayes inference where the sparsity reduced both perplexity as well as memory and
+
+computation costs; we will here derive a similar approach using Gibbs sampling.
+
+The rows of Φ are assumed to be independent a priori, exactly like in the original LDA model,
+be the kth row of n(w), and let Ik = (Ik1, ..., IkV) be
+
+so let us focus on a given row φk of Φ. Let n
+
+(w)
+k
+
+a vector of binary variable selection indicators such that Ik,v = 1 if φk,v > 0, and Ik,v = 0 if φk,v = 0
+where v is the word type (column) of the Φ matrix. Deﬁne Ic
+
+k to be the complement of Ik (i.e., the
+vector indicating the zeros in φk). Let φk,Ik be a vector with elements of φk > 0. Finally, let nk be
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+28
+
+the total number of tokens associated with the kth topic. The indicators Ikv are assumed to be iid
+
+Bern(πk) a priori. The prior for φk is a conditional Dirichlet distribution where
+
+and φk,Ic
+
+k
+
+= 0 with probability one.
+
+p(φk,Ik
+
+|Ik) ∼ Dir(β Ik )
+
+The posterior sampling step for φk is replaced by two sampling steps. First we sample the
+
+indicator variables for each word type p(Ik,v | Ik,−v, πk, v, z) and then, conditional on the indicators
+
+Ik we sample p(φk,Ik
+
+|Ikz) from the conditional Dirichlet distribution in Ng et al. [2011].
+
+Sampling φk. Sampling from p(φk|Ik, z) is straightforward by setting φk,Ic
+
+= 0 and drawing the
+
+k
+
+non-zero elements in φk from
+
+p(φk,Ik
+
+|Ik, z) ∼ Dir(β Ik + n
+
+(w)
+Ik
+
+) .
+
+Sampling Ik,v. We ﬁrst note that if n
+
+(w)
+k,v > 0 we know that φk,v > 0 and hence we can set
+Ik,v = 1 with probability 1. The conditional posterior distribution of Ik,v is a two-point distri-
+
+bution and hence we need to compute the conditional distribution p(Ik,v = 1|Ik,−v, πk, v, z) and
+) since n(w) is a sufﬁ-
+
+p(Ik,v = 0|Ik,−v, πk, v, z) by integrating out φk. Note that p(Ik|z) = p(Ik|n
+
+(w)
+k
+
+cient statistic for Ik. By Bayes theorem we get
+
+p(Ik|n
+
+(w)
+k
+
+) ∝ p(n
+
+(w)
+k
+
+|Ik)p(Ik) ,
+
+where p(Ik) is the Bernoulli prior and
+
+p(n
+
+(w)
+k
+
+|Ik) ∝
+
+(cid:90)
+
+n
+
+(w)
+k,Ik
+k,Ik
+
+φ
+
++β Ik
+
+−1
+
+dφk,Ik
+
+= B(n
+
+(w)
+k,Ik
+
++ β Ik ) ,
+
+using the Dirichlet kernel and with B being the multivariate Beta function. With some algebra
+
+we then have that the conditional two-point distribution where we set Ik,v = 1 if n
+
+(w)
+k,v > 0 and
+
+otherwise we draw Ik,v using the following two-point distribution:
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+29
+
+FIGURE B.1. Log marginalized posterior for different values of π for PubMed 10%
+(left) and NIPS (right).
+
+(cid:16)
+
+p
+
+Ik,v = 1|Ik,(−v), πk
+
+(cid:17)
+
+∝
+
+p (Ik,v = 0|Ik,−v, πk) ∝
+
+Γ(cid:0)∑j∈Ik,j(cid:54)=v βk,j + βk,v
+
+(cid:1)
+
+Γ(cid:0)∑j∈Ik,j(cid:54)=v n
+
+(w)
+k,j + βk,j + βk,v
+
+(cid:1)
+
+πk ,
+
+Γ(cid:0)∑j∈Ik,j(cid:54)=v βk,j
+
+(cid:1)
+
+Γ(cid:0)∑j∈Ik,j(cid:54)=v n
+
+(w)
+k,j + βk,j
+
+(cid:1)
+
+(1 − πk) .
+
+where Γ(·) is the Gamma function.
+
+Earlier research has already concluded that introducing variable selection for Φ in LDA can
+
+reduce the perplexity and increase parsimony of the topic model [Chien and Chang, 2014]. Here
+
+we illustrate the effect of variable selection for the PubMed (10%) and NIPS corpora (both with a
+
+rare word limit of 10). We set the sparsity prior to π = 1.0, 0.5, 0.1, K = 100, and run all models for
+
+20 000 iterations. We examine the proportions of zeroes and log marginalized posterior induced
+by the variable selection prior π. The proportion of zeroes in Φ is estimated using the last 1000
+
+iterations. The results are summarized in Table 6 and Figure B.
+
+TABLE 6. Variable selection of Φ
+
+DATA
+
+K
+
+π
+
+Prop. zeros in Φ
+
+PubMed 10% 100 0.1 0.879
+PubMed 10% 100 0.5 0.492
+PubMed 10% 100 1.0 0.000
+100 0.1 0.877
+NIPS
+100 0.5 0.501
+NIPS
+100 1.0 0.000
+NIPS
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+30
+
+The results are similar to that of Chien and Chang [2014] in that a sparse prior will result in a
+
+better marginal likelihood of the model. This model can be elaborated further (the most obvious
+
+is learning π), but this is out of the scope for this paper.
+
+APPENDIX C. ALGORITHMS
+
+Data: tokenized corpus x
+Result: topic indicators z
+z ← RandomInitZ();
+n(w) ← SumUpGlobalSufﬁcientStatistics(z);
+for g ← 1 to num_iterations do
+
+// Sample Φ
+Φ ← SampleDirichlet(n(w), β);
+A, σa ← ConstructAliasTables(Φ, α);
+// Sample z
+z, n(w) ← SampleTopicIndicatorsSparse(Φ, x, z, σa, n(w));
+
+end
+
+Algorithm 1: Sparse Partially Collapsed LDA
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+31
+
+Data: Φ, x, z, σa, n(w)
+Result: z,n(w)
+for d ← 1 to D in parallel do
+
+// Compute sorted sparse sufﬁcient statistic for θd
+n(d) ← SumUpDocumentSparseTopicCounts(zd);
+for i ← 1 to Nd do
+
+(d)
+zi
+
+, ∆n
+
+(w)
+zi,xi ← −1 ;
+
+// Remove position i from the sufﬁcient statistics
+n
+// Compute normalization constant σb and cumulative sum s over topics
+σb, sb ← ComputeSparseCumSum(n(d), φxi );
+ui ← RandomUniform();
+uσ ← ui · (σa + σb);
+if uσ < σa then
+
+// Normalize the random draw to [0,1]
+ui ← uσ/σa;
+// Sample from "prior" part using ui
+zi ← LookUpAliasTable(Axi , ui);
+
+else
+
+// Normalize the random draw to [0,1]
+ui ← (uσ − σa)/σb ;
+// Sample from sparse "likelihood" part using ui
+zi ← BinarySearch(sb, ui · σb);
+
+end
+// Add the new topic indicator to the sufﬁcient statistics
+n
+end
+n(w) ← UpdateGlobalSufﬁcientStatistics(n(w), ∆n(w))
+
+(w)
+zi,xi ← +1 ;
+
+, ∆n
+
+(d)
+zi
+
+Algorithm 2: SampleTopicIndicatorsSparse()
+
+end
+
+end
+
+Data: tokenized corpus x
+Result: topic indicators z
+z ← RandomInitZ();
+n(w) ← SumUpGlobalSufﬁcientStatistics(z);
+for g ← 1 to num_iterations do
+
+// Sample Φ
+Φ ← SampleDirichlet(n(w), β);
+A ← ConstructAliasTables(Φ);
+// Sample z
+z, n(w) ← SampleTopicIndicatorsLight(A, x, z, n(w));
+
+Algorithm 3: Light Partially Collapsed LDA
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+32
+
+Data: A, x, z, σa, n(w)
+Result: z,n(w)
+for d ← 1 to D in parallel do
+for i ← 1 to Nd do
+
+(d)
+zi
+
+, ∆n
+
+// Remove position i from the sufﬁcient statistics
+(w)
+zi,xi ← −1 ;
+n
+// Word proposal draw
+ui,1 ← RandomUniform();
+z∗ ← LookUpAliasTable(Axi , ui,1);
+ui,2 ← RandomUniform();
+α+n−i
+d,z∗
+α+n−i
+d,zi
+
+< ui,2 then
+
+if min
+
+(cid:27)
+
+(cid:26)
+
+1,
+zi ← z∗;
+
+end
+// Document proposal draw
+ui,3 ← RandomUniform();
+ud,i,3 ← ui,3 · (α · K + Nd,−i);
+if ud,i,3 < α · K then
+
+// Normalize the random draw to [0,1]
+ui,3 ← ud,i,3/(α · K);
+// Draw sample using ui,3
+z∗ ← SampleDiscreteUniform(1, K, ui,3) ;
+
+else
+
+// Normalize to [0,1] ui,3
+ui,3 ← (ud,i,3 − (α · K))/Nd,−i;
+z∗ ← ChooseRandomToken(z−i, ui,3) ;
+
+end
+ui,4 ← RandomUniform();
+φk=z∗,wi =v
+if min
+φk=zi ,wi =v
+
+(cid:110)
+
+(cid:111)
+
+1,
+zi ← z∗ ;
+
+< ui,4 then
+
+end
+// Add the topic indicator to the sufﬁcient statistics
+n
+end
+n(w) ← UpdateGlobalSufﬁcientStatistics(n(w), ∆n(w))
+
+(w)
+zi,xi ← +1 ;
+
+, ∆n
+
+(d)
+zi
+
+end
+
+Algorithm 4: SampleTopicIndicatorsLight()
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+33
+
+Data: vector of proportions p, length of p K
+Result: Alias table A
+Initialize L = U = ∅ and A = [];
+for i ← 1 to K do
+
+if p[i] < 1/K then
+
+L ← L ∪ (p[i], i);
+
+U ← U ∪ (p[i], i);
+
+else
+
+end
+
+end
+for i ← 1 to K do
+
+Get (pl, kl) from L and (pu, ku) from U;
+A ← A ∪ (pl, kl, ku) ;
+pu ← pu − (1/K − pl) ;
+if pu < 1/K then
+
+L ← L ∪ (pu, ku);
+
+U ← U ∪ (pu, ku);
+
+else
+
+end
+
+end
+
+Algorithm 5: ConstructAliasTable()
+
+Data: Alias table A, Alias table categories K, random uniform [0,1] u
+Result: Class k
+k ← (cid:98)u · K(cid:99) + 1 ;
+// Renormalize u
+u ← (u · K + 1 − k)/K ;
+(p, kl, ku) ← A[k] ;
+if u < p then
+return kl ;
+
+else
+
+end
+
+return ku ;
+
+Algorithm 6: LookUpAliasTable()
+
+7
+1
+0
+2
+ 
+g
+u
+A
+ 
+5
+1
+ 
+ 
+]
+L
+M
+
+.
+t
+a
+t
+s
+[
+ 
+ 
+3
+v
+4
+8
+7
+3
+0
+.
+6
+0
+5
+1
+:
+v
+i
+X
+r
+a
+
+SPARSE PARTIALLY COLLAPSED MCMC FOR PARALLEL INFERENCE IN TOPIC
+MODELS
+
+MÅNS MAGNUSSON, LEIF JONSSON, MATTIAS VILLANI AND DAVID BROMAN
+
+ABSTRACT. Topic models, and more speciﬁcally the class of Latent Dirichlet Allocation (LDA), are
+
+widely used for probabilistic modeling of text. MCMC sampling from the posterior distribution is
+
+typically performed using a collapsed Gibbs sampler. We propose a parallel sparse partially collapsed
+
+Gibbs sampler and compare its speed and efﬁciency to state-of-the-art samplers for topic models
+
+on ﬁve well-known text corpora of differing sizes and properties.
+
+In particular, we propose and
+
+compare two different strategies for sampling the parameter block with latent topic indicators. The
+
+experiments show that the increase in statistical inefﬁciency from only partial collapsing is smaller
+
+than commonly assumed, and can be more than compensated by the speedup from parallelization
+
+and sparsity on larger corpora. We also prove that the partially collapsed samplers scale well with the
+
+size of the corpus. The proposed algorithm is fast, efﬁcient, exact, and can be used in more modeling
+
+situations than the ordinary collapsed sampler.
+
+1. INTRODUCTION
+
+Latent Dirichlet allocation (LDA) Blei et al. [2003] is an immensely popular1 way to model text
+
+probabilistically. The basic LDA model generates documents as probabilistic mixtures of topics.
+
+The observed data is the set of words, or tokens, w, in a given corpus were wi,d is a token at position
+
+i in document d. Each document d is assigned a vector θd which is a probability distribution over
+
+K topics. Each topic is a probability distribution φk over a vocabulary of word types. Each token
+
+at position i in document d is accompanied by a latent topic indicator zi,d generated from θd, such
+that zi,d = k means that the token in the ith position in document d is generated from φk. Let Θ
+denote the set of all θd, z all zi,d in all documents, and let Φ be a K × V matrix whose kth row holds
+
+φk over a vocabulary of size V of word types v. The generative model for LDA can be found in
+
+Figure 1.1 and a summary of model notation in Table 1.
+
+Key words and phrases. Key words and phrases: Bayesian inference, Gibbs sampling, Latent Dirichlet Allocation, Mas-
+sive Data Sets, Parallel Computing, Computational complexity.
+Magnusson: Linköping University Jonsson: Ericsson AB and Linköping University Villani: Linköping University Broman:
+KTH Royal Institute of Technology.
+1The original paper has so far been cited roughly 1200 times per year, and the citation rate is sharply increasing after
+more than ten years since its publication.
+
+1
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+2
+
+Symbol Description
+
+Symbol Description
+
+V
+
+v
+
+K
+
+D
+
+N
+
+Nd
+
+zi,d
+
+wi,d
+
+The size of the vocabulary
+
+Word type
+
+The number of topics
+
+The number of documents
+
+The total number of tokens
+
+The number of tokens in document d
+
+Topic indicator for token i in document d
+
+Φ
+
+φk
+
+β
+n(w)
+Θ
+
+θd
+
+The matrix with word-topic probabilities : K × V
+
+The word probabilities for topic k: 1 × V
+The hyperparameter for the prior of Φ: 1 × 1
+
+The number topic indicators by topic and word type: K × V
+
+Document-topic proportions: D × K
+
+Topic probability for document d: 1 × K
+The hyperparameter for the prior of Θ: 1 × 1
+
+Token i in document d
+
+The number topic indicators by document and topic: D × K
+
+α
+n(d)
+TABLE 1. LDA model notation.
+
+α
+
+β
+
+D
+
+θ
+
+z
+
+w
+
+N
+
+φ
+
+K
+
+(1) For each topic k = 1, ..., K
+
+(a) Draw a distribution over words φk
+(2) For each observation/document d = 1, ..., D
+iid∼ DirK(α)
+
+(a) Draw topic proportions θd|α
+(b) For i = 1, ..., Nd
+
+iid∼ DirV(β)
+
+iid∼ Categorical(θd)
+(i) Draw topic assignment zi,d|θd
+indep
+(ii) Draw token wi,d|zi,d, φzi,d
+∼ Categorical(φzi,d )
+
+FIGURE 1.1. The generative LDA model.
+
+One of the most popular inferential techniques for topic models is Markov Chain Monte Carlo
+
+(MCMC) and the collapsed Gibbs sampler introduced by Grifﬁths and Steyvers [2004], where
+both Φ and Θ are marginalized out and the elements in z are sampled by Gibbs sampling. It
+
+is a useful building block to use in other more advanced topic models, but it suffers from its
+
+sequential nature, which makes the algorithm practically impossible to parallelize in a way that
+
+still generates samples from the correct invariant distribution. This sequentiality of the algorithm
+
+is a serious problem as textual data are growing at an increasing rate; some recent applications
+
+of topic models are counting the number of documents in the billions [Yuan et al., 2015]. The
+
+computational problem is further aggravated since large corpora typically enable more complex
+
+models and a greater number of topics.
+
+The response to these computational challenges has been to use approximations to parallelize
+
+the collapsed sampler, such as the popular AD-LDA algorithm by Newman et al. [2009]. AD-LDA
+
+samples the latent topic indicators z on different cores in isolation before a synchronization step,
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+3
+
+thereby ignoring that topic indicators in different documents are dependent after marginalizing
+out Θ and Φ. As a result, AD-LDA does not target the true posterior. The total approximation
+
+error for the joint posterior is unknown [Ihler and Newman, 2012], and the only way to check the
+
+accuracy in a given application is to compare the inferences to an exact MCMC sampler that is
+
+guaranteed to converge to the true posterior distribution.
+
+Instead, we propose a sparse partially collapsed approach to sampling in topic models, resulting
+
+in an exact MCMC sampler that will converge to the true posterior. This sampler is achieved by
+
+only collapsing over the topic distributions θ1, ..., θD in each document. The remaining parameters
+can then be sampled by Gibbs sampling by iterating between the two updates z|Φ and Φ|z, where
+
+the topic indicators zi,d are now conditionally independent between documents and the rows of
+the topic-word matrix Φ are independent given z. This independence means that the ﬁrst step can
+
+be parallelized with regard to documents, and the second step can be parallelized with regard to
+topics. Importantly, we also exploit that conditioning on Φ opens up several elegant ways to take
+
+advantage of sparsity and to reduce the time complexity in sampling the z’s within a document,
+
+as detailed below. Following the literature in the LDA community, we refer to our algorithm as
+
+a partially collapsed Gibbs sampler. This should not be confused with the partially collapsed
+
+Gibbs samplers of Van Dyk and Park [2008] where different parameters are marginalized in a
+
+different step of the Gibbs sampler. All partially collapsed samplers proposed here marginalize
+out Θ analytically and sample from the joint posterior of z and Φ using either Gibbs sampling
+
+or Metropolis-Hastings. The hyperparameters in the priors can be sampled in separate updating
+
+steps, but we have for simplicity kept them ﬁxed in the analysis.
+
+Partially collapsed and uncollapsed samplers for LDA are noted in Newman et al. [2009], but
+
+quickly dismissed because of lower MCMC efﬁciency compared to the collapsed sampler. How-
+
+ever, the efﬁciency improvement resulting from collapsing parameters is model speciﬁc and must
+
+here be weighed against the beneﬁts of parallelization. We show empirically that the efﬁciency
+
+loss from using a partially collapsed Gibbs sampler for LDA compared to a fully collapsed Gibbs
+
+sampler is small. This result is consistent across different well-known datasets and for various
+
+model settings, a result similar to that found by Tristan et al. [2014] for LDA models using GPU
+
+parallelization and by Ishwaran and James [2001] in the context of Dirichlet process mixtures.
+
+Furthermore, we show theoretically, under some mild assumptions, that despite the additional
+sampling of the Φ matrix, the complexity of our sampler is still only O(∑N
+
+i Kd(i)), where N is the
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+4
+
+total number of tokens in the corpus and Kd(i) is the number of existing topics in the document of
+token i. Importantly, the alternative partially collapsed sampler where Φ is integrated out instead
+of Θ (or a fully uncollapsed sampler) will not enjoy the same theoretical scalability with respect to
+
+corpus size. We also propose a Metropolis-Hastings based sampler with complexity O(N), similar
+
+in spirit to that of light-LDA Yuan et al. [2015].
+
+Several extensions and reﬁnements of the partially collapsed sampler are developed to reduce
+
+the sampling complexity of the algorithm. For example, we propose a Gibbs sampling version
+
+using the Walker-Alias tables proposed in Li et al. [2014], something that is only possible using
+
+a partially collapsed sampler. We also note that partial collapsing makes it possible to use more
+elaborate models on Φ for which the fully collapsed sampler cannot be applied. As an example,
+we develop a spike-and-slab prior in the Appendix where we set elements of Φ to zero using
+
+ordinary Gibbs sampling, a type of topic model that previously has been shown to improve topic
+
+model performance using variational Bayes inference methods [Chien and Chang, 2014].
+
+2. RELATED WORK
+
+The problems of parallelizing topic models have been studied extensively [Ihler and Newman,
+
+2012, Liu et al., 2011, Newman et al., 2009, Smola and Narayanamurthy, 2010, Yan et al., 2009,
+
+Ahmed et al., 2012, Tristan et al., 2014] together with ways of improving the sampling efﬁciency
+
+of the collapsed sampler [Porteous et al., 2008, Yao et al., 2009, Li et al., 2014, Yuan et al., 2015].
+
+The standard sampling scheme for the topic indicators is the collapsed Gibbs sampler of Grif-
+
+ﬁths and Steyvers [2004] where the topic indicator for word i, zi,d, is sampled from
+
+P(zi,d = j|z−i, w) ∝
+
+n
+
+n
+(cid:124)
+
++ β
+
+(w)
+−i,j,wi,d
+(·)
+−i,j + Vβ
+(cid:123)(cid:122)
+(cid:125)
+topic−word
+
+(cid:17)
+
+,
+
+(cid:16)
+
+n
+
+(d)
+−i,d,j + α
+(cid:125)
+(cid:123)(cid:122)
+(cid:124)
+document−topic
+
+where the scalars α and β are prior hyperparameters for θ and φ: θd
+
+iid∼ Dir(α) and φk
+
+iid∼ Dir(β).
+
+z−i are all other topic indicators in the corpus, n
+
+topic j, excluding topic indicator i. The n
+
+the word type of token wi,d. Similarly, n
+
+document d that contains token i. Both n
+
+(·)
+−i,j is the total number of topic indicators in
+
+is the number of topic indicators for topic j and
+
+(w)
+−i,j,wi,d
+(d)
+−i,d,j is the topic indicator count for topic j within the
+(w)
+(d)
+−i,d,j exclude the current topic indicator zi,d.
+−i,j,wi,d
+
+and n
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+5
+
+This sampler is sequential in nature since each topic indicator is conditionally dependent on all
+
+other topic indicators in the whole corpus.
+
+The Approximate Distributed LDA (AD-LDA) in Newman et al. [2009] is currently the most
+
+common way to parallelize topic models, both between machines (distributed) and using multi-
+
+ple cores with shared memory (multi-core) on one machine. The idea is that each processor or
+
+machine works in parallel with a given set of topic counts in the word-topic count matrix n(w).
+
+The word-topic matrices at the different processors are synced after each complete update cycle.
+
+This approach is an approximation of the collapsed sampler since the word-topic matrix available
+
+on each local processor is sampled in isolation from all other processors. The resulting algorithm
+
+is not guaranteed to converge to the target posterior distribution, and will in general not do so.
+
+However, Newman et al. [2009] ﬁnd that this approximation works rather well in practice. A
+
+bound for the error of the AD-LDA approximation for the sampling of each topic indicators has
+
+been derived by Ihler and Newman [2012]. They ﬁnd that the error of sampling each topic in-
+
+dicator increases with the number of topics and decreases with smaller batch sizes per processor
+
+and the total data size. They also conclude that the approximation error increases initially during
+
+sampling and then levels off to a steady state [Ihler and Newman, 2012].
+
+The fact that this approach to parallelize the collapsed Gibbs sampler will not converge to the
+
+true posterior has motivated our work to develop parallel algorithms for LDA type models that
+
+are both exact and fast. Partially collapsed and uncollapsed samplers for LDA have been studied
+
+by Tristan et al. [2014] as an alternative approach for GPU parallel topic models where uncollapsed
+
+samplers have shown to converge faster than the collapsed sampler.
+
+In addition to parallelizing topic models, there have been a couple of suggestions on how to
+
+improve the speed of sampling in topic models. Yao et al. [2009] reduce the iteration steps needed
+
+in sampling each token by using that n(w) and n(d) are sparse matrices. They also use the fact that
+
+the hyperparameters α and β are constant during sampling and that some calculations need to be
+
+performed only once per iteration. The idea are developed further by Li et al. [2014] who reduce
+
+the sampling complexity by combining Walker-Alias sampling (that can be done, amortized, in
+
+constant time) together with the sparsity of n(d). This algorithm reduces the complexity of the
+
+algorithm to O(∑N
+
+i Kd(i)), limiting the iterations to the number of topics in each document. But this
+
+approach requires Metropolis-Hastings sampling instead of sampling from the full conditional
+
+of each topic indicator. Yuan et al. [2015] reduce the complexity further to O(N) per sampling
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+6
+
+iteration by using a Metropolis-Hastings approach with clever cyclical proposal distributions. All
+
+these improvements are for the serial collapsed sampler with AD-LDA needed for parallelization;
+
+the resulting algorithms, therefore, all target an approximation to the true posterior distribution,
+
+and the total approximation error is unknown.
+
+Although the examples in this article are focused on the basic LDA model and multi-core par-
+
+allel inference for larger datasets, our ideas are easily extended to a broader class of models. First
+
+of all, these ideas can easily be used in other more elaborate topic models such as Rosen-Zvi et al.
+
+[2010]. Second, it can be used in predicting topic distributions in out-of-corpus documents for pre-
+
+dictions in supervised topic models (see Zhu et al. [2013] for an example). Third, it can be used to
+
+evaluate topic models [Wallach et al., 2009]. The same ideas can also be exploited in other models
+
+based on the multinomial-Dirichlet conjugacy properties outside the class of topic models such as
+
+Gibbs samplers for part-of-speech tagging [Gao and Johnson, 2008].
+
+3. PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+3.1. The basic partially collapsed Gibbs sampler. The basic partially collapsed sampler simu-
+lates from the joint posterior of z and Φ by iteratively sampling from the conditional posterior
+p(z|Φ) followed by sampling from p(Φ|z). Note that the topic proportions θ1, ..., θD have been
+
+integrated out in both updating steps and that both conditional posteriors can be obtained in an-
+
+alytical form due to conjugacy. Theadvantage of only collapsing over the θ’s is that the update
+from p(z|Φ) can be parallelized over documents (since they are conditionally independent under
+this model). In a similar way, the update from p(Φ|z) can be parallelized over topics (the rows of
+Φ are conditionally independent). These properties gives the following basic sampler where we
+
+ﬁrst sample the topic indicators for each document in parallel as
+
+p(zi,d = j|z−i,d, Φ, wi,d) ∝ φj,wi,d ·
+
+(cid:16)
+
+n
+
+(d)
+−i,d,j + α
+
+(cid:17)
+
+(3.1)
+
+(3.2)
+
+where z−i,d are all topic indicators in document d excluding topic indicator i, and then sample the
+rows of Φ in parallel as
+
+p(φk|z) ∼ Dir(n
+
+(w)
+k + β) .
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+7
+
+In the following subsections, we propose a number of improvements of the basic partially col-
+
+lapsed Gibbs sampler to reduce the complexity of the algorithm and to speed up computations.
+
+We will present the samplers for a symmetric hyperparameter α; extending it to an asymmetric
+
+prior with different α:s for different topics is straight forward.
+
+3.2. The sparse partially collapsed Gibbs sampler. The sampling of p(z|Φ) in the basic partially
+
+collapsed Gibbs sampler is of complexity O(K) per topic indicator, making the sampling time
+
+linear in the number of topics. We propose a sparse partially collapsed Gibbs sampler (PC-LDA)
+
+with several improvements of the sampling algorithm.
+
+The Alias-LDA method in Li et al. [2014] exploits the sparsity that is created by the topic model
+
+when each document only contains a small subset of different topics. This usage of topic sparsity
+
+in documents can be extended to the partially collapsed sampler by decomposing
+
+p(zi,d = j|z−i,d, Φ, wi,d) ∝ φj,wi,d ·
+
+(cid:16)
+
+α + n
+
+(d)
+−i,d,j
+
+(cid:17)
+
+= φj,wi,d · α + φj,wi,d · n
+
+(di)
+−i,d,j .
+
+To sample a topic indicator for a given token we ﬁrst need to calculate the normalizing constant
+
+qwi,d (z) =
+
+φk,wi,d
+
+·
+
+(cid:16)
+
+α + n
+
+(d)
+−i,d,k
+
+(cid:17)
+
+= σa,wi,d + σb,wi,d ,
+
+K
+∑
+k=1
+
+where σa,wi,d = ∑K
+
+k=1 φk,wi,d α and σb,wi,d
+
+= ∑K
+
+k=1 φk,wi,d n
+
+(d)
+−i,d,k.
+
+The importance of this decomposition is two-fold. First, following sparse-LDA [Yao et al., 2009],
+we can use the sparsity of the topic counts n(d) within a document to calculate σb,wi,d by only iter-
+ating over the non-zero topic counts. This iteration reduces the complexity of sampling one topic
+
+indicator from O(K) to O(Kd), where Kd is the number of non-zero topics in a given document.
+
+Second, following Alias-LDA by Li et al. [2014], we can exploit that σa,wi,d is constant over the
+
+sampling of topic indicators. Therefore we only need to compute σa,wi,d once for each sampling it-
+
+eration and once for each word type v resulting in an amortized O(1) algorithm (i.e., an algorithm
+
+which is O(1) for each zi,d after an initial cost common to all zi,d in a corpus). More speciﬁcally,
+
+drawing a single zi,d is performed as follows.
+
+First calculate σb,wi,d and the cumulative sum, sb = ∑
+
+in the document. Draw a U ∼ U (0, σa,wi,d + σb,wi,d
+
+(d)
+−i,d,k over non-zero topics
+). If U ≤ σa,wi,d, we use the Walker-Alias method
+
+φk,wi,d n
+
+(di )
+−i,k>0
+
+k∈n
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+8
+
+presented in Li et al. [2014] to sample a topic indicator with O(1) amortized. The Walker-Alias
+
+table method is a method to generate samples from an arbitrary categorical distribution efﬁciently.
+
+The method ﬁrst constructs an Alias table in O(K) time that it is used to draw a sample in O(1)
+
+time Walker [1977]. Algorithmic details on how to construct an Alias table and draw a sample
+
+from it can be found in Algorithm 5 and 6 in the Appendix. If U > σa,wi,d, we choose a topic
+indicator using binary search over sb with complexity O(log(Kd)) Xiao and Stibor [2010]. Overall,
+
+sampling a topic indicator with PC-LDA, therefore, has complexity O(Kd) amortized. The full
+
+algorithm is described in Algorithm 1 and 2 in the Appendix.
+
+Conditioning on Φ gives us a couple of advantages compared to the original Walker-Alias
+
+method for the collapsed sampler. First, the Walker-Alias method can be used in a Gibbs sam-
+
+pler for each topic indicator, unlike the approach of Yuan et al. [2015] that uses a proposal in a
+
+Metropolis-Hasting within Gibbs algorithm. Direct simulation from a full conditional is generally
+
+more efﬁcient than sampling from the full conditional posterior using a Metropolis-Hastings up-
+
+date (except in the very rare case where the proposal is explicitly set up to generate negatively
+
+autocorrelated draws, which is not the case here). Second, as a by-product of calculating the
+
+Walker-Alias tables, we also calculate the normalizing constants σa,wi,d for all word types that can
+
+be stored and reused in sampling z. Note that building the Alias table can also easily be paral-
+
+lelized by word type.
+
+To sample the Dirichlet distribution (as a normalized sum of gamma distributed variables), we
+
+use the method of Marsaglia and Tsang [2000] to generate gamma variables efﬁciently. With this
+
+sampler we can take advantage of the sparsity in the n(w) count matrix and increase the speed
+
+further by storing previous calculations when sampling φ for n(w) = 0.
+
+Another advantage of the PC-LDA approach in a multi-core setting is that since the topic indi-
+cators of different documents, zd, are conditionally independent given Φ it allows us to rearrange
+document sampling between cores freely during the sampling of p(z|Φ). By using a job steal-
+
+ing approach where workers that have ﬁnished sampling "their" documents can "steal" jobs from
+
+other cores we can balance the workload between workers during sampling [Lea, 2000]. This
+
+approach can probably be improved further, but it shows another straight-forward beneﬁt from
+conditioning on Φ.
+
+3.3. The light partially collapsed conditional Metropolis-Hastings sampler. Yuan et al. [2015]
+
+propose an alternative approach to sample topic models with larger K using Metropolis-Hastings
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+9
+
+(MH) sampling. They use a cyclical proposal distribution, alternating between a word proposal
+
+and document proposal to reduce sampling complexity. This approach showed great improve-
+
+ments in the distributed situation and can be straightforwardly extended to a partially collapsed
+
+sampler as follows.
+
+The word-proposal distribution of the proposed topic indicator z∗
+
+i,d is
+
+pw(z∗
+
+i,d = j|Φ, wi,d) ∝ φj,wi,d .
+
+This proposal can be sampled using the Walker-Alias method with complexity O(1) given a
+constructed Alias-table based on the word types in Φ in a similar fashion as the sparse sampler in
+
+the previous subsection. The acceptance probability of the proposed topic indicator z∗
+
+i,d is given
+
+by
+
+πw,i = min
+
+1,
+
+(cid:40)
+
+p(z∗
+p(zi,d|Φ, z−i,d, wi,d)pw(z∗
+
+i,d|Φ, z−i,d, wi,d)pw(zi,d|Φ, wi,d)
+i,d|Φ, wi,d)
+
+(cid:41)
+
+= min
+
+1,
+
+
+
+
+
+
+α + n
+
+α + n
+
+(d)
+−i,d,z∗
+i,d
+(d)
+−i,d,zi,d
+
+
+
+
+
+
+,
+
+where zi,d is the current draw, p(·) is the full conditional posterior, pw(·) is the word-proposal
+
+distribution and n
+
+is the number of topic indicators in document d and for topic z∗
+
+i,d but
+
+(di)
+−i,d,z∗
+i,d
+
+with the ith topic indicator excluded. If the proposed topic is more common in the document
+
+than the current topic indicator it will be accepted with probability 1. Otherwise, the acceptance
+
+probability will be roughly proportional to the ratio nd,z∗
+
+/nd,zi .
+
+i
+
+The second proposal in the sampler is the doc-proposal distribution. This is exactly the same
+
+proposal distribution as in Yuan et al. [2015] and is given by
+
+pd(z∗
+
+i,d = j|zd, wi,d) ∝ n
+
+(d)
+d,j + α .
+
+U ≤ αK we sample a topic indicator with O(1) from p(z∗
+
+This proposal is sampled using a two-phase approach. First draw U ∼ U (0, ∑K
+
+k α + nd,k). If
+i,d) ∝ α. If U > αK we propose z∗
+proportional to the distribution of topic indicators within the document by simply sample an
+
+i,d
+
+existing topic indicator as U(1, Nd) where Nd is the number of tokens in document d. In this way,
+we will draw with complexity O(1) from the proposal distribution p(z∗
+
+without any
+
+i,d) ∝ nd,z∗
+
+i,d
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+10
+
+need to create an Alias table. The acceptance probability is given by
+
+πd,i = min
+
+1,
+
+
+
+
+
+
+φz∗
+
+i,d,wi,d (α + n
+φzi,d,wi,d (α + n
+
+(d)
+−i,d,z∗
+i,d
+(d)
+−i,d,zi,d
+
+)(α + n
+
+)(α + n
+
+
+
+
+)
+
+)
+
+
+
+.
+
+(d)
+d,zi,d
+(d)
+d,z∗
+i,d
+
+To simplify further we can do a slight change in the document proposal and instead propose
+
+with
+
+sampler.
+
+Using this proposal distribution we will end up with the simpliﬁed acceptance probability
+
+˜pd(z∗
+
+i,d|z−i,d, wi,d) ∝ n
+
+(d)
+−i,d,z∗
+i,d
+
++ αz∗
+
+i,d
+
+.
+
+˜πd,i = min
+
+1,
+
+(cid:26)
+
+(cid:27)
+
+.
+
+φz∗
+i,d,wi,d
+φzi,d,wi,d
+
+This simpliﬁcation can also be done in the original light-LDA document proposal acceptance
+
+step. In our experiments, we use πd,i to enable a fair comparison with the original light-LDA
+
+These two proposals are then combined to a cyclical Metropolis-Hastings proposal where the
+
+two proposals are used for each topic indicator zi,d in each Gibbs iteration. The beneﬁt of this
+
+sampler is that the sampling complexity is reduced compared to the sparse approaches. But the
+
+downside is the inefﬁciency of the sampling and the fact that for each token it can be necessary to
+
+draw as many as four uniform variables, a relatively costly (but constant) operation. A complete
+
+description of the algorithm can be found in Algorithm 3 and 4 in Appendix C.
+
+3.4. Time complexity of the sampler. The original collapsed sampler of Grifﬁths and Steyvers
+
+[2004] has sampling complexity O(N · K) per iteration. By taking advantage of sparsity, the com-
+
+plexity of sparse-LDA in Yao et al. [2009] is reduced to O(∑N
+
+i maxi(Kd(i), Kw(i))) where Kd(i) is the
+
+number of existing topics in the document of token i and Kw(i) is the number of existing topics in
+the word type w. This complexity will reduce to O(N · K) and as N → ∞ [Li et al., 2014]. The light
+
+sampler proposed by Yuan et al. [2015] has the good property of being of complexity O(N) since
+
+sampling each topic indicator can be done in constant time.
+
+Sampling the topic indicators for the sparse PC-LDA sampler has complexity O(∑N
+
+i Kd(i)) and
+the light-PC-LDA sampler O(N), but unlike the fully collapsed sampler, we also need to sample
+Φ. It is therefore of interest to study how the Φ matrix (of size K × V) grows with the number
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+11
+
+of tokens (N), to determine the overall complexity of PC-LDA. In most languages, the number
+
+of word types follows quite closely to Heaps’ law Heaps [1978], which models the relationship
+
+between word types and tokens as V(N) = ξ N ϕ where 0 < ϕ < 1. Typical values of ϕ lies in the
+
+range of 0.4 to 0.6 and ξ varies between 5 and 50 depending on the corpus [Araujo et al., 1997].
+
+The number of topics, K, in large corpora is often modeled by a Dirichlet process mixture where
+
+the expected number of topics are E(K(N)) = γ log
+
+, where γ is the prior precision of the
+
+(cid:16)
+
+1 + N
+γ
+
+(cid:17)
+
+Dirichlet process [Teh, 2010].
+
+Proposition 1. Complexity of the sparse partially collapsed Gibbs sampler. Assuming a vocabulary
+
+size following Heaps’ law V = ξ N ϕ with ξ > 0, 0 < ϕ < 1 and the number of topics following the mean
+
+of a Dirichlet process mixture K = γ log
+
+with γ > 0, the complexity of the PC-LDA sampler is
+
+(cid:16)
+
+1 + N
+γ
+
+(cid:17)
+
+(cid:32) N
+∑
+i=1
+
+O
+
+(cid:33)
+
+Kd(i)
+
+.
+
+Proof. See Appendix A.
+
+Proposition 2. Complexity of the light partially collapsed conditional Metropolis-Hastings sam-
+
+pler. Assuming a vocabulary size following Heaps’ law V = ξ N ϕ with ξ > 0, 0 < ϕ < 1 and the number
+
+of topics following the mean of a Dirichlet process mixture K = γ log
+
+with γ > 0, the complexity
+
+(cid:16)
+
+1 + N
+γ
+
+(cid:17)
+
+for the light-PC-LDA sampler is
+
+O (N) .
+
+Proof. See Appendix A.
+
+Propositions 3.4 and 3.4 show that the proposed partially collapsed samplers have an equivalent
+computational complexity as the state-of-the-art fully collapsed samplers. The sampling of Φ is
+dominated by the sampling of z when N → ∞.
+
+These result also shed light on the importance of integrating out Θ. The Θ parameters will grow
+much faster than Φ as N → ∞. This property of Θ makes the partially collapsed sampler, where
+we integrate out Θ, the only viable option for larger corpora if we want a sampler with minimal
+
+computational complexity.
+
+(cid:3)
+
+(cid:3)
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+12
+
+TABLE 2. Summary statistics of training corpora.
+
+DATASET
+
+N
+
+D
+
+V
+
+NIPSa
+1 499 11 547
+~ 1.9 m
+Enrona
+~ 6.4 m
+39 860 27 791
+Wikipedia b
+~ 157 m ~ 1.36 m 7 700
+New York Times c ~ 400 m ~ 1.83 m 8 000
+PubMeda
+~ 761 m ~ 8.2 m 50 000
+
+ahttp://archive.ics.uci.edu/ml/datasets/Bag+of+Words
+bThe tokenized version has been used. Reese et al. [2010]
+http://www.cs.upc.edu/~nlp/wikicorpus/tagged.en.tgz
+cSandhaus [2008] https://catalog.ldc.upenn.edu/LDC2008T19
+
+4. EXPERIMENTS
+
+In the following sections, we study the characteristics of the PC-LDA samplers. We compare
+
+our algorithm with the sparse-LDA from Yao et al. [2009] parallelized using AD-LDA in Mallet
+
+2.0.7 (called AD-LDA in the experiments below) [McCallum, 2002]. Note that AD-LDA reduces to
+
+an exact sparse-LDA collapsed sampler when we are only using one core. The code for PC-LDA
+
+has been released as open source as a plug-in to the Mallet framework.2
+
+We use the same corpora as is used by Newman et al. [2009] to evaluate our PC-LDA sampler.
+
+We also use the New York Times corpus and a Wikipedia corpus to be able to compare with the
+
+results in Hoffman et al. [2013]. Following common practice, we remove the rarest word types in
+
+the corpus. We choose a rare word limit of 10 for the smaller corpora. For the larger corpora, we
+
+instead follow Hoffman et al. [2013] and use TF-IDF to choose the most relevant vocabulary, using
+
+50 000 terms for the PubMed corpus, 7 700 for the Wikipedia corpus, and 8 000 for the New York
+
+Times corpus.
+
+The choice of hyperparameters inﬂuences the sparsity of n(w) and n(d), and hence also the rela-
+
+tive speed of the studied samplers: sparse AD-LDA is mainly fast for sparse n(w) while PC-LDA
+
+beneﬁts from the sparsity of n(d). Since α inﬂuences the sparsity of n(d) while β inﬂuences the
+
+sparsity of n(w) we, therefore, ran experiments comparing the computing time per iteration. We
+
+ran the samplers for different combinations of α (0.1 and 0.01) and β (0.1 and 0.01) for the Enron
+
+corpus with K = 100 topics. These experiments were performed with six different initializations
+
+and the sampling time at the 1000th iteration for all six seeds. Figure 4.1 shows that the PC-LDA
+
+2https://github.com/lejon/PartiallyCollapsedLDA.
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+13
+
+sampler is only slower than Sparse AD-LDA when α = 0.1 and β = 0.01. To ensure that our
+
+results are conservative, we set α = 0.1 and β = 0.01 in all experiments to put PC-LDA in the least
+
+favorable situation.
+
+FIGURE 4.1. Average time per iteration (incl. standard errors) for Sparse AD-LDA
+and for PC-LDA using the Enron corpus and 100 topics.
+
+Finding suitable metrics for comparing sampler for topics models is a challenge for a number
+
+of reasons. First, our samplers (sparse PC-LDA and light PC-LDA) are proper MCMC methods
+
+known to converge to the target posterior. This is not true for the samplers that we compare to
+
+(AD-LDA and Light LDA using AD-LDA for parallelization) that at best converge to a reasonable
+
+approximation of the posterior. However, there is currently no theory to back up this claim. It
+
+is therefore not possible to compare samplers using the usual metrics from the MCMC literature
+
+(e.g., integrated autocorrelation time), except when using a single processor (in which case AD-
+
+LDA and Light-LDA are proper MCMC methods converging to the target posterior). Second,
+
+topic models are highly complex models with millions or even billions of latent discrete variables
+
+learned jointly with other high-dimensional continuous parameters. Like in any mixture model,
+
+the posterior is expected to have many local minor modes (even without considering the so-called
+
+label switching problem), and it is practically impossible to explore the full parameter space in
+
+any reasonable amount of time. The goal for any posterior sampling method in such models is
+
+therefore
+
+(1) to quickly locate the regions of dominant posterior mass and
+
+(2) to efﬁciently explore those major modes in proportions to their posterior density.
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+14
+
+The ﬁrst aim has not been studied much in the theoretical MCMC literature, except in explicit
+
+MCMC-based optimization algorithms such as simulated annealing where the second goal is not
+
+reached. One exception is Maciuca and Zhu [2006] who study the mean ﬁrst hitting time of the
+
+independence Metropolis-Hastings algorithm (i.e., the expected time to reach a given point in the
+
+parameter space). Only studying the ﬁrst aim of the posterior sampling method is though limited
+
+in evaluating Markov Chains. Hence, we will, therefore, analyze both the algorithm’s ability to
+
+ﬁnd the dominant modes quickly and its mixing properties via the integrated autocorrelation time.
+
+The integrated autocorrelation time does not depend on the number of parallel processors, and it
+
+is, therefore, sufﬁcient to compute it for the single processor case. As noted above, it also does not
+
+make sense to calculate it for methods using AD-LDA in the multi-processor setting.
+
+Following the evaluation of topic models in the machine learning literature (see also Villani
+
+et al. [2009] for similar evaluations for mixture-of-experts models), we evaluate the samplers and
+
+how well they reach the regions of high posterior density as well as the mixing properties using the
+
+integrated autocorrelation time. We are using the log joint posterior of the topic indicators (z) with
+Φ and Θ marginalized out; we refer to this quantity as the log marginalized posterior. Focusing
+
+only on the topic indicators makes the evaluation comparable across all algorithms. Since the
+
+behavior of the chain depends on the initialization state, we have used the same seed to initialize
+
+the different samplers to the exact same starting state (concerning z).
+
+The experiments are conducted using an HP Cluster Platform with DL170h G6 compute nodes
+
+with 4-core Intel Xeon E5520 processors at 2.2GHz (for the 8-core experiments) or 8-core Intel
+
+Xeon E5-2660 "Sandy Bridge" processors at 2.2GHz (speed experiments). All experiments use two
+
+sockets with 24 or 32 GB memory nodes, except for the parallelism experiment where we use an
+
+8-socket 64-core machine with 1024 GB memory.
+
+4.1. Efﬁciency loss from only partially collapsing. Liu [1994] proves that collapsing out param-
+
+eters improves the mixing rate of the MCMC chain for the remaining parameters. Contrary to
+
+often held beliefs (see, e.g., Newman et al. [2009]) Theorem 1 in Liu [1994] is not applicable to
+LDA when Φ (or Θ) is integrated out. This fact has recently been pointed out by Terenin et al.
+
+[2017] who give a simple counterexample to demonstrate this point. It is, therefore, an open ques-
+
+tion whether the mixing rate of a partially collapsed Gibbs sampler is worse than a fully collapsed
+
+sampler in the LDA context, and if so, by how much. We will here investigate this empirically
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+15
+
+on two well-known corpora where we compare the inefﬁciency factor (integrated autocorrelation
+
+time) of the fully collapsed and the PC-LDA sampler in a single core setting.
+
+Each experiment starts with a given random seed and runs for 10 000 iterations using the col-
+
+lapsed Gibbs sampler (the gold standard) to justify that we have reached the posterior region of
+
+interest to explore using a visual inspection of the traceplot for the log marginalized posterior.
+
+The topic indicators z in the last iteration is then used as initialization point for both a collapsed
+
+sampler and the PC-LDA sampler. We subsequently perform two sub-runs with the collapsed
+
+sampler and two with the PC-LDA sampler per experimental setup.
+
+The parameters Θ and Φ are subsequently sampled for each of the 2 000 z-draws. For the
+collapsed sampler p(Θ, Φ|z) are sampled while we sample p(Θ|z) for the PC-LDA sampler (we
+already have samples of Φ). We calculate the inefﬁciency for the 1 000 largest mean values of φk for
+
+each topic (the so-called top words) and all elements in θd for 1000 randomly chosen documents.
+This means that the inefﬁciency estimates are based on 1000 · K parameters for Θ (Table 3) and
+1000 · K for Φ (Table 4). To estimate the inefﬁciency factor (IF) for each parameter, we compute
+
+IF = L/ESS where L is the length of the Markov Chain and ESS is effective sample size computed
+
+with the coda package [Plummer et al., 2006] in R. Up to a certain lag, we ﬁnd this package to be
+
+much more precise than the estimator based on sample autocorrelations.
+
+TABLE 3. Mean inefﬁciency factors, IF, (standard deviation in parentheses) of Θ.
+
+TABLE 4. Mean inefﬁciency factors, IF, (standard deviation in parentheses) of Φ.
+
+DATA
+
+K Collapsed
+
+PC-LDA IF ratio
+
+Enron
+20
+Enron 100
+NIPS
+NIPS
+
+3.31 (4.8)
+2.21 (5.0)
+
+3.54 (6.1)
+2.29 (5.3)
+20 10.82 (32.0) 12.54 (47.2)
+7.45 (16.0)
+
+6.64 (14.1)
+
+100
+
+1.07
+1.04
+1.16
+1.12
+
+DATA
+
+K Collapsed
+
+PC-LDA IF ratio
+
+20
+
+Enron
+5.03 (14.7)
+5.00 (19.9)
+Enron 100 17.90 (49.2) 22.46 (58.0)
+20 28.20 (73.5) 31.47 (81.1)
+NIPS
+100 16.20 (43.1) 23.85 (55.6)
+NIPS
+
+1.01
+1.26
+1.12
+1.48
+
+The results of the ﬁrst experiment can be seen in Table 3 and 4; the other experiments gave
+
+very similar inefﬁciencies and are not reported. We conclude that the increase in inefﬁciency of
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+16
+
+the chains from not collapsing out Φ is small. The largest value, 1.48, can be found in the NIPS
+
+dataset. In Figure 4.2, we can see the effect this has on the speed of the chain to reach the region of
+
+high posterior density. Note that while a partially collapsed sampler has nearly the same mixing
+
+properties as the collapsed sampler, it can be parallelized to run substantially faster in a multi-core
+
+setting; this is demonstrated in Section 4.3.
+
+4.2. Posterior error using the AD-LDA approximation. AD-LDA is the most popular way of
+
+parallelizing LDA. It is known that the approximation will inﬂuence the sampling of each topic
+
+indicator [Ihler and Newman, 2012], but we have not found any studies of the effect on the joint
+
+posterior distribution. To explore this, we start the sampler with the same initial state with respect
+
+to the topic indicators z and then run the sampler with different numbers of cores/partitions to
+
+see the effect on the joint posterior distribution of the topic indicators p(z|w).
+
+FIGURE 4.2. Log marginalized posterior for the NIPS dataset with K = 20 (upper)
+and K = 100 (lower) for AD-LDA (left) and PC-LDA (right).
+
+As shown in Figure 4.2, there is a clear tendency for AD-LDA to converge to a lower poste-
+
+rior mode as more cores are used to parallelize the sampler. To get some more insights into this
+
+behavior of AD-LDA, Figure 4.3 displays the sparsity of the n(w) and n(d) matrices (the fraction
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+17
+
+FIGURE 4.3. The sparsity of n(w) (left) and n(d) (right) as a function of cores for the
+NIPS dataset with K = 20 (upper) and K = 100 (lower).
+
+of elements larger than zero) as a function of the number of cores. This effect is of interest for
+
+two reasons. First, this means that AD-LDA does not approximate the posterior with a worse
+
+log marginalized posterior, but it approximates the posterior with different properties, and how
+
+much the AD-LDA approximation differs with a MCMC approximation depends on the number
+
+of cores. Second, we can interpret these results as that using the AD-LDA approximation of the
+
+posterior will make the approximate posterior drift towards ﬁnding a better local approximation
+
+on each core (a more sparse n(d) matrix) and a less good global approximation (a less sparse n(w)
+
+matrix). Similar results are found for the Enron corpus (not shown).
+
+The second aspect of the partially collapsed sampler compared with the fully collapsed sampler
+
+is that the fully collapsed sampler seems to have a larger problem with getting stuck in local modes
+
+when it comes to n(w). As can be seen in Figure 4.3, the sparsity of n(w) for different initial states
+
+get stuck at various sparsity levels. In the case of Enron, this happened for one initial seed while in
+
+the NIPS 100 situation we can see that the sampler gets stuck at four different sparsity levels. The
+
+partially collapsed sampler on the other hand always ends up at the most sparse global solution.
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+18
+
+This result seems to indicate that the partially collapsed sampler is more robust to initial states
+
+and the number of cores used. It would be interesting to follow up these empirical observations
+
+by a careful theoretical analysis, but that is beyond the scope of this paper.
+
+4.3. Parallelism and execution time comparison. We compare our proposed samplers with two
+
+state-of-the-art samplers: sparse LDA (parallelized using AD-LDA) by Yao et al. [2009] using the
+
+original implementation in Mallet and light-LDA by Yuan et al. [2015], which we implemented in
+
+Mallet. Having implemented all samplers in the same Mallet framework makes for a fair com-
+
+parison between the samplers. There are still differences in that the work of Yuan et al. [2015]
+
+has focused on the distributed setting rather than a multicore shared-memory setting. We have
+
+chosen to not compare with Alias-LDA since it is similar to light-LDA in that it uses a conditional
+
+Metropolis-Hastings approach, but light-LDA has been shown to be faster [Yuan et al., 2015]. The
+
+samplers are compared using 10, 100, and 1000 topics for the full (100%) PubMed corpus and a
+
+subset (10%) of the corpus. As explained at the beginning of Section 4, we compare the samplers
+
+in how quickly they reach a region of high posterior density. We refer to this as the speed to reach
+
+a mode region.
+
+Figure 4.4 shows that PC-LDA is in general faster to reach the mode region than most other
+
+approaches, especially when the number of topics is large. The pattern is very similar for all cor-
+
+pora sizes. The different light-LDA approaches are increasing fast in log marginal posterior in the
+
+initial iterations when sparse-LDA still is working with a more dense matrix, making light-LDA
+
+quicker in the beginning. Yuan et al. [2015] show that light-LDA outperforms both sparse LDA
+
+and Alias-LDA, a result that differs from our results. We believe that this may be due to imple-
+
+mentation details (after personal correspondence with Jinhui Yuan). Yuan et al. [2015] work with a
+
+distributed, multi-machine approach while we have done the implementations in a shared mem-
+
+ory, multi-core setting. The shared-memory situation is relevant for many practitioners working
+
+with larger corpora.
+
+Light-LDA and similar approaches have been shown to work very well for a large number of
+
+topics. A very large number of topics may be needed for web-size applications like the proprietary
+
+Bing corpus, whereas a much more moderate number of topics is likely to be more useful in less
+
+extreme situations. For example, Hoffman et al. [2013] ﬁnd that a surprisingly small number of
+
+topics are optimal in several relatively large corpora of interest for practitioners. As a comparison,
+
+we evaluate the speed to the mode region of our samplers using the same settings as in Hoffman
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+19
+
+FIGURE 4.4. Log marginal posterior by runtime for PubMed 10% (left) and
+PubMed 100% (right) for 10, 100, and 1000 topics using 16 cores and 5 different
+random seeds.
+
+et al. [2013] on their Wikipedia corpus 3 (using 7,700 word types) and New York Times corpus
+
+(using 8,000 word types). Hoffman et al. [2013] conclude that 100 topics are the optimal number
+
+of topics for both corpora.
+
+As can be seen in Figure 4.5, most algorithms work well and can ﬁt these models with speeds
+
+comparable to that of Hoffman et al. [2013], using a 16 core machine. Since Hoffman et al. [2013]
+
+uses stochastic Variational Bayes to approximate the posterior, the speed of our provably correct
+
+MCMC samplers is quite impressive. We can also conclude that although the algorithms are quite
+
+similar in speed, the PC-LDA sampler is the winner when it comes to quickly ﬁnding the high-
+
+density region of the posterior distribution.
+
+3We could not ﬁnd the exact same Wikipedia corpus and used a smaller Wikipedia corpus. We still used 100 topics.
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+20
+
+FIGURE 4.5. Log marginal posterior by runtime for Wikipedia corpus (left) and the
+New York Times corpus (right) for 100 topics using 16 cores.
+
+To study how the samplers scale as we increase the number of topics, we run PC-LDA for 1000
+
+iterations on the larger PubMed corpus using 100 and 1000 topics and compare the speed until
+
+reaching the mode region on 16, 32, and, 64 cores.
+
+FIGURE 4.6. Log marginal posterior by runtime for the PubMed corpus for 100
+topics (left) and 1000 topics (right) using PC-LDA.
+
+From the data in Figure 4.6, we calculate the time it takes for the PC-LDA sampler to reach the
+
+mode region (where this region is deﬁned as 1 % of the top log marginalized posterior for the
+
+sampler for the respective number of topics). The results are presented in Table 5. By increasing
+
+the number of cores from 16 to 64, we can reduce the sampling time to reach the high-density
+
+Table 5 also shows that PC-LDA makes it possible to reach the interesting part of the posterior
+
+in an LDA model with 1000 topics for the large PubMed corpus in a little more than 2 hours on a
+
+region by 50%.
+
+64 core machine.
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+21
+
+TABLE 5. Runtime to reach the high density region for 100 and 1000 topics on 16,
+32, and 64 cores.
+
+No. Cores K
+
+Runtime (min)
+
+16
+32
+64
+16
+32
+64
+
+100
+100
+100
+1000
+1000
+1000
+
+49.2
+35.5
+27.5
+290
+201
+141
+
+5. DISCUSSION AND CONCLUSIONS
+
+We propose PC-LDA, a sparse partially collapsed Gibbs sampler for LDA. Contrary to state-
+
+of-the-art parallel samplers, such as AD-LDA, our sampler is guaranteed to converge to the true
+
+posterior. This guarantee is an important property as our experiments indicate that AD-LDA does
+
+not converge to the true posterior. This error seems to increase with the number of cores. Although
+
+the differences may be small in practice for the basic LDA model, they may very well be ampliﬁed
+
+in more complicated models or online approaches.
+
+O
+
+Our PC-LDA sampler is shown under reasonable assumptions to have the same complexity,
+(cid:16)
+
+, per iteration as other efﬁcient collapsed sparse samplers such as Alias-LDA, de-
+spite the additional sampling of Φ. The light-PC-LDA sampler is proved to have the same com-
+
+i=1 Kd(i)
+
+∑N
+
+(cid:17)
+
+plexity as light-LDA, O (N) per iteration. The reduced computational complexities of light-PC-
+
+LDA and light-LDA do not compensate for the decrease in sampling efﬁciency and the PC-LDA
+sampler with direct sampling from p(z|Φ) is, in general, the sampler which most quickly reaches
+
+the region around the dominant mode in our experiments.
+
+An effective sampler for topic models needs to balance three entities in an optimal way: sam-
+
+pling complexity, sampling efﬁciency, and constant factors; the time complexity of the sampler
+
+is important but is not the whole story. All Metropolis-Hastings samplers presented here are of
+
+complexity O(N), but this reduction in sampling complexity comes at the cost of reduced sam-
+
+pling efﬁciency. Light-LDA trades off the mixing efﬁciency of the chain to reduce the sampling
+
+complexity and PC-LDA trades off efﬁciency to enable a parallel sampler that converges to the
+
+true posterior. Lastly, even for large corpora, the constant factors are important. PC-LDA needs to
+sample Φ, and Light-LDA needs to draw multiple random variates per sampled topic indicator.
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+22
+
+We have for example seen that sparse samplers are having more difﬁculties in distributing the
+
+sampling workload between cores than the light samplers.
+
+Yuan et al. [2015] show that light-LDA outperforms both sparse LDA and Alias-LDA, a result
+
+that differs from our results. We believe that this may be due to implementation details (after
+
+personal correspondence). Yuan et al. [2015] work with a distributed, multi-machine approach
+
+while we have done the implementations in a shared memory, multi-core setting. The shared-
+
+memory situation is relevant for many practitioners working with larger corpora.
+
+We believe that the reason for the success of PC-LDA is three-fold: First, PC-LDA (like Alias-
+
+LDA) limits the sampling complexity to the number of topics in each document, which tends to
+
+be small in practice. Assuming that the number of tokens in the documents is ﬁnite, this complex-
+
+ity can be regarded as constant since the complexity is limited by the document size even when
+K → ∞. Second, PC-LDA (unlike light-PC-LDA, light-LDA, and Alias-LDA) is a Gibbs sampler
+
+that only needs to draw one random variable per token and iteration. Drawing random variates
+
+are relatively costly, so even if the computational complexity is reduced using light-PC-LDA or
+
+light-LDA, the constant cost of sampling a single token is larger. Third, contrary to common be-
+
+lief, we demonstrate on several commonly used corpora that a partially collapsed sampler has
+
+nearly the same MCMC efﬁciency as the gold standard sequential collapsed sampler, but enjoys
+
+the advantage of straightforward parallelization. Our results show speedups per iteration to at
+
+least 64 cores on the larger PubMed corpus, making it a good option for MCMC sampling in
+
+larger corpora.
+
+An important advantage of PC-LDA is that it also allows for more interesting non-conjugate
+models for Φ, such as regularized topic models [Newman et al., 2011] or using a distributed sto-
+
+chastic gradient MCMC approach as has been proposed in Ahn et al. [2014]. As an example of
+
+such an extension, Appendix B gives the details for a PC-LDA algorithm that allows for variable
+selection in the topics, where elements in Φ may be set to zero.
+
+In summary, we propose and evaluate new sparse partially collapsed Gibbs samplers for LDA
+
+with several algorithmic improvements. Our preferred algorithm, PC-LDA, is fast, efﬁcient, and
+
+exact. Compared to the popular collapsed AD-LDA sampler, PC-LDA is applicable to a larger
+
+class of extended LDA models as well as in other language models using the Dirichlet-multinomial
+
+conjugacy.
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+23
+
+ACKNOWLEDGEMENTS
+
+This research is in part ﬁnancially supported by the Swedish Foundation for Strategic Research
+
+(SSF) (project ASSEMBLE, RIT15-0012 and project Smart Systems: RIT 15-0097).
+
+REFERENCES
+
+Amr Ahmed, Mohamed Aly, Joseph Gonzalez, Shravan Narayanamurthy, and Alexander Smola.
+
+Scalable inference in latent variable models. In International Conference on Web Search and Data
+
+Mining, pages 123–132, 2012.
+
+Sungjin Ahn, Babak Shahbaba, and Max Welling. Distributed stochastic gradient mcmc. In Inter-
+
+national Conference on Machine Learning, pages 1044–1052, 2014.
+
+Márcio Drumond Araujo, Gonzalo Navarro, and Nivio Ziviani. Large text searching allowing
+
+errors. In 4th South American Workshop on String Processing, pages 2–20, 1997.
+
+David M Blei, Andrew Y Ng, and Michael I Jordan. Latent dirichlet allocation. Journal of machine
+
+Jen-Tzung Chien and Ying-Lan Chang. Bayesian sparse topic model. Journal of Signal Processing
+
+Learning research, 3(Jan):993–1022, 2003.
+
+Systems, 74(3):375–389, 2014.
+
+Jianfeng Gao and Mark Johnson. A comparison of bayesian estimators for unsupervised hidden
+
+markov model pos taggers. In Conference on Empirical Methods in Natural Language Processing,
+
+Thomas L Grifﬁths and Mark Steyvers. Finding scientiﬁc topics. Proceedings of the National Academy
+
+Harald Stanley Heaps. Information retrieval : computational and theoretical aspects. Academic P., New
+
+pages 344–352, 2008.
+
+of Sciences, 101(suppl 1):5228–5235, 2004.
+
+York, 1978. ISBN 0-12-335750-0.
+
+Matthew D Hoffman, David M Blei, Chong Wang, and John William Paisley. Stochastic variational
+
+inference. Journal of Machine Learning Research, 14(1):1303–1347, 2013.
+
+Alexander Ihler and David Newman. Understanding errors in approximate distributed latent
+
+dirichlet allocation. IEEE Transactions on Knowledge and Data Engineering, 24(5):952–960, 2012.
+
+Hemant Ishwaran and Lancelot F James. Gibbs sampling methods for stick-breaking priors. Jour-
+
+nal of the American Statistical Association, 96(453):161–173, 2001.
+
+Doug Lea. A java fork/join framework. In ACM 2000 Conference on Java Grande, pages 36–43, 2000.
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+24
+
+Aaron Q Li, Amr Ahmed, Sujith Ravi, and Alexander J Smola. Reducing the sampling complexity
+
+of topic models. In 20th ACM SIGKDD International Conference on Knowledge Discovery and Data
+
+Mining, pages 891–900, 2014.
+
+Jun S Liu. The collapsed gibbs sampler in bayesian computations with applications to a gene
+
+regulation problem. Journal of the American Statistical Association, 89(427):958–966, 1994.
+
+Zhiyuan Liu, Yuzhou Zhang, Edward Y. Chang, and Maosong Sun. Plda+. ACM Transactions on
+
+Intelligent Systems and Technology, 2(3):1–18, 2011.
+
+Romeo Maciuca and Song-Chun Zhu. First hitting time analysis of the independence metropolis
+
+sampler. Journal of Theoretical Probability, 19(1):235–261, 2006.
+
+George Marsaglia and Wai Wan Tsang. A simple method for generating gamma variables. ACM
+
+Transactions on Mathematical Software, 26(3):363–372, 2000.
+
+Andrew K McCallum. Mallet: A machine learning for language toolkit, 2002.
+
+URL
+
+http://mallet.cs.umass.edu.
+
+David Newman, Arthur Asuncion, Padhraic Smyth, and Max Welling. Distributed algorithms for
+
+topic models. The Journal of Machine Learning Research, 10:1801–1828, 2009.
+
+David Newman, Edwin V Bonilla, and Wray Buntine. Improving topic coherence with regularized
+
+topic models. In Advances in neural information processing systems, pages 496–504, 2011.
+
+Kai Wang Ng, Guo-Liang Tian, and Man-Lai Tang. Dirichlet and Related Distributions: Theory,
+
+Methods and Applications, volume 888. John Wiley & Sons, 2011.
+
+Martyn Plummer, Nicky Best, Kate Cowles, and Karen Vines. Coda: Convergence diagnosis and
+
+output analysis for mcmc. R News, 6(1):7–11, 2006.
+
+Ian Porteous, David Newman, Alexander Ihler, Arthur Asuncion, Padhraic Smyth, and Max
+
+Welling. Fast collapsed gibbs sampling for latent dirichlet allocation.
+
+In ACM SIGKDD In-
+
+ternational Conference on Knowledge Discovery and Data Mining, pages 569–577. ACM, 2008.
+
+Samuel Reese, Gemma Boleda Torrent, Montserrat Cuadros Oller, Lluís Padró, and German
+
+Rigau Claramunt. Word-sense disambiguated multilingual wikipedia corpus. In 7th Interna-
+
+tional Conference on Language Resources and Evaluation, 2010.
+
+Michal Rosen-Zvi, Chaitanya Chemudugunta, Thomas Grifﬁths, Padhraic Smyth, and Mark
+
+Steyvers. Learning author-topic models from text corpora. ACM Transactions on Information
+
+Systems, 28(1):4, 2010.
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+25
+
+Evan Sandhaus. The new york times annotated corpus. Linguistic Data Consortium, Philadelphia,
+
+Alexander Smola and Shravan Narayanamurthy. An architecture for parallel topic models. Pro-
+
+ceedings of the VLDB Endowment, 3(1-2):703–710, 2010.
+
+Yee Whye Teh. Dirichlet process. In Encyclopedia of machine learning, pages 280–287. Springer, 2010.
+
+Alexander Terenin, Måns Magnusson, Leif Jonsson, and David Draper. Pólya urn latent dirichlet
+
+allocation: a sparse massively parallel sampler. manuscript in preparation, 2017.
+
+Jean-Baptiste Tristan, Daniel Huang, Joseph Tassarotti, Adam C Pocock, Stephen Green, and Guy L
+
+Steele. Augur: Data-parallel probabilistic modeling. In Advances in Neural Information Processing
+
+Systems, pages 2600–2608, 2014.
+
+David A Van Dyk and Taeyoung Park. Partially collapsed gibbs samplers: Theory and methods.
+
+Journal of the American Statistical Association, 103(482):790–796, 2008.
+
+Mattias Villani, Robert Kohn, and Paolo Giordani. Regression density estimation using smooth
+
+adaptive gaussian mixtures. Journal of Econometrics, 153(2):155–173, 2009.
+
+Alastair J Walker. An efﬁcient method for generating discrete random variables with general
+
+distributions. ACM Transactions on Mathematical Software (TOMS), 3(3):253–256, 1977.
+
+Hanna M Wallach, Iain Murray, Ruslan Salakhutdinov, and David Mimno. Evaluation methods
+
+for topic models. In 26th Annual International Conference on Machine Learning, pages 1105–1112,
+
+2008.
+
+2009.
+
+Han Xiao and Thomas Stibor. Efﬁcient collapsed gibbs sampling for latent dirichlet allocation. In
+
+Asian Conference on Machine Learning, volume 13, 2010.
+
+Feng Yan, Ningyi Xu, and Yuan Qi. Parallel inference for latent dirichlet allocation on graphics
+
+processing units. In Advances in Neural Information Processing Systems, pages 2134–2142, 2009.
+
+Limin Yao, David Mimno, and Andrew McCallum. Efﬁcient methods for topic model inference
+
+on streaming document collections. In ACM SIGKDD International Conference on Knowledge Dis-
+
+covery and Data Mining, pages 937–946, 2009.
+
+Jinhui Yuan, Fei Gao, Qirong Ho, Wei Dai, Jinliang Wei, Xun Zheng, Eric Po Xing, Tie-Yan Liu,
+
+and Wei-Ying Ma. Lightlda: Big topic models on modest computer clusters. In Proceedings of the
+
+24th International Conference on World Wide Web, pages 1351–1361. ACM, 2015.
+
+Jun Zhu, Ning Chen, Hugh Perkins, and Bo Zhang. Gibbs max-margin topic models with fast
+
+sampling algorithms. In 30th International Conference on Machine Learning, pages 124–132, 2013.
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+26
+
+APPENDIX A. PROOFS
+
+Complexity of the sparse partially collapsed Gibbs sampler. Assuming a vocabulary size following
+
+Heaps’ law V = ξ N ϕ with ξ > 0, 0 < ϕ < 1 and the number of topics following the mean of a Dirichlet
+
+process mixture K = γ log
+
+with γ > 0, the complexity of the PC-LDA sampler is
+
+(cid:16)
+
+1 + N
+γ
+
+(cid:17)
+
+Proof. Under the assumptions in the proposition, the complexity of PC-LDA for large N is
+
+(cid:32) N
+∑
+i=1
+
+O
+
+(cid:33)
+
+Kd(i)
+
+.
+
+Kd(i) + γξ log
+
+1 +
+
+(cid:18)
+
+(cid:19)
+
+N
+γ
+
+N ϕ.
+
+N
+∑
+i
+
+We, therefore, want to prove that there exists a c > 0 and a N0 ≤ N such that
+
+or, equivalently,
+
+N
+∑
+i
+
+Kd(i) + γξ log
+
+1 +
+
+N ϕ ≤ c
+
+Kd(i),
+
+(cid:18)
+
+(cid:19)
+
+N
+γ
+
+N
+∑
+i
+
+1 + γξ log
+
+1 +
+
+N ϕ/
+
+Kd(i) ≤ c,
+
+(cid:18)
+
+(cid:19)
+
+N
+γ
+
+N
+∑
+i
+
+for all N ≥ N0. Since N ≤ ∑N
+
+i Kd(i) we have
+
+1 + γξ log
+
+1 +
+
+N ϕ/
+
+Kd(i) ≤ 1 + γξ log
+
+1 +
+
+N ϕ/N .
+
+(cid:18)
+
+(cid:19)
+
+N
+γ
+
+N
+∑
+i
+
+(cid:18)
+
+(cid:19)
+
+N
+γ
+
+It is, therefore, enough to show that for N ≥ N0 = 1, there exist a c such that
+
+Let
+
+and note that
+
+by the standard limit
+
+1 + γξ log
+
+1 +
+
+N ϕ/N ≤ c .
+
+(cid:18)
+
+(cid:19)
+
+N
+γ
+
+f (N) = log
+
+1 +
+
+/N1−ϕ ,
+
+(cid:18)
+
+(cid:19)
+
+N
+γ
+
+f (1) = log(1 + γ−1) > 0 and lim
+N→∞
+
+f (N) = 0
+
+(cid:19)
+
+(cid:18) log(x)
+xb
+
+lim
+x→∞
+
+= 0 for b > 0.
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+27
+
+There exist an R such that for all N > R, f (N) < f (1). Using the extreme value theorem we know
+
+that at the interval [1, R] there exist a M = sup f (N). Hence, for N ≥ N0 = 1, there exists a c such
+(cid:3)
+
+that c = 1 + γξ M, which completes the proof.
+
+Proposition 2. Complexity of the light partially collapsed conditional Metropolis-Hastings sam-
+
+pler. Assuming a vocabulary size following Heaps’ law V = ξ N ϕ with ξ > 0, 0 < ϕ < 1 and the number
+
+of topics following the mean of a Dirichlet process mixture K = γ log
+
+with γ > 0, the complexity
+
+(cid:16)
+
+1 + N
+γ
+
+(cid:17)
+
+for the light-PC-LDA sampler is
+
+Proof. Under the assumptions in the proposition, the complexity of light-PC-LDA for large N is
+
+and we, therefore, need to prove that the exists a c > 0 and N0 ≤ N such that
+
+O (N) .
+
+(cid:18)
+
+(cid:18)
+
+(cid:19)
+
+N
+γ
+
+(cid:19)
+
+N
+γ
+
+(cid:18)
+
+N + γξ log
+
+1 +
+
+(cid:19)
+
+N
+γ
+
+N ϕ ,
+
+N + γξ log
+
+1 +
+
+N ϕ ≤ cN
+
+1 + γξ log
+
+1 +
+
+N ϕ/N ≤ c
+
+or equivalently
+
+for all N ≥ N0. The rest of the proof follows the proof of Proposition 1 exactly.
+
+(cid:3)
+
+APPENDIX B. VARIABLE SELECTION IN Φ
+
+Partially collapsed sampling of topic models has the additional advantage that more complex
+models can be used to model Φ. As an example, we derive a Gibbs sampler for a topic model with
+a spike-and-slab type prior for Φ that assigns point masses at zero to a subset of the parameters
+in Φ. Variable selection for LDA has previously been proposed by Chien and Chang [2014] using
+
+variational Bayes inference where the sparsity reduced both perplexity as well as memory and
+
+computation costs; we will here derive a similar approach using Gibbs sampling.
+
+The rows of Φ are assumed to be independent a priori, exactly like in the original LDA model,
+be the kth row of n(w), and let Ik = (Ik1, ..., IkV) be
+
+so let us focus on a given row φk of Φ. Let n
+
+(w)
+k
+
+a vector of binary variable selection indicators such that Ik,v = 1 if φk,v > 0, and Ik,v = 0 if φk,v = 0
+where v is the word type (column) of the Φ matrix. Deﬁne Ic
+
+k to be the complement of Ik (i.e., the
+vector indicating the zeros in φk). Let φk,Ik be a vector with elements of φk > 0. Finally, let nk be
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+28
+
+the total number of tokens associated with the kth topic. The indicators Ikv are assumed to be iid
+
+Bern(πk) a priori. The prior for φk is a conditional Dirichlet distribution where
+
+and φk,Ic
+
+k
+
+= 0 with probability one.
+
+p(φk,Ik
+
+|Ik) ∼ Dir(β Ik )
+
+The posterior sampling step for φk is replaced by two sampling steps. First we sample the
+
+indicator variables for each word type p(Ik,v | Ik,−v, πk, v, z) and then, conditional on the indicators
+
+Ik we sample p(φk,Ik
+
+|Ikz) from the conditional Dirichlet distribution in Ng et al. [2011].
+
+Sampling φk. Sampling from p(φk|Ik, z) is straightforward by setting φk,Ic
+
+= 0 and drawing the
+
+k
+
+non-zero elements in φk from
+
+p(φk,Ik
+
+|Ik, z) ∼ Dir(β Ik + n
+
+(w)
+Ik
+
+) .
+
+Sampling Ik,v. We ﬁrst note that if n
+
+(w)
+k,v > 0 we know that φk,v > 0 and hence we can set
+Ik,v = 1 with probability 1. The conditional posterior distribution of Ik,v is a two-point distri-
+
+bution and hence we need to compute the conditional distribution p(Ik,v = 1|Ik,−v, πk, v, z) and
+) since n(w) is a sufﬁ-
+
+p(Ik,v = 0|Ik,−v, πk, v, z) by integrating out φk. Note that p(Ik|z) = p(Ik|n
+
+(w)
+k
+
+cient statistic for Ik. By Bayes theorem we get
+
+p(Ik|n
+
+(w)
+k
+
+) ∝ p(n
+
+(w)
+k
+
+|Ik)p(Ik) ,
+
+where p(Ik) is the Bernoulli prior and
+
+p(n
+
+(w)
+k
+
+|Ik) ∝
+
+(cid:90)
+
+n
+
+(w)
+k,Ik
+k,Ik
+
+φ
+
++β Ik
+
+−1
+
+dφk,Ik
+
+= B(n
+
+(w)
+k,Ik
+
++ β Ik ) ,
+
+using the Dirichlet kernel and with B being the multivariate Beta function. With some algebra
+
+we then have that the conditional two-point distribution where we set Ik,v = 1 if n
+
+(w)
+k,v > 0 and
+
+otherwise we draw Ik,v using the following two-point distribution:
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+29
+
+FIGURE B.1. Log marginalized posterior for different values of π for PubMed 10%
+(left) and NIPS (right).
+
+(cid:16)
+
+p
+
+Ik,v = 1|Ik,(−v), πk
+
+(cid:17)
+
+∝
+
+p (Ik,v = 0|Ik,−v, πk) ∝
+
+Γ(cid:0)∑j∈Ik,j(cid:54)=v βk,j + βk,v
+
+(cid:1)
+
+Γ(cid:0)∑j∈Ik,j(cid:54)=v n
+
+(w)
+k,j + βk,j + βk,v
+
+(cid:1)
+
+πk ,
+
+Γ(cid:0)∑j∈Ik,j(cid:54)=v βk,j
+
+(cid:1)
+
+Γ(cid:0)∑j∈Ik,j(cid:54)=v n
+
+(w)
+k,j + βk,j
+
+(cid:1)
+
+(1 − πk) .
+
+where Γ(·) is the Gamma function.
+
+Earlier research has already concluded that introducing variable selection for Φ in LDA can
+
+reduce the perplexity and increase parsimony of the topic model [Chien and Chang, 2014]. Here
+
+we illustrate the effect of variable selection for the PubMed (10%) and NIPS corpora (both with a
+
+rare word limit of 10). We set the sparsity prior to π = 1.0, 0.5, 0.1, K = 100, and run all models for
+
+20 000 iterations. We examine the proportions of zeroes and log marginalized posterior induced
+by the variable selection prior π. The proportion of zeroes in Φ is estimated using the last 1000
+
+iterations. The results are summarized in Table 6 and Figure B.
+
+TABLE 6. Variable selection of Φ
+
+DATA
+
+K
+
+π
+
+Prop. zeros in Φ
+
+PubMed 10% 100 0.1 0.879
+PubMed 10% 100 0.5 0.492
+PubMed 10% 100 1.0 0.000
+100 0.1 0.877
+NIPS
+100 0.5 0.501
+NIPS
+100 1.0 0.000
+NIPS
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+30
+
+The results are similar to that of Chien and Chang [2014] in that a sparse prior will result in a
+
+better marginal likelihood of the model. This model can be elaborated further (the most obvious
+
+is learning π), but this is out of the scope for this paper.
+
+APPENDIX C. ALGORITHMS
+
+Data: tokenized corpus x
+Result: topic indicators z
+z ← RandomInitZ();
+n(w) ← SumUpGlobalSufﬁcientStatistics(z);
+for g ← 1 to num_iterations do
+
+// Sample Φ
+Φ ← SampleDirichlet(n(w), β);
+A, σa ← ConstructAliasTables(Φ, α);
+// Sample z
+z, n(w) ← SampleTopicIndicatorsSparse(Φ, x, z, σa, n(w));
+
+end
+
+Algorithm 1: Sparse Partially Collapsed LDA
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+31
+
+Data: Φ, x, z, σa, n(w)
+Result: z,n(w)
+for d ← 1 to D in parallel do
+
+// Compute sorted sparse sufﬁcient statistic for θd
+n(d) ← SumUpDocumentSparseTopicCounts(zd);
+for i ← 1 to Nd do
+
+(d)
+zi
+
+, ∆n
+
+(w)
+zi,xi ← −1 ;
+
+// Remove position i from the sufﬁcient statistics
+n
+// Compute normalization constant σb and cumulative sum s over topics
+σb, sb ← ComputeSparseCumSum(n(d), φxi );
+ui ← RandomUniform();
+uσ ← ui · (σa + σb);
+if uσ < σa then
+
+// Normalize the random draw to [0,1]
+ui ← uσ/σa;
+// Sample from "prior" part using ui
+zi ← LookUpAliasTable(Axi , ui);
+
+else
+
+// Normalize the random draw to [0,1]
+ui ← (uσ − σa)/σb ;
+// Sample from sparse "likelihood" part using ui
+zi ← BinarySearch(sb, ui · σb);
+
+end
+// Add the new topic indicator to the sufﬁcient statistics
+n
+end
+n(w) ← UpdateGlobalSufﬁcientStatistics(n(w), ∆n(w))
+
+(w)
+zi,xi ← +1 ;
+
+, ∆n
+
+(d)
+zi
+
+Algorithm 2: SampleTopicIndicatorsSparse()
+
+end
+
+end
+
+Data: tokenized corpus x
+Result: topic indicators z
+z ← RandomInitZ();
+n(w) ← SumUpGlobalSufﬁcientStatistics(z);
+for g ← 1 to num_iterations do
+
+// Sample Φ
+Φ ← SampleDirichlet(n(w), β);
+A ← ConstructAliasTables(Φ);
+// Sample z
+z, n(w) ← SampleTopicIndicatorsLight(A, x, z, n(w));
+
+Algorithm 3: Light Partially Collapsed LDA
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+32
+
+Data: A, x, z, σa, n(w)
+Result: z,n(w)
+for d ← 1 to D in parallel do
+for i ← 1 to Nd do
+
+(d)
+zi
+
+, ∆n
+
+// Remove position i from the sufﬁcient statistics
+(w)
+zi,xi ← −1 ;
+n
+// Word proposal draw
+ui,1 ← RandomUniform();
+z∗ ← LookUpAliasTable(Axi , ui,1);
+ui,2 ← RandomUniform();
+α+n−i
+d,z∗
+α+n−i
+d,zi
+
+< ui,2 then
+
+if min
+
+(cid:27)
+
+(cid:26)
+
+1,
+zi ← z∗;
+
+end
+// Document proposal draw
+ui,3 ← RandomUniform();
+ud,i,3 ← ui,3 · (α · K + Nd,−i);
+if ud,i,3 < α · K then
+
+// Normalize the random draw to [0,1]
+ui,3 ← ud,i,3/(α · K);
+// Draw sample using ui,3
+z∗ ← SampleDiscreteUniform(1, K, ui,3) ;
+
+else
+
+// Normalize to [0,1] ui,3
+ui,3 ← (ud,i,3 − (α · K))/Nd,−i;
+z∗ ← ChooseRandomToken(z−i, ui,3) ;
+
+end
+ui,4 ← RandomUniform();
+φk=z∗,wi =v
+if min
+φk=zi ,wi =v
+
+(cid:110)
+
+(cid:111)
+
+1,
+zi ← z∗ ;
+
+< ui,4 then
+
+end
+// Add the topic indicator to the sufﬁcient statistics
+n
+end
+n(w) ← UpdateGlobalSufﬁcientStatistics(n(w), ∆n(w))
+
+(w)
+zi,xi ← +1 ;
+
+, ∆n
+
+(d)
+zi
+
+end
+
+Algorithm 4: SampleTopicIndicatorsLight()
+
+PARTIALLY COLLAPSED SAMPLING FOR TOPIC MODELS
+
+33
+
+Data: vector of proportions p, length of p K
+Result: Alias table A
+Initialize L = U = ∅ and A = [];
+for i ← 1 to K do
+
+if p[i] < 1/K then
+
+L ← L ∪ (p[i], i);
+
+U ← U ∪ (p[i], i);
+
+else
+
+end
+
+end
+for i ← 1 to K do
+
+Get (pl, kl) from L and (pu, ku) from U;
+A ← A ∪ (pl, kl, ku) ;
+pu ← pu − (1/K − pl) ;
+if pu < 1/K then
+
+L ← L ∪ (pu, ku);
+
+U ← U ∪ (pu, ku);
+
+else
+
+end
+
+end
+
+Algorithm 5: ConstructAliasTable()
+
+Data: Alias table A, Alias table categories K, random uniform [0,1] u
+Result: Class k
+k ← (cid:98)u · K(cid:99) + 1 ;
+// Renormalize u
+u ← (u · K + 1 − k)/K ;
+(p, kl, ku) ← A[k] ;
+if u < p then
+return kl ;
+
+else
+
+end
+
+return ku ;
+
+Algorithm 6: LookUpAliasTable()
+

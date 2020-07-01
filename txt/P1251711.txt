@@ -1600,3 +1600,1605 @@ ACM 33(8), 103 (1990)
 sgd. In: Advances in Neural Information Processing Systems 28, pp. 685–693. Cur-
 ran Associates, Inc. (2015)
 
+Theano-MPI: a Theano-based Distributed
+Training Framework
+
+He Ma1, Fei Mao2, and Graham W. Taylor1
+
+1 School of Engineering, University of Guelph, CA {hma02,gwtaylor}@uoguelph.ca
+2 SHARCNET, Compute Canada, CA feimao@sharcnet.ca
+
+Abstract. We develop a scalable and extendable training framework
+that can utilize GPUs across nodes in a cluster and accelerate the train-
+ing of deep learning models based on data parallelism. Both synchronous
+and asynchronous training are implemented in our framework, where pa-
+rameter exchange among GPUs is based on CUDA-aware MPI. In this
+report, we analyze the convergence and capability of the framework to
+reduce training time when scaling the synchronous training of AlexNet
+and GoogLeNet from 2 GPUs to 8 GPUs. In addition, we explore novel
+ways to reduce the communication overhead caused by exchanging pa-
+rameters. Finally, we release the framework as open-source for further
+research on distributed deep learning3.
+
+1
+
+Introduction
+
+With the constant improvement of hardware and discovery of new architec-
+tures, algorithms, and applications, deep learning is gaining popularity in both
+academia and industry. Object recognition [20], is now dominated by deep learn-
+ing methods, which in many cases, rival human performance. Recent success in
+areas such as activity recognition from video [13] and statistical machine trans-
+lation [14] is an example of deep learning’s ascent both in performance and at
+scale.
+
+With the new generations of GPU cards and increased device memory, re-
+searchers are able to design and train models with more than 140 million param-
+eters (c.f. VGGNet [21]) and models that are as deep as 150 layers (c.f. ResNet
+[9]).
+
+The emergence of larger datasets, e.g. ImageNet [20] and MS-COCO [18],
+challenges artiﬁcial intelligence research and leads us to design deeper and more
+expressive models so that the complexity of models is suﬃcient for the task.
+
+Despite of the increased computing power of GPUs, it usually takes weeks
+to train such large models to desired accuracy on a single GPU. This is due to
+the increased time associated with training deeper models and iterating over the
+examples in larger datasets. This is where distributed training of deep learning
+models becomes crucial, especially for activities such as model search which may
+involve training and evaluating models thousands of times.
+
+3 https://github.com/uoguelph-mlrg/Theano-MPI
+
+6
+1
+0
+2
+ 
+y
+a
+M
+ 
+6
+2
+ 
+ 
+]
+
+G
+L
+.
+s
+c
+[
+ 
+ 
+1
+v
+5
+2
+3
+8
+0
+.
+5
+0
+6
+1
+:
+v
+i
+X
+r
+a
+
+2
+
+He Ma, Fei Mao, and Graham W. Taylor
+
+A na¨ıve approach to scaling up is running several copies of the same model in
+parallel on multiple computing resources (e.g. GPUs), each computing its share
+of the dataset and averaging their parameters at every iteration. This strategy is
+called data parallelism, and its eﬃcient implementation is the focus of our work.
+More sophisticated forms of distributed training, including model parallelism are
+important but outside the current scope of our framework.
+
+Theano [23] is an open-source Python library for developing complex algo-
+rithms via mathematical expressions. It is often used for facilitating machine
+learning research. Its support for automatic symbolic diﬀerentiation and GPU-
+accelerated computing has made it popular within the deep learning community.
+Like other deep learning platforms, including Cafe [12], Torch [3], TensorFlow
+[1] and MXNet [2], Theano uses CUDA as one of its main backends for GPU
+accelerated computation. Since a single GPU is limited by its device memory
+and available threads when solving compute-intensive problems, very recently re-
+searchers have started to build multi-GPU support into the most popular frame-
+works. This includes the multi-GPU version of Caﬀe (FireCaﬀe [11]), Torch and
+Theano (Platoon).
+
+Because the Theano environment usually compiles models for one GPU per
+process, we need to drive multiple GPUs using multiple processes. So ﬁnding a
+way to communicate between processes becomes a fundamental problem within
+a multi-GPU framework. There are several existing approaches of implementing
+inter-process communication besides manually programming on sockets, such
+as Signals, Message Queues, Message Passing, Pipes, Shared Memory, Memory
+Mapped Files, etc. However, among those approaches, Message Passing is most
+suitable for collective communication between multiple programs across a cluster
+because of its well-developed point-to-point and collective protocols. Message
+Passing Interface (MPI) is a language-independent communication protocol that
+can undertake the task of inter-process communication across machines. It is a
+standardized message-passing system designed for programming on large-scale
+parallel applications.
+
+Parameter transfer is a basic operation in the distributed training of deep
+learning models. Therefore, the transfer speed between processes severely im-
+pacts the overall data throughput speedup4. Since the parameters to be trans-
+ferred are computed on GPUs, a GPU-to-GPU transfer is required. Compared to
+the basic transfer() function in Theano, NVIDIA GPUDirect P2P technology
+makes this possible by transferring data between GPUs without passing through
+host memory. Speciﬁcally, it enables CUDA devices to perform direct read and
+write operations on other CUDA host and device memory. In the context of MPI,
+GPUDirect P2P technology allows a GPUArray memory buﬀer to be transferred
+in basic point-to-point and collective operations, making MPI “CUDA-Aware”.
+Leveraging CUDA-aware MPI, we have developed a scalable training frame-
+work that provides multi-node and multi-GPU support to Theano and eﬃcient
+inter-GPU parameter transfer at the same time. To the best of our knowledge,
+
+4 We deﬁne data throughput speedup as the change in total time taken to process a
+certain amount of examples. It includes both training and communication time.
+
+Theano-MPI: a Theano-based Distributed Training Framework
+
+3
+
+this is to-date the most convenient way to deploy Theano processes on a multi-
+node multi-GPU cluster.
+
+2 Related Work
+
+The idea of exploiting data parallelism in machine learning has been widely
+explored in recent years in both asynchronous and synchronous ways. To ac-
+celerate the training of a speech recognition model on distributed CPU cores,
+DownPour, an asynchronous parameter exchanging method [6], was proposed. It
+was the largest-scale method to-date for distributed training of neural networks.
+It was later found that controlling the maximum staleness of parameter updates
+received by the server leads to faster training convergence [10] on problems like
+topic modeling, matrix factorization and lasso regression compared to a purely
+asynchronous approach. For accelerating image classiﬁcation on the CIFAR and
+ImageNet datasets, an elastic averaging strategy between asynchronous workers
+and the server was later proposed [25]. This algorithm allows more exploration of
+local optima than DownPour and alleviates the need for frequent communication
+between workers and the server.
+
+Krizhevsky proposed his trick on parallelizing the training of AlexNet [16]
+on multiple GPUs in a synchronous way [15]. This work showed that eight GPU
+workers training on the same batch size of 128 can give up to 6.25× data through-
+put speedup and nearly the same convergence as trained on a single GPU when
+exploiting both model and data parallelism. Notably, the increase in eﬀective
+batch size5 leads to very small changes in the ﬁnal convergence of AlexNet when
+the learning rate is scaled properly. Following his work, a Theano-based two-
+GPU synchronous framework [7] for accelerating the training of AlexNet was
+proposed, where both weights and momentum are averaged between two GPUs
+after each iteration. The model converges to the same level as using a single
+GPU but in less time.
+
+There has been more development on the acceleration of vision-based deep
+learning in recent years. NVIDIA developed a multi-GPU deep learning frame-
+work, DIGITS, which shows 3.5× data throughput speedup when training AlexNet
+on 4 GPUs. Purine [17] pipelines the propagation of gradients between itera-
+tions and overlaps the communication of large weights in fully connected layers
+with the rest of back-propagation, giving near 12× data throughput speedup
+when training GoogLeNet [22] on 12 GPUs. Similarly, MXNet [2] also shows
+a super-linear data throughput speedup on training GoogLeNet under a dis-
+tributed training setting.
+
+The Platoon project is a multi-GPU extension for Theano, created and main-
+tained by the oﬃcial Theano team. It currently supports only asynchronous
+data parallelism inside one compute node based on posix_ipc shared memory.
+In comparison, our framework, Theano-MPI, is designed to support GPUs that
+are distributed over multiple nodes in a cluster, providing convenient process
+
+5 eﬀective batch size = batch size × number of workers
+
+4
+
+He Ma, Fei Mao, and Graham W. Taylor
+
+management and faster inter-GPU memory exchanging based on CUDA-aware
+MPI.
+
+3
+
+Implementation
+
+Our goal is to make the ﬁeld of distributed deep learning more accessible by
+developing a scalable training framework with two key components. First is
+Theano as a means of constructing an architecture and optimizing it by Stochas-
+tic Gradient Descent (SGD). Second is Massage Passing Interface (MPI) as an
+inter-process parameter exchanger. We also aim to explore various ways to re-
+duce communication overhead in parallel SGD and expose some phenomena
+that aﬀect convergence and speedup when training deep learning models in a
+distributed framework.
+
+3.1 The BSP Structure
+
+Bulk Synchronous Parallel (BSP) [24] is an intuitive way to implement paral-
+lel computing. In the BSP paradigm, workers proceed with training in a syn-
+chronous way. Figure 1a shows a 4 GPU example of the proposed BSP structure
+where the same model is built and run within four processes, P0, P1, P2, P3.
+Each process uses one CPU and one GPU. After the model’s training graph is
+compiled on the GPU, those parameters in the graph become arrays in GPU
+memory whose values can be retrieved from device to host and set from host to
+device. When training starts, the training dataset is split into four parts. In ev-
+ery iteration, each worker process takes a mini-batch of examples from its share
+and performs SGD on it. After that, all workers are synchronized and model
+parameters are exchanged between worker processes in a collective way.
+
+(a) non-CUDA-aware
+
+(b) CUDA-aware
+
+Fig. 1. A 4-GPU example of the BSP structure where arrows indicate communication
+for parameter exchange.
+
+Theano-MPI: a Theano-based Distributed Training Framework
+
+5
+
+3.2 CUDA-aware Parameter Exchanging
+
+Synchronous parameter exchange is an array reduction problem which consists
+of both data transfer and calculation. The GPUDirect P2P technology allows ex-
+changing parameters between GPUs without passing through host memory, mak-
+ing MPI functions “CUDA-aware”. Based on this, we explored various strategies
+trying to minimize the data transfer and calculation time, and make more eﬃ-
+cient use of QPI, PCIe and network card bandwidth during data transfer. The
+basic strategy is to use the MPI Allreduce() function. However, the CUDA-
+aware version of it in OpenMPI 1.8.7 does not give much improvement since
+any collective MPI function with arithmetic operations still needs to copy data
+to host memory. Functions like Alltoall() and Allgather() do not involve
+any arithmetic and therefore the CUDA-aware version of them (Fig. 1b) can
+avoid passing through host memory unless data transfer crossing the QPI bus
+is needed. We therefore implemented a CUDA-aware Alltoall-sum-Allgather
+strategy which separates the data transfer and computation. An example of this
+strategy is demonstrated in Fig. 2. Here, the summation kernels required for
+parameter exchange are executed in parallel on GPUs. Our test shows the GPU
+summation kernel takes only 1.6% of the total communication time.
+
+Fig. 2. An example demonstrating the reduction of arrays on rank 0 and rank 1 with
+the proposed Alltoall-sum-Allgather strategy compared to MPI Allreduce. Sub-arrays
+of data items (indicated by same-coloured boxes) need to be summed and the results
+exchanged with the other ranks.
+
+Using low precision data types for weights or activations (or both) in the
+forward pass during training of deep neural networks has received much recent
+interest [4,5]. It was shown that training Maxout [8] networks at 10 bits ﬁxed
+point precision can still yield near state-of-art test accuracy [4]. In light of this,
+we also implemented the transfer of parameters at half-precision while summing
+them at full precision, in order to further reduce communication overhead.
+
+Figure 3 shows the improvement of the combination of strategies over MPI
+Allreduce. The “ASA” strategy shows three times faster communication relative
+to MPI Allreduce and the half precision version of it gives nearly 6 times faster
+
+6
+
+He Ma, Fei Mao, and Graham W. Taylor
+
+performance. Those results are obtained on distributed GPUs on 8 nodes in a
+cluster. Each node hosts one GPU.
+
+Fig. 3. Computation (train) vs. relative communication overhead of diﬀerent parame-
+ter exchanging strategies during training AlexNet-128b (AR: Allreduce, ASA: CUDA-
+aware Alltoall-sum-Allgather).
+
+Due to the limitation imposed by the Global Interpreter Lock (GIL) in
+Python, overlapping the communication with the gradient calculation as in [17]
+has not yet been implemented in our framework. We expect this, if implemented,
+would substantially reduce the communication cost of exchanging large matrices
+in fully-connected layers.
+
+3.3 Parallel Loading
+
+For large-scale visual recognition applications such as ImageNet LSVRC, the
+data required for training is on the order of hundreds of Gigabytes. Therefore, it
+is diﬃcult to load all image data completely into memory after training starts.
+Instead, images are stored as batch ﬁles on local or remote disks and loaded
+one ﬁle at a time by each process. Loading image batches x from disk can be
+time consuming6. It is aﬀected by various factors, including ﬁle size, ﬁle format,
+disk I/O capability and network bandwidth if reading from remote disks. If in
+every iteration, the training process should wait for data loading to be ready in
+order to proceed, one can imagine the time cost by loading data will be critical
+to the total performance. One way to circumvent this, given the independence
+of loading and training, is to load those ﬁles in parallel with the forward and
+backward propagations on the last loaded batch. However, this assumes loading
+one batch of images takes shorter than one iteration of training the model.
+This auxiliary loading process should follow procedures in Alg. 1 to collaborate
+eﬃciently with its corresponding training process:
+
+6 Loading labels y, on the other hand, is much faster, therefore labels can be loaded
+
+completely into memory.
+
+Theano-MPI: a Theano-based Distributed Training Framework
+
+7
+
+Algorithm 1 The parallel loading process
+Require:
+
+Host memory allocated for loading image batch hostdatax.
+GPU memory allocated for preprocessed image batch gpudatax
+GPU memory allocated for the actual model graph input inputx,
+mode=None, recv=None, f ilename=None.
+Mean image image mean
+
+Receive the mode (train, validate or stop) from training process
+if recv=“stop” then
+
+mode ← recv
+
+else
+
+break
+
+Ensure:
+1: while True do
+2:
+3:
+4:
+5:
+6:
+7:
+8:
+9:
+10:
+11:
+12:
+13:
+
+to be loaded.
+
+Receive the ﬁrst ﬁlename to be loaded from training process f ilename ← recv
+while True do
+
+Load ﬁle “ ﬁlename” from disk into host memory hostdatax.
+hostdatax = hostdatax − image mean
+Crop and mirror hostdatax according to mode.
+Transfer hostdatax from host to GPU device memory gpudatax.
+Wait for training on the last inputx to ﬁnish by receiving the next ﬁlename
+
+14:
+15:
+16:
+17:
+18:
+19:
+20:
+
+if recv in [“stop”, “train”, “val”] then
+
+break
+
+else
+
+f ilename ← recv
+
+Transfer gpudatax to inputx.
+Synchronize GPU context.
+Notify training process to precede with the newly loaded inputx
+
+Diﬀerent from the multiprocessing and Queue messaging method in [7], we
+used the MPI Spawn function to start a child process from each training process
+and used the resulting MPI intra-communicator to pass messages between the
+training process and its child process. As shown in Algorithm 1, the parallel
+loading process can read image ﬁles, subtract the mean image, crop sub-images
+and ﬁnally load preprocessed data onto GPUs. By doing this, we are able to
+overlap the most compute-intensive part (Step 10 to 13 in Algorithm 1) with
+forward and backward graph propagation in the training process.
+
+4 Benchmarking
+
+Exchanging parameters is a necessary aspect of parallel SGD, however, it can be
+achieved in a variety of diﬀerent ways. Parameters updated during SGD include
+weights (and biases), momentum (if using momentum SGD) and raw gradients.
+Averaging weights after gradient descent (AWAGD) [15,7] is a straightforward
+parallel SGD scheme. We have proved [19] that training a perceptron using this
+
+8
+
+He Ma, Fei Mao, and Graham W. Taylor
+
+scheme on multiple GPUs can either be equivalent to or a close approximate
+of sequential SGD training on a single GPU depending on whether or not ef-
+fective batch size is kept constant. In this scheme, the learning rate is scaled
+with the number of GPUs used [15], namely k. It can also be shown that this
+scheme is equivalent to summing up the parameter updates from all GPUs before
+performing gradient descent (SUBGD), which does not require scaling up the
+learning rate. However, our experiments show that tuning the learning rate is
+still dependent on k to ensure initial convergence of the model. Table 1 lists the
+learning rates we used and the convergence we achieved in training AlexNet7
+and GoogLeNet8 at diﬀerent scales (number of workers).
+
+Recent work has applied low precision to weights and activations during train-
+ing [4]. In the extreme, binary data types have been considered [5]. This enables
+eﬃcient operation of the low-precision network both at deployment (test time)
+and during the forward propagation stage during training. However, gradients
+used for parameter updates must still be stored at high-precision or learning
+will fail. Related to this, we see a drop in accuracy due to reduced-precision
+parameter exchange. The validation top-5 error of the “8GPU-32b” AlexNet in
+Table 1 increased from 19.9% to 20.3% and that of the “8GPU” GoogLeNet in-
+creased from 10.65% to 11.7%. Parameter exchange is an important part of the
+update stage in a distributed training framework. Therefore, there is a necessary
+accuracy-speed tradeoﬀ to consider when adopting a low-precision strategy.
+
+Table 1. Trade-oﬀ between accuracy and speedup under diﬀerent hyper parameter
+settings in training AlexNet and GoogLeNet based on the ASA strategy. The learning
+rate reported was the best one found empirically for the particular setting (HP: hyper-
+parameters, LR: learning rate, BS: batch size).
+
+# of
+workers
+
+AlexNet
+
+GoogLeNet
+
+HP
+
+Result
+
+HP
+
+Result
+
+LR BS Accuracy Speedup LR BS Accuracy Speedup
+
+0.01 128
+1GPU
+0.01 128
+2GPU
+4GPU
+0.01 128
+8GPU 0.005 128
+8GPU 0.005 32
+8GPU-fp16 0.005 32
+
+19.8%
+19.8%
+20.4%
+20.7%
+19.9%
+20.3%
+
+1×
+1×
+0.01 32 10.07%*
+1.7× 0.007 32 10.20% 1.9×
+3.4× 0.005 32 10.48% 3.7×
+6.7× 0.005 32 10.65% 7.2×
+4.9×
+5.7× 0.005 32 11.75% 7.3×
+
+-
+
+7 Top-5 error at epoch 62. The implementation is based on theano alexnet from
+
+uoguelph-mlrg. https://github.com/uoguelph-mlrg/theano_alexnet.
+
+8 Top-5 error at epoch 70. BVLC GoogLeNet implementation in Caﬀe is referenced in
+building the model. https://github.com/BVLC/caffe/tree/master/models/bvlc_
+googlenet. * At the time of submission, the GoogLeNet 1GPU test is still ongoing.
+The top-5 error is taken from [22].
+
+Theano-MPI: a Theano-based Distributed Training Framework
+
+9
+
+Figures 4 and 5 show the convergence of two models trained with SUBGD
+and the Alltoall-sum-Allgather strategy, in which AlexNet is trained on 1,
+2, 4 and 8 GPUs with momentum SGD and 128 batch size on each GPU9.
+Similarly, GoogLeNet is trained on 2, 4 and 8 GPUs with a batch size of 32.
+We see that as more workers are used, the eﬀective batch size becomes too large
+and the approximation from parallel SGD to sequential SGD becomes worse.
+As shown in Table 1, one way to preserve convergence at such a large-scale is
+to reduce the batch size on each worker so that the eﬀective batch size stays
+small. This gives the model more potential to explore further at low learning
+rates, though the accuracy improvement at the beginning is slow. However, using
+smaller batch sizes means more frequent parameter exchanges between workers,
+which demands attention toward further reducing the communication overhead.
+
+Fig. 4. Validation top-5 error of AlexNet trained at diﬀerent scales (and batch sizes).
+Best viewed in colour.
+
+Fig. 5. Validation top-5 error of GoogLeNet trained at diﬀerent scales. Best viewed in
+colour.
+
+The speedup of training AlexNet and GoogLeNet are evaluated on 8 dis-
+tributed GPU nodes (1 GPU per node). To show the performance of accelerating
+
+9 Tested on the ILSVRC14 dataset [20].
+
+10
+
+He Ma, Fei Mao, and Graham W. Taylor
+
+larger models, we build VGGNet and test its scaling performance on 8 GPUs in
+a single node with shared memory. This setup meets the memory requirements
+of VGGNet. Table 2 gives an overview of the structural diﬀerence between those
+three models. Table 3 reports the training and communication time taken to
+process 5,120 images across diﬀerent models. We see that these three models
+scale diﬀerently in the framework due to diﬀerences in the complexity of their
+operations as well as the number of free parameters. CUDA-aware parameter ex-
+changing helps boost the speedup of the framework, especially when the number
+of parameters is relatively large.
+
+Table 2. Structural comparison between the three architectures which were imple-
+mented for benchmarking.
+
+Model
+
+Depth 10 # of parameters11
+
+AlexNet
+GoogLeNet
+VGGNet
+
+8
+22
+19
+
+60,965,224
+13,378,28012
+138,357,544
+
+Table 3. Communication overhead per 5,120 images (s) / speedup on 8 GPUs for
+diﬀerent models (AR: Allreduce, ASA: CUDA-aware Alltoall-sum-Allgather, ASA16:
+CUDA-aware Alltoall-sum-Allgather w/ ﬂoat16).
+
+Model
+
+Train(1GPU)
+
+AR
+
+ASA
+
+ASA16
+
+2.01/5.3× 0.75/6.7× 0.47/7.1×
+AlexNet-128b
+AlexNet-32b
+8.03/2.9× 2.94/4.9× 1.83/5.7×
+GoogLeNet-32b 16.82(134.9) 2.07/7.1× 1.96/7.2× 1.76/7.3×
+51.79(405.2) 41.41/4.3× 8.60/6.7× 4.84/7.2×
+VGGNet-32b
+
+3.90(31.2)
+4.56(36.40)
+
+Observing our GoogLeNet13 benchmark result in Fig. 5, we would expect
+that the framework provides a convergence speedup close to the throughput
+speedup reported in Table 3, if the convergence of parallel SGD closely ap-
+
+10 In terms of the amount of parameter-containing layers.
+11 In terms of the amount of ﬂoat32 parameters.
+12 This includes the parameters of the two auxiliary classiﬁers.
+13 The learning rate tuning policy of GoogLeNet used was:
+
+η = η0(1 − epoch ×
+
+number of minibatches
+max iterations
+
+)0.5.
+
+The learning rate tuning policy of AlexNet used was: scaling down by a factor of 10
+every 20 epochs.
+
+Theano-MPI: a Theano-based Distributed Training Framework
+
+11
+
+proximates that of sequential SGD. However, it is diﬃcult to give the exact
+convergence speedup provided by the framework, since diﬀerent settings of the
+hyper-parameters (learning rate tunning policy, weight decay, batch size, crop-
+ping randomness) leads to a diﬀerent convergence path and complicates com-
+parison.
+
+Besides the synchronous framework, we also explored reducing the commu-
+nication overhead in the asynchronous setting. Referencing the implementation
+of EASGD in Platoon, a Theano-based multi-GPU framework that exploits data
+parallelism, we re-implemented the framework based on the CUDA-aware MPI
+SendRecv() function without the Round-Robin scheme [25]. Our test shows,
+when training AlexNet on 8 GPUs, the asynchronous communication overhead
+in our framework is 42% lower than that in Platoon when worker processes com-
+municate with the server in the most frequent way (τ = 1). We also performed
+a grid search on the hyper-parameters α and τ to achieve better convergence
+when training AlexNet on eight distributed GPUs, each processing a batch size
+of 128. The best top-5 error we achieved from this framework was 21.12% at a
+global epoch of 49 when the moving rate was α = 0.5 and averaging period was
+τ = 1 with a data throughput speedup of 6.7×.
+
+5 Hardware and Software Environment
+
+The software was developed and tested on a PI-contributed SHARCNET cluster,
+named copper. As shown in Fig. 6, each node in the cluster is a dual socket system
+with two NVIDIA Tesla K80 GPUs on each socket. The whole cluster is inter-
+connected with Mellonox Inﬁniband FDR. We also tested on another cluster,
+mosaic, which features distributed GPUs across nodes connected by Inﬁniband
+QDR. Each node has one NVIDIA K20m GPU.
+
+Fig. 6. Hardware connection layout of a copper node
+
+For high-level access to MPI functionality, we use its Python binding mpi4py,
+compiled against OpenMPI 1.8.7. All models mentioned in this report are con-
+structed in Theano 0.8 and their implementation is available in our Github
+
+12
+
+He Ma, Fei Mao, and Graham W. Taylor
+
+project. Convolution and pooling operations in the computational graph depend
+on CUDA 7.0 and the cuDNN v4 library. We also support cudaconvnet as an
+alternative backend.
+
+6 Discussion
+
+We have attempted to scale up the training of deep learning models in an acces-
+sible way by developing a scalable training framework built around Theano. Key
+technical features of our framework are more eﬃcient interprocess communica-
+tion strategies and parallel data loading techniques. Factors aﬀecting the speedup
+of the framework can be associated with the model to be trained (i.e. architec-
+tural), the training data loading strategy, synchronization in the computational
+graph, implementation of GPU kernels, system memory and network bandwidth.
+Importantly, we try not to compromise the convergence of models trained un-
+der our framework since measured speedup is based on the time taken to reach
+a certain error rate. However, the convergence achieved by a parallel framework
+also depends on the tuning of that framework’s hyper-parameters. The conver-
+gence results in Table 1 can therefore be improved if better hyper-parameters
+are found. Factors aﬀecting model convergence include the number of worker
+processes, eﬀective batch size and corresponding learning rate, parameter aver-
+aging frequency τ 14, moving rate α in EASGD and the initialization of model
+parameters.
+
+The main contributions of our work include: providing multi-node and im-
+proved multi-GPU support to the Theano library based on MPI, eliminating
+substantial communication overhead, exposing convergence and speedup phe-
+nomena in parallel SGD, and an implementation of a more eﬃcient parallel
+loading method.
+
+Our eﬀort towards eliminating the communication overhead involves several
+aspects: leveraging CUDA-aware MPI for direct data transfer, separating data
+transfer and summation for more eﬃcient summation on GPUs, and exploring
+half precision data transfer for faster communication. Our benchmarking results
+show that our eﬀort on eliminating communication overhead works well on both
+the 1-GPU-per-node cluster, mosaic, and the 8-GPU-per-node cluster, copper.
+
+Note that the multi-node testing results in this report are obtained without
+GPUDirect RDMA support due to a limitation in the cluster conﬁguration.
+Also, the QPI bus topology of a copper node limits the usage of GPUDirect
+P2P technology. This is because the GPUDirect P2P requires all GPUs to be
+under the same PCIe switch. If a path traversing the QPI is needed, the data
+transfer would go through CPU RAM ﬁrst. As a result, further improvement
+of communication performance based on the current hardware setting would
+involve consideration of overlapping data transfer with the summation kernel,
+overlapping parameter exchange with gradient calculation, and designing better
+
+14 In BSP, we use τ = 1 since larger τ tends to aﬀect convergence in the same way as
+
+increasing batch size.
+
+Theano-MPI: a Theano-based Distributed Training Framework
+
+13
+
+inter-node and intra-node strategies that could balance the bandwidth usage
+among QPI, PCIe and Inﬁniband networking.
+
+References
+
+1. Abadi, M., Agarwal, A., Barham, P., Brevdo, E., Chen, Z., et al.: TensorFlow:
+Large-Scale Machine Learning on Heterogeneous Distributed Systems. ArXiv e-
+prints (Mar 2016)
+
+2. Chen, T., Li, M., Li, Y., Lin, M., Wang, N., et al.: Mxnet: A ﬂexible and ef-
+ﬁcient machine learning library for heterogeneous distributed systems. CoRR
+abs/1512.01274 (2015)
+
+3. Collobert, R., Kavukcuoglu, K., Farabet, C.: Torch7: A matlab-like environment
+
+for machine learning. In: BigLearn, NIPS Workshop (2011)
+
+4. Courbariaux, M., Bengio, Y., David, J.: Low precision arithmetic for deep learning.
+
+CoRR abs/1412.7024 (2014)
+
+5. Courbariaux, M., Bengio, Y.: Binarynet: Training deep neural networks with
+weights and activations constrained to+ 1 or-1. arXiv preprint arXiv:1602.02830
+(2016)
+
+6. Dean, J., Corrado, G., Monga, R., Chen, K., Devin, M., et al.: Large scale dis-
+tributed deep networks. In: Advances in Neural Information Processing Systems
+25, pp. 1232–1240 (2012)
+
+7. Ding, W., Wang, R., Mao, F., Taylor, G.W.: Theano-based large-scale visual recog-
+
+nition with multiple gpus. CoRR abs/1412.2302 (2014)
+
+8. Goodfellow, I.J., Warde-Farley, D., Mirza, M., Courville, A., Bengio, Y.: Maxout
+
+9. He, K., Zhang, X., Ren, S., Sun, J.: Deep residual learning for image recognition.
+
+Networks. ArXiv e-prints (Feb 2013)
+
+CoRR abs/1512.03385 (2015)
+
+10. Ho, Q., Cipar, J., Cui, H., Lee, S., Kim, J., et al.: More eﬀective distributed ml via
+a stale synchronous parallel parameter server. In: Advances in Neural Information
+Processing Systems 26, pp. 1223–1231. Curran Associates, Inc. (2013)
+
+11. Iandola, F.N., Ashraf, K., Moskewicz, M.W., Keutzer, K.: Firecaﬀe: near-
+linear acceleration of deep neural network training on compute clusters. CoRR
+abs/1511.00175 (2015)
+
+12. Jia, Y., Shelhamer, E., Donahue, J., Karayev, S., Long, J., et al.: Caﬀe: Convolu-
+
+tional architecture for fast feature embedding. CoRR abs/1408.5093 (2014)
+
+13. Karpathy, A., Toderici, G., Shetty, S., Leung, T., Sukthankar, R., et al.: Large-scale
+video classiﬁcation with convolutional neural networks. In: The IEEE Conference
+on Computer Vision and Pattern Recognition (CVPR) (June 2014)
+
+14. Koehn, P., Haddow, B.: Towards eﬀective use of training data in statistical ma-
+chine translation. In: Proceedings of the Seventh Workshop on Statistical Machine
+Translation. pp. 317–321. WMT ’12, Association for Computational Linguistics,
+Stroudsburg, PA, USA (2012)
+
+15. Krizhevsky, A.: One weird trick for parallelizing convolutional neural networks.
+
+CoRR abs/1404.5997 (2014)
+
+16. Krizhevsky, A., Sutskever, I., Hinton, G.E.: Imagenet classiﬁcation with deep con-
+volutional neural networks. In: Advances in Neural Information Processing Systems
+25, pp. 1097–1105. Curran Associates, Inc. (2012)
+
+17. Lin, M., Li, S., Luo, X., Yan, S.: Purine: A bi-graph based deep learning framework.
+
+CoRR abs/1412.6249 (2014)
+
+14
+
+He Ma, Fei Mao, and Graham W. Taylor
+
+18. Lin, T., Maire, M., Belongie, S., Hays, J., Perona, P., et al.: Computer Vision
+– ECCV 2014: 13th European Conference, Zurich, Switzerland, September 6-12,
+2014, Proceedings, Part V. Springer International Publishing, Cham (2014)
+19. Ma, H.: Developing a Scalable Deep Learning Framework Based on MPI. Master’s
+
+thesis, University of Guelph, Guelph, ON, CA (2015)
+
+20. Russakovsky, O., Deng, J., Su, H., Krause, J., Satheesh, S., et al.: Imagenet large
+scale visual recognition challenge. International Journal of Computer Vision 115(3),
+211–252 (2015)
+
+21. Simonyan, K., Zisserman, A.: Very deep convolutional networks for large-scale
+
+image recognition. CoRR abs/1409.1556 (2014)
+
+22. Szegedy, C., Liu, W., Jia, Y., Sermanet, P., Reed, S.E., et al.: Going deeper with
+
+convolutions. CoRR abs/1409.4842 (2014)
+
+23. Theano Development Team: Theano: A Python framework for fast computation of
+
+mathematical expressions. arXiv e-prints abs/1605.02688 (May 2016)
+
+24. Valiant, L.G.: A Bridging Model for parallel computation. Communications of the
+
+ACM 33(8), 103 (1990)
+
+25. Zhang, S., Choromanska, A.E., LeCun, Y.: Deep learning with elastic averaging
+sgd. In: Advances in Neural Information Processing Systems 28, pp. 685–693. Cur-
+ran Associates, Inc. (2015)
+
+Theano-MPI: a Theano-based Distributed
+Training Framework
+
+He Ma1, Fei Mao2, and Graham W. Taylor1
+
+1 School of Engineering, University of Guelph, CA {hma02,gwtaylor}@uoguelph.ca
+2 SHARCNET, Compute Canada, CA feimao@sharcnet.ca
+
+Abstract. We develop a scalable and extendable training framework
+that can utilize GPUs across nodes in a cluster and accelerate the train-
+ing of deep learning models based on data parallelism. Both synchronous
+and asynchronous training are implemented in our framework, where pa-
+rameter exchange among GPUs is based on CUDA-aware MPI. In this
+report, we analyze the convergence and capability of the framework to
+reduce training time when scaling the synchronous training of AlexNet
+and GoogLeNet from 2 GPUs to 8 GPUs. In addition, we explore novel
+ways to reduce the communication overhead caused by exchanging pa-
+rameters. Finally, we release the framework as open-source for further
+research on distributed deep learning3.
+
+1
+
+Introduction
+
+With the constant improvement of hardware and discovery of new architec-
+tures, algorithms, and applications, deep learning is gaining popularity in both
+academia and industry. Object recognition [20], is now dominated by deep learn-
+ing methods, which in many cases, rival human performance. Recent success in
+areas such as activity recognition from video [13] and statistical machine trans-
+lation [14] is an example of deep learning’s ascent both in performance and at
+scale.
+
+With the new generations of GPU cards and increased device memory, re-
+searchers are able to design and train models with more than 140 million param-
+eters (c.f. VGGNet [21]) and models that are as deep as 150 layers (c.f. ResNet
+[9]).
+
+The emergence of larger datasets, e.g. ImageNet [20] and MS-COCO [18],
+challenges artiﬁcial intelligence research and leads us to design deeper and more
+expressive models so that the complexity of models is suﬃcient for the task.
+
+Despite of the increased computing power of GPUs, it usually takes weeks
+to train such large models to desired accuracy on a single GPU. This is due to
+the increased time associated with training deeper models and iterating over the
+examples in larger datasets. This is where distributed training of deep learning
+models becomes crucial, especially for activities such as model search which may
+involve training and evaluating models thousands of times.
+
+3 https://github.com/uoguelph-mlrg/Theano-MPI
+
+6
+1
+0
+2
+ 
+y
+a
+M
+ 
+6
+2
+ 
+ 
+]
+
+G
+L
+.
+s
+c
+[
+ 
+ 
+1
+v
+5
+2
+3
+8
+0
+.
+5
+0
+6
+1
+:
+v
+i
+X
+r
+a
+
+2
+
+He Ma, Fei Mao, and Graham W. Taylor
+
+A na¨ıve approach to scaling up is running several copies of the same model in
+parallel on multiple computing resources (e.g. GPUs), each computing its share
+of the dataset and averaging their parameters at every iteration. This strategy is
+called data parallelism, and its eﬃcient implementation is the focus of our work.
+More sophisticated forms of distributed training, including model parallelism are
+important but outside the current scope of our framework.
+
+Theano [23] is an open-source Python library for developing complex algo-
+rithms via mathematical expressions. It is often used for facilitating machine
+learning research. Its support for automatic symbolic diﬀerentiation and GPU-
+accelerated computing has made it popular within the deep learning community.
+Like other deep learning platforms, including Cafe [12], Torch [3], TensorFlow
+[1] and MXNet [2], Theano uses CUDA as one of its main backends for GPU
+accelerated computation. Since a single GPU is limited by its device memory
+and available threads when solving compute-intensive problems, very recently re-
+searchers have started to build multi-GPU support into the most popular frame-
+works. This includes the multi-GPU version of Caﬀe (FireCaﬀe [11]), Torch and
+Theano (Platoon).
+
+Because the Theano environment usually compiles models for one GPU per
+process, we need to drive multiple GPUs using multiple processes. So ﬁnding a
+way to communicate between processes becomes a fundamental problem within
+a multi-GPU framework. There are several existing approaches of implementing
+inter-process communication besides manually programming on sockets, such
+as Signals, Message Queues, Message Passing, Pipes, Shared Memory, Memory
+Mapped Files, etc. However, among those approaches, Message Passing is most
+suitable for collective communication between multiple programs across a cluster
+because of its well-developed point-to-point and collective protocols. Message
+Passing Interface (MPI) is a language-independent communication protocol that
+can undertake the task of inter-process communication across machines. It is a
+standardized message-passing system designed for programming on large-scale
+parallel applications.
+
+Parameter transfer is a basic operation in the distributed training of deep
+learning models. Therefore, the transfer speed between processes severely im-
+pacts the overall data throughput speedup4. Since the parameters to be trans-
+ferred are computed on GPUs, a GPU-to-GPU transfer is required. Compared to
+the basic transfer() function in Theano, NVIDIA GPUDirect P2P technology
+makes this possible by transferring data between GPUs without passing through
+host memory. Speciﬁcally, it enables CUDA devices to perform direct read and
+write operations on other CUDA host and device memory. In the context of MPI,
+GPUDirect P2P technology allows a GPUArray memory buﬀer to be transferred
+in basic point-to-point and collective operations, making MPI “CUDA-Aware”.
+Leveraging CUDA-aware MPI, we have developed a scalable training frame-
+work that provides multi-node and multi-GPU support to Theano and eﬃcient
+inter-GPU parameter transfer at the same time. To the best of our knowledge,
+
+4 We deﬁne data throughput speedup as the change in total time taken to process a
+certain amount of examples. It includes both training and communication time.
+
+Theano-MPI: a Theano-based Distributed Training Framework
+
+3
+
+this is to-date the most convenient way to deploy Theano processes on a multi-
+node multi-GPU cluster.
+
+2 Related Work
+
+The idea of exploiting data parallelism in machine learning has been widely
+explored in recent years in both asynchronous and synchronous ways. To ac-
+celerate the training of a speech recognition model on distributed CPU cores,
+DownPour, an asynchronous parameter exchanging method [6], was proposed. It
+was the largest-scale method to-date for distributed training of neural networks.
+It was later found that controlling the maximum staleness of parameter updates
+received by the server leads to faster training convergence [10] on problems like
+topic modeling, matrix factorization and lasso regression compared to a purely
+asynchronous approach. For accelerating image classiﬁcation on the CIFAR and
+ImageNet datasets, an elastic averaging strategy between asynchronous workers
+and the server was later proposed [25]. This algorithm allows more exploration of
+local optima than DownPour and alleviates the need for frequent communication
+between workers and the server.
+
+Krizhevsky proposed his trick on parallelizing the training of AlexNet [16]
+on multiple GPUs in a synchronous way [15]. This work showed that eight GPU
+workers training on the same batch size of 128 can give up to 6.25× data through-
+put speedup and nearly the same convergence as trained on a single GPU when
+exploiting both model and data parallelism. Notably, the increase in eﬀective
+batch size5 leads to very small changes in the ﬁnal convergence of AlexNet when
+the learning rate is scaled properly. Following his work, a Theano-based two-
+GPU synchronous framework [7] for accelerating the training of AlexNet was
+proposed, where both weights and momentum are averaged between two GPUs
+after each iteration. The model converges to the same level as using a single
+GPU but in less time.
+
+There has been more development on the acceleration of vision-based deep
+learning in recent years. NVIDIA developed a multi-GPU deep learning frame-
+work, DIGITS, which shows 3.5× data throughput speedup when training AlexNet
+on 4 GPUs. Purine [17] pipelines the propagation of gradients between itera-
+tions and overlaps the communication of large weights in fully connected layers
+with the rest of back-propagation, giving near 12× data throughput speedup
+when training GoogLeNet [22] on 12 GPUs. Similarly, MXNet [2] also shows
+a super-linear data throughput speedup on training GoogLeNet under a dis-
+tributed training setting.
+
+The Platoon project is a multi-GPU extension for Theano, created and main-
+tained by the oﬃcial Theano team. It currently supports only asynchronous
+data parallelism inside one compute node based on posix_ipc shared memory.
+In comparison, our framework, Theano-MPI, is designed to support GPUs that
+are distributed over multiple nodes in a cluster, providing convenient process
+
+5 eﬀective batch size = batch size × number of workers
+
+4
+
+He Ma, Fei Mao, and Graham W. Taylor
+
+management and faster inter-GPU memory exchanging based on CUDA-aware
+MPI.
+
+3
+
+Implementation
+
+Our goal is to make the ﬁeld of distributed deep learning more accessible by
+developing a scalable training framework with two key components. First is
+Theano as a means of constructing an architecture and optimizing it by Stochas-
+tic Gradient Descent (SGD). Second is Massage Passing Interface (MPI) as an
+inter-process parameter exchanger. We also aim to explore various ways to re-
+duce communication overhead in parallel SGD and expose some phenomena
+that aﬀect convergence and speedup when training deep learning models in a
+distributed framework.
+
+3.1 The BSP Structure
+
+Bulk Synchronous Parallel (BSP) [24] is an intuitive way to implement paral-
+lel computing. In the BSP paradigm, workers proceed with training in a syn-
+chronous way. Figure 1a shows a 4 GPU example of the proposed BSP structure
+where the same model is built and run within four processes, P0, P1, P2, P3.
+Each process uses one CPU and one GPU. After the model’s training graph is
+compiled on the GPU, those parameters in the graph become arrays in GPU
+memory whose values can be retrieved from device to host and set from host to
+device. When training starts, the training dataset is split into four parts. In ev-
+ery iteration, each worker process takes a mini-batch of examples from its share
+and performs SGD on it. After that, all workers are synchronized and model
+parameters are exchanged between worker processes in a collective way.
+
+(a) non-CUDA-aware
+
+(b) CUDA-aware
+
+Fig. 1. A 4-GPU example of the BSP structure where arrows indicate communication
+for parameter exchange.
+
+Theano-MPI: a Theano-based Distributed Training Framework
+
+5
+
+3.2 CUDA-aware Parameter Exchanging
+
+Synchronous parameter exchange is an array reduction problem which consists
+of both data transfer and calculation. The GPUDirect P2P technology allows ex-
+changing parameters between GPUs without passing through host memory, mak-
+ing MPI functions “CUDA-aware”. Based on this, we explored various strategies
+trying to minimize the data transfer and calculation time, and make more eﬃ-
+cient use of QPI, PCIe and network card bandwidth during data transfer. The
+basic strategy is to use the MPI Allreduce() function. However, the CUDA-
+aware version of it in OpenMPI 1.8.7 does not give much improvement since
+any collective MPI function with arithmetic operations still needs to copy data
+to host memory. Functions like Alltoall() and Allgather() do not involve
+any arithmetic and therefore the CUDA-aware version of them (Fig. 1b) can
+avoid passing through host memory unless data transfer crossing the QPI bus
+is needed. We therefore implemented a CUDA-aware Alltoall-sum-Allgather
+strategy which separates the data transfer and computation. An example of this
+strategy is demonstrated in Fig. 2. Here, the summation kernels required for
+parameter exchange are executed in parallel on GPUs. Our test shows the GPU
+summation kernel takes only 1.6% of the total communication time.
+
+Fig. 2. An example demonstrating the reduction of arrays on rank 0 and rank 1 with
+the proposed Alltoall-sum-Allgather strategy compared to MPI Allreduce. Sub-arrays
+of data items (indicated by same-coloured boxes) need to be summed and the results
+exchanged with the other ranks.
+
+Using low precision data types for weights or activations (or both) in the
+forward pass during training of deep neural networks has received much recent
+interest [4,5]. It was shown that training Maxout [8] networks at 10 bits ﬁxed
+point precision can still yield near state-of-art test accuracy [4]. In light of this,
+we also implemented the transfer of parameters at half-precision while summing
+them at full precision, in order to further reduce communication overhead.
+
+Figure 3 shows the improvement of the combination of strategies over MPI
+Allreduce. The “ASA” strategy shows three times faster communication relative
+to MPI Allreduce and the half precision version of it gives nearly 6 times faster
+
+6
+
+He Ma, Fei Mao, and Graham W. Taylor
+
+performance. Those results are obtained on distributed GPUs on 8 nodes in a
+cluster. Each node hosts one GPU.
+
+Fig. 3. Computation (train) vs. relative communication overhead of diﬀerent parame-
+ter exchanging strategies during training AlexNet-128b (AR: Allreduce, ASA: CUDA-
+aware Alltoall-sum-Allgather).
+
+Due to the limitation imposed by the Global Interpreter Lock (GIL) in
+Python, overlapping the communication with the gradient calculation as in [17]
+has not yet been implemented in our framework. We expect this, if implemented,
+would substantially reduce the communication cost of exchanging large matrices
+in fully-connected layers.
+
+3.3 Parallel Loading
+
+For large-scale visual recognition applications such as ImageNet LSVRC, the
+data required for training is on the order of hundreds of Gigabytes. Therefore, it
+is diﬃcult to load all image data completely into memory after training starts.
+Instead, images are stored as batch ﬁles on local or remote disks and loaded
+one ﬁle at a time by each process. Loading image batches x from disk can be
+time consuming6. It is aﬀected by various factors, including ﬁle size, ﬁle format,
+disk I/O capability and network bandwidth if reading from remote disks. If in
+every iteration, the training process should wait for data loading to be ready in
+order to proceed, one can imagine the time cost by loading data will be critical
+to the total performance. One way to circumvent this, given the independence
+of loading and training, is to load those ﬁles in parallel with the forward and
+backward propagations on the last loaded batch. However, this assumes loading
+one batch of images takes shorter than one iteration of training the model.
+This auxiliary loading process should follow procedures in Alg. 1 to collaborate
+eﬃciently with its corresponding training process:
+
+6 Loading labels y, on the other hand, is much faster, therefore labels can be loaded
+
+completely into memory.
+
+Theano-MPI: a Theano-based Distributed Training Framework
+
+7
+
+Algorithm 1 The parallel loading process
+Require:
+
+Host memory allocated for loading image batch hostdatax.
+GPU memory allocated for preprocessed image batch gpudatax
+GPU memory allocated for the actual model graph input inputx,
+mode=None, recv=None, f ilename=None.
+Mean image image mean
+
+Receive the mode (train, validate or stop) from training process
+if recv=“stop” then
+
+mode ← recv
+
+else
+
+break
+
+Ensure:
+1: while True do
+2:
+3:
+4:
+5:
+6:
+7:
+8:
+9:
+10:
+11:
+12:
+13:
+
+to be loaded.
+
+Receive the ﬁrst ﬁlename to be loaded from training process f ilename ← recv
+while True do
+
+Load ﬁle “ ﬁlename” from disk into host memory hostdatax.
+hostdatax = hostdatax − image mean
+Crop and mirror hostdatax according to mode.
+Transfer hostdatax from host to GPU device memory gpudatax.
+Wait for training on the last inputx to ﬁnish by receiving the next ﬁlename
+
+14:
+15:
+16:
+17:
+18:
+19:
+20:
+
+if recv in [“stop”, “train”, “val”] then
+
+break
+
+else
+
+f ilename ← recv
+
+Transfer gpudatax to inputx.
+Synchronize GPU context.
+Notify training process to precede with the newly loaded inputx
+
+Diﬀerent from the multiprocessing and Queue messaging method in [7], we
+used the MPI Spawn function to start a child process from each training process
+and used the resulting MPI intra-communicator to pass messages between the
+training process and its child process. As shown in Algorithm 1, the parallel
+loading process can read image ﬁles, subtract the mean image, crop sub-images
+and ﬁnally load preprocessed data onto GPUs. By doing this, we are able to
+overlap the most compute-intensive part (Step 10 to 13 in Algorithm 1) with
+forward and backward graph propagation in the training process.
+
+4 Benchmarking
+
+Exchanging parameters is a necessary aspect of parallel SGD, however, it can be
+achieved in a variety of diﬀerent ways. Parameters updated during SGD include
+weights (and biases), momentum (if using momentum SGD) and raw gradients.
+Averaging weights after gradient descent (AWAGD) [15,7] is a straightforward
+parallel SGD scheme. We have proved [19] that training a perceptron using this
+
+8
+
+He Ma, Fei Mao, and Graham W. Taylor
+
+scheme on multiple GPUs can either be equivalent to or a close approximate
+of sequential SGD training on a single GPU depending on whether or not ef-
+fective batch size is kept constant. In this scheme, the learning rate is scaled
+with the number of GPUs used [15], namely k. It can also be shown that this
+scheme is equivalent to summing up the parameter updates from all GPUs before
+performing gradient descent (SUBGD), which does not require scaling up the
+learning rate. However, our experiments show that tuning the learning rate is
+still dependent on k to ensure initial convergence of the model. Table 1 lists the
+learning rates we used and the convergence we achieved in training AlexNet7
+and GoogLeNet8 at diﬀerent scales (number of workers).
+
+Recent work has applied low precision to weights and activations during train-
+ing [4]. In the extreme, binary data types have been considered [5]. This enables
+eﬃcient operation of the low-precision network both at deployment (test time)
+and during the forward propagation stage during training. However, gradients
+used for parameter updates must still be stored at high-precision or learning
+will fail. Related to this, we see a drop in accuracy due to reduced-precision
+parameter exchange. The validation top-5 error of the “8GPU-32b” AlexNet in
+Table 1 increased from 19.9% to 20.3% and that of the “8GPU” GoogLeNet in-
+creased from 10.65% to 11.7%. Parameter exchange is an important part of the
+update stage in a distributed training framework. Therefore, there is a necessary
+accuracy-speed tradeoﬀ to consider when adopting a low-precision strategy.
+
+Table 1. Trade-oﬀ between accuracy and speedup under diﬀerent hyper parameter
+settings in training AlexNet and GoogLeNet based on the ASA strategy. The learning
+rate reported was the best one found empirically for the particular setting (HP: hyper-
+parameters, LR: learning rate, BS: batch size).
+
+# of
+workers
+
+AlexNet
+
+GoogLeNet
+
+HP
+
+Result
+
+HP
+
+Result
+
+LR BS Accuracy Speedup LR BS Accuracy Speedup
+
+0.01 128
+1GPU
+0.01 128
+2GPU
+4GPU
+0.01 128
+8GPU 0.005 128
+8GPU 0.005 32
+8GPU-fp16 0.005 32
+
+19.8%
+19.8%
+20.4%
+20.7%
+19.9%
+20.3%
+
+1×
+1×
+0.01 32 10.07%*
+1.7× 0.007 32 10.20% 1.9×
+3.4× 0.005 32 10.48% 3.7×
+6.7× 0.005 32 10.65% 7.2×
+4.9×
+5.7× 0.005 32 11.75% 7.3×
+
+-
+
+7 Top-5 error at epoch 62. The implementation is based on theano alexnet from
+
+uoguelph-mlrg. https://github.com/uoguelph-mlrg/theano_alexnet.
+
+8 Top-5 error at epoch 70. BVLC GoogLeNet implementation in Caﬀe is referenced in
+building the model. https://github.com/BVLC/caffe/tree/master/models/bvlc_
+googlenet. * At the time of submission, the GoogLeNet 1GPU test is still ongoing.
+The top-5 error is taken from [22].
+
+Theano-MPI: a Theano-based Distributed Training Framework
+
+9
+
+Figures 4 and 5 show the convergence of two models trained with SUBGD
+and the Alltoall-sum-Allgather strategy, in which AlexNet is trained on 1,
+2, 4 and 8 GPUs with momentum SGD and 128 batch size on each GPU9.
+Similarly, GoogLeNet is trained on 2, 4 and 8 GPUs with a batch size of 32.
+We see that as more workers are used, the eﬀective batch size becomes too large
+and the approximation from parallel SGD to sequential SGD becomes worse.
+As shown in Table 1, one way to preserve convergence at such a large-scale is
+to reduce the batch size on each worker so that the eﬀective batch size stays
+small. This gives the model more potential to explore further at low learning
+rates, though the accuracy improvement at the beginning is slow. However, using
+smaller batch sizes means more frequent parameter exchanges between workers,
+which demands attention toward further reducing the communication overhead.
+
+Fig. 4. Validation top-5 error of AlexNet trained at diﬀerent scales (and batch sizes).
+Best viewed in colour.
+
+Fig. 5. Validation top-5 error of GoogLeNet trained at diﬀerent scales. Best viewed in
+colour.
+
+The speedup of training AlexNet and GoogLeNet are evaluated on 8 dis-
+tributed GPU nodes (1 GPU per node). To show the performance of accelerating
+
+9 Tested on the ILSVRC14 dataset [20].
+
+10
+
+He Ma, Fei Mao, and Graham W. Taylor
+
+larger models, we build VGGNet and test its scaling performance on 8 GPUs in
+a single node with shared memory. This setup meets the memory requirements
+of VGGNet. Table 2 gives an overview of the structural diﬀerence between those
+three models. Table 3 reports the training and communication time taken to
+process 5,120 images across diﬀerent models. We see that these three models
+scale diﬀerently in the framework due to diﬀerences in the complexity of their
+operations as well as the number of free parameters. CUDA-aware parameter ex-
+changing helps boost the speedup of the framework, especially when the number
+of parameters is relatively large.
+
+Table 2. Structural comparison between the three architectures which were imple-
+mented for benchmarking.
+
+Model
+
+Depth 10 # of parameters11
+
+AlexNet
+GoogLeNet
+VGGNet
+
+8
+22
+19
+
+60,965,224
+13,378,28012
+138,357,544
+
+Table 3. Communication overhead per 5,120 images (s) / speedup on 8 GPUs for
+diﬀerent models (AR: Allreduce, ASA: CUDA-aware Alltoall-sum-Allgather, ASA16:
+CUDA-aware Alltoall-sum-Allgather w/ ﬂoat16).
+
+Model
+
+Train(1GPU)
+
+AR
+
+ASA
+
+ASA16
+
+2.01/5.3× 0.75/6.7× 0.47/7.1×
+AlexNet-128b
+AlexNet-32b
+8.03/2.9× 2.94/4.9× 1.83/5.7×
+GoogLeNet-32b 16.82(134.9) 2.07/7.1× 1.96/7.2× 1.76/7.3×
+51.79(405.2) 41.41/4.3× 8.60/6.7× 4.84/7.2×
+VGGNet-32b
+
+3.90(31.2)
+4.56(36.40)
+
+Observing our GoogLeNet13 benchmark result in Fig. 5, we would expect
+that the framework provides a convergence speedup close to the throughput
+speedup reported in Table 3, if the convergence of parallel SGD closely ap-
+
+10 In terms of the amount of parameter-containing layers.
+11 In terms of the amount of ﬂoat32 parameters.
+12 This includes the parameters of the two auxiliary classiﬁers.
+13 The learning rate tuning policy of GoogLeNet used was:
+
+η = η0(1 − epoch ×
+
+number of minibatches
+max iterations
+
+)0.5.
+
+The learning rate tuning policy of AlexNet used was: scaling down by a factor of 10
+every 20 epochs.
+
+Theano-MPI: a Theano-based Distributed Training Framework
+
+11
+
+proximates that of sequential SGD. However, it is diﬃcult to give the exact
+convergence speedup provided by the framework, since diﬀerent settings of the
+hyper-parameters (learning rate tunning policy, weight decay, batch size, crop-
+ping randomness) leads to a diﬀerent convergence path and complicates com-
+parison.
+
+Besides the synchronous framework, we also explored reducing the commu-
+nication overhead in the asynchronous setting. Referencing the implementation
+of EASGD in Platoon, a Theano-based multi-GPU framework that exploits data
+parallelism, we re-implemented the framework based on the CUDA-aware MPI
+SendRecv() function without the Round-Robin scheme [25]. Our test shows,
+when training AlexNet on 8 GPUs, the asynchronous communication overhead
+in our framework is 42% lower than that in Platoon when worker processes com-
+municate with the server in the most frequent way (τ = 1). We also performed
+a grid search on the hyper-parameters α and τ to achieve better convergence
+when training AlexNet on eight distributed GPUs, each processing a batch size
+of 128. The best top-5 error we achieved from this framework was 21.12% at a
+global epoch of 49 when the moving rate was α = 0.5 and averaging period was
+τ = 1 with a data throughput speedup of 6.7×.
+
+5 Hardware and Software Environment
+
+The software was developed and tested on a PI-contributed SHARCNET cluster,
+named copper. As shown in Fig. 6, each node in the cluster is a dual socket system
+with two NVIDIA Tesla K80 GPUs on each socket. The whole cluster is inter-
+connected with Mellonox Inﬁniband FDR. We also tested on another cluster,
+mosaic, which features distributed GPUs across nodes connected by Inﬁniband
+QDR. Each node has one NVIDIA K20m GPU.
+
+Fig. 6. Hardware connection layout of a copper node
+
+For high-level access to MPI functionality, we use its Python binding mpi4py,
+compiled against OpenMPI 1.8.7. All models mentioned in this report are con-
+structed in Theano 0.8 and their implementation is available in our Github
+
+12
+
+He Ma, Fei Mao, and Graham W. Taylor
+
+project. Convolution and pooling operations in the computational graph depend
+on CUDA 7.0 and the cuDNN v4 library. We also support cudaconvnet as an
+alternative backend.
+
+6 Discussion
+
+We have attempted to scale up the training of deep learning models in an acces-
+sible way by developing a scalable training framework built around Theano. Key
+technical features of our framework are more eﬃcient interprocess communica-
+tion strategies and parallel data loading techniques. Factors aﬀecting the speedup
+of the framework can be associated with the model to be trained (i.e. architec-
+tural), the training data loading strategy, synchronization in the computational
+graph, implementation of GPU kernels, system memory and network bandwidth.
+Importantly, we try not to compromise the convergence of models trained un-
+der our framework since measured speedup is based on the time taken to reach
+a certain error rate. However, the convergence achieved by a parallel framework
+also depends on the tuning of that framework’s hyper-parameters. The conver-
+gence results in Table 1 can therefore be improved if better hyper-parameters
+are found. Factors aﬀecting model convergence include the number of worker
+processes, eﬀective batch size and corresponding learning rate, parameter aver-
+aging frequency τ 14, moving rate α in EASGD and the initialization of model
+parameters.
+
+The main contributions of our work include: providing multi-node and im-
+proved multi-GPU support to the Theano library based on MPI, eliminating
+substantial communication overhead, exposing convergence and speedup phe-
+nomena in parallel SGD, and an implementation of a more eﬃcient parallel
+loading method.
+
+Our eﬀort towards eliminating the communication overhead involves several
+aspects: leveraging CUDA-aware MPI for direct data transfer, separating data
+transfer and summation for more eﬃcient summation on GPUs, and exploring
+half precision data transfer for faster communication. Our benchmarking results
+show that our eﬀort on eliminating communication overhead works well on both
+the 1-GPU-per-node cluster, mosaic, and the 8-GPU-per-node cluster, copper.
+
+Note that the multi-node testing results in this report are obtained without
+GPUDirect RDMA support due to a limitation in the cluster conﬁguration.
+Also, the QPI bus topology of a copper node limits the usage of GPUDirect
+P2P technology. This is because the GPUDirect P2P requires all GPUs to be
+under the same PCIe switch. If a path traversing the QPI is needed, the data
+transfer would go through CPU RAM ﬁrst. As a result, further improvement
+of communication performance based on the current hardware setting would
+involve consideration of overlapping data transfer with the summation kernel,
+overlapping parameter exchange with gradient calculation, and designing better
+
+14 In BSP, we use τ = 1 since larger τ tends to aﬀect convergence in the same way as
+
+increasing batch size.
+
+Theano-MPI: a Theano-based Distributed Training Framework
+
+13
+
+inter-node and intra-node strategies that could balance the bandwidth usage
+among QPI, PCIe and Inﬁniband networking.
+
+References
+
+1. Abadi, M., Agarwal, A., Barham, P., Brevdo, E., Chen, Z., et al.: TensorFlow:
+Large-Scale Machine Learning on Heterogeneous Distributed Systems. ArXiv e-
+prints (Mar 2016)
+
+2. Chen, T., Li, M., Li, Y., Lin, M., Wang, N., et al.: Mxnet: A ﬂexible and ef-
+ﬁcient machine learning library for heterogeneous distributed systems. CoRR
+abs/1512.01274 (2015)
+
+3. Collobert, R., Kavukcuoglu, K., Farabet, C.: Torch7: A matlab-like environment
+
+for machine learning. In: BigLearn, NIPS Workshop (2011)
+
+4. Courbariaux, M., Bengio, Y., David, J.: Low precision arithmetic for deep learning.
+
+CoRR abs/1412.7024 (2014)
+
+5. Courbariaux, M., Bengio, Y.: Binarynet: Training deep neural networks with
+weights and activations constrained to+ 1 or-1. arXiv preprint arXiv:1602.02830
+(2016)
+
+6. Dean, J., Corrado, G., Monga, R., Chen, K., Devin, M., et al.: Large scale dis-
+tributed deep networks. In: Advances in Neural Information Processing Systems
+25, pp. 1232–1240 (2012)
+
+7. Ding, W., Wang, R., Mao, F., Taylor, G.W.: Theano-based large-scale visual recog-
+
+nition with multiple gpus. CoRR abs/1412.2302 (2014)
+
+8. Goodfellow, I.J., Warde-Farley, D., Mirza, M., Courville, A., Bengio, Y.: Maxout
+
+9. He, K., Zhang, X., Ren, S., Sun, J.: Deep residual learning for image recognition.
+
+Networks. ArXiv e-prints (Feb 2013)
+
+CoRR abs/1512.03385 (2015)
+
+10. Ho, Q., Cipar, J., Cui, H., Lee, S., Kim, J., et al.: More eﬀective distributed ml via
+a stale synchronous parallel parameter server. In: Advances in Neural Information
+Processing Systems 26, pp. 1223–1231. Curran Associates, Inc. (2013)
+
+11. Iandola, F.N., Ashraf, K., Moskewicz, M.W., Keutzer, K.: Firecaﬀe: near-
+linear acceleration of deep neural network training on compute clusters. CoRR
+abs/1511.00175 (2015)
+
+12. Jia, Y., Shelhamer, E., Donahue, J., Karayev, S., Long, J., et al.: Caﬀe: Convolu-
+
+tional architecture for fast feature embedding. CoRR abs/1408.5093 (2014)
+
+13. Karpathy, A., Toderici, G., Shetty, S., Leung, T., Sukthankar, R., et al.: Large-scale
+video classiﬁcation with convolutional neural networks. In: The IEEE Conference
+on Computer Vision and Pattern Recognition (CVPR) (June 2014)
+
+14. Koehn, P., Haddow, B.: Towards eﬀective use of training data in statistical ma-
+chine translation. In: Proceedings of the Seventh Workshop on Statistical Machine
+Translation. pp. 317–321. WMT ’12, Association for Computational Linguistics,
+Stroudsburg, PA, USA (2012)
+
+15. Krizhevsky, A.: One weird trick for parallelizing convolutional neural networks.
+
+CoRR abs/1404.5997 (2014)
+
+16. Krizhevsky, A., Sutskever, I., Hinton, G.E.: Imagenet classiﬁcation with deep con-
+volutional neural networks. In: Advances in Neural Information Processing Systems
+25, pp. 1097–1105. Curran Associates, Inc. (2012)
+
+17. Lin, M., Li, S., Luo, X., Yan, S.: Purine: A bi-graph based deep learning framework.
+
+CoRR abs/1412.6249 (2014)
+
+14
+
+He Ma, Fei Mao, and Graham W. Taylor
+
+18. Lin, T., Maire, M., Belongie, S., Hays, J., Perona, P., et al.: Computer Vision
+– ECCV 2014: 13th European Conference, Zurich, Switzerland, September 6-12,
+2014, Proceedings, Part V. Springer International Publishing, Cham (2014)
+19. Ma, H.: Developing a Scalable Deep Learning Framework Based on MPI. Master’s
+
+thesis, University of Guelph, Guelph, ON, CA (2015)
+
+20. Russakovsky, O., Deng, J., Su, H., Krause, J., Satheesh, S., et al.: Imagenet large
+scale visual recognition challenge. International Journal of Computer Vision 115(3),
+211–252 (2015)
+
+21. Simonyan, K., Zisserman, A.: Very deep convolutional networks for large-scale
+
+image recognition. CoRR abs/1409.1556 (2014)
+
+22. Szegedy, C., Liu, W., Jia, Y., Sermanet, P., Reed, S.E., et al.: Going deeper with
+
+convolutions. CoRR abs/1409.4842 (2014)
+
+23. Theano Development Team: Theano: A Python framework for fast computation of
+
+mathematical expressions. arXiv e-prints abs/1605.02688 (May 2016)
+
+24. Valiant, L.G.: A Bridging Model for parallel computation. Communications of the
+
+ACM 33(8), 103 (1990)
+
+25. Zhang, S., Choromanska, A.E., LeCun, Y.: Deep learning with elastic averaging
+sgd. In: Advances in Neural Information Processing Systems 28, pp. 685–693. Cur-
+ran Associates, Inc. (2015)
+

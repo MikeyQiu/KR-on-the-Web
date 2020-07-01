@@ -1,0 +1,1442 @@
+8
+1
+0
+2
+ 
+t
+c
+O
+ 
+2
+2
+ 
+ 
+]
+
+V
+C
+.
+s
+c
+[
+ 
+ 
+1
+v
+1
+8
+3
+9
+0
+.
+0
+1
+8
+1
+:
+v
+i
+X
+r
+a
+
+Unsupervised Learning of Shape and Pose
+with Differentiable Point Clouds
+
+Eldar Insafutdinov∗
+Max Planck Institute for Informatics
+eldar@mpi-inf.mpg.de
+
+Alexey Dosovitskiy
+Intel Labs
+adosovitskiy@gmail.com
+
+Abstract
+
+We address the problem of learning accurate 3D shape and camera pose from a
+collection of unlabeled category-speciﬁc images. We train a convolutional network
+to predict both the shape and the pose from a single image by minimizing the
+reprojection error: given several views of an object, the projections of the predicted
+shapes to the predicted camera poses should match the provided views. To deal
+with pose ambiguity, we introduce an ensemble of pose predictors which we then
+distill to a single “student” model. To allow for efﬁcient learning of high-ﬁdelity
+shapes, we represent the shapes by point clouds and devise a formulation allowing
+for differentiable projection of these. Our experiments show that the distilled
+ensemble of pose predictors learns to estimate the pose accurately, while the point
+cloud representation allows to predict detailed shape models.
+
+1
+
+Introduction
+
+We live in a three-dimensional world, and a proper understanding of its volumetric structure is
+crucial for acting and planning. However, we perceive the world mainly via its two-dimensional
+projections. Based on these projections, we are able to infer the three-dimensional shapes and poses
+of the surrounding objects. How does this volumetric shape perception emerge from observing only
+from two-dimensional projections? Is it possible to design learning systems with similar capabilities?
+
+Deep learning methods have recently shown promise in addressing these questions [25, 20]. Given
+a set of views of an object and the corresponding camera poses, these methods learn 3D shape via
+the reprojection error: given an estimated shape, one can project it to the known camera views and
+compare to the provided images. The discrepancy between these generated projections and the
+training samples provides training signal for improving the shape estimate. Existing methods of this
+type have two general restrictions. First, these approaches assume that the camera poses are known
+precisely for all provided images. This is a practically and biologically unrealistic assumption: a
+typical intelligent agent only has access to its observations, not its precise location relative to objects
+in the world. Second, the shape is predicted as a low-resolution (usually 323 voxels) voxelated
+volume. This representation can only describe very rough shape of an object. It should be possible to
+learn ﬁner shape details from 2D supervision.
+
+In this paper, we learn high-ﬁdelity shape models solely from their projections, without ground
+truth camera poses. This setup is challenging for two reasons. First, estimating both shape and
+pose is a chicken-and-egg problem: without a good shape estimate it is impossible to learn accurate
+pose because the projections would be uninformative, and vice versa, an accurate pose estimate is
+necessary to learn the shape. Second, pose estimation is prone to local minima caused by ambiguity:
+an object may look similar from two viewpoints, and if the network converges to predicting only one
+of these in all cases, it will not be able to learn predicting the other one. We ﬁnd that the ﬁrst problem
+can be solved surprisingly well by joint optimization of shape and pose predictors: in practice, good
+
+∗Work done while interning at Intel.
+
+32nd Conference on Neural Information Processing Systems (NIPS 2018), Montréal, Canada.
+
+shape estimates can be learned even with relatively noisy pose predictions. The second problem,
+however, leads to drastic errors in pose estimation. To address this, we train a diverse ensemble of
+pose predictors and distill those to a single student model.
+
+To allow learning of high-ﬁdelity shapes, we use the point cloud representation, in contrast with
+voxels used in previous works. Point clouds allow for computationally efﬁcient processing, can
+produce high-quality shape models [6], and are conceptually attractive because they can be seen as
+“matter-centric”, as opposed to “space-centric” voxel grids. To enable learning point clouds without
+explicit 3D supervision, we implement a differentiable projection operator that, given a point set and
+a camera pose, generates a 2D projection – a silhouette, a color image, or a depth map. We dub the
+formulation “Differentiable Point Clouds”.
+
+We evaluate the proposed approach on the task of estimating the shape and the camera pose from a
+single image of an object. The method successfully learns to predict both the shape and the pose,
+with only a minor performance drop relative to a model trained with ground truth camera poses.
+The point-cloud-based formulation allows for effective learning of high-ﬁdelity shape models when
+provided with images of sufﬁciently high resolution as supervision. We demonstrate learning point
+clouds from silhouettes and augmenting those with color if color images are available during training.
+Finally, we show how the point cloud representation allows to automatically discover semantic
+correspondences between objects.
+
+2 Related Work
+
+Reconstruction of three-dimensional shapes from their two-dimensional projections has a long history
+in computer vision, constituting the ﬁeld of 3D reconstruction. A review of this ﬁeld goes outside of
+the scope of this paper; however, we brieﬂy list several related methods. Cashman and Fitzgibbon
+[2] use silhouettes and keypoint annotation to reconstruct deformable shape models from small
+class-speciﬁc image collections, Vicente et al. [22] apply similar methods to a large-scale Pascal VOC
+dataset, Tulsiani et al. [18] reduce required supervision by leveraging computer vision techniques.
+These methods show impressive results even in the small data regime; however, they have difﬁculties
+with representing diverse and complex shapes. Loper and Black [12] implement a differentiable
+renderer and apply it for analysis-by-synthesis. Our work is similar in spirit, but operates on point
+clouds and integrates the idea of differentiable rendering with deep learning. The approach of Rhodin
+et al. [14] is similar to our technically in that it models human body with a set of Gaussian density
+functions and renders them using a physics-motivated equation for light transport. Unlike in our
+approach, the representation is not integrated into the learning framework and requires careful initial
+placement of the Gaussians, making it unsuitable for automated reconstruction of arbitrary shape
+categories. Moreover, the projection method scales quadratically with the number of Gaussians,
+which limits the maximum ﬁdelity of the shapes being represented.
+
+Recently the task of learning 3D structure from 2D supervision is being addressed with deep-learning-
+based methods. The methods are typically based on reprojection error – comparing 2D projections
+of a predicted 3D shape to the ground truth 2D projections. Yan et al. [25] learn 3D shape from
+silhouettes, via a projection operation based on selecting the maximum occupancy value along a
+ray. Tulsiani et al. [20] devise a differentiable formulation based on ray collision probabilities and
+apply it to learning from silhouettes, depth maps, color images, and semantic segmentation maps. Lin
+et al. [11] represent point clouds by depth maps and re-project them using a high resolution grid and
+inverse depth max-pooling. Concurrently with us, Kato et al. [8] propose a differentiable renderer
+for meshes and use it for learning mesh-based representations of object shapes. All these methods
+require exact ground truth camera pose corresponding to the 2D projections used for training. In
+contrast, we aim to relax this unrealistic assumption and learn only from the projections.
+
+Rezende et al. [13] explore several approaches to generative modeling of 3D shapes based on their
+2D views. One of the approaches does not require the knowledge of ground truth camera pose;
+however, it is only demonstrated on a simple dataset of textured geometric primitives. Most related to
+our submission is the concurrent work of Tulsiani et al. [21]. The work extends the Differentiable
+Ray Consistency formulation [20] to learning without pose supervision. The method is voxel-based
+and deals with the complications of unsupervised pose learning using reinforcement learning and
+a GAN-based prior. In contrast, we make use of a point cloud representation, use an ensemble to
+predict the pose, and do not require a prior on the camera poses.
+
+2
+
+Figure 1: Learning to predict the shape and the camera pose. Given two views of the same object,
+we predict the corresponding shape (represented as a point cloud) and the camera pose. Then we
+use a differentiable projection module to generate the view of the predicted shape from the predicted
+camera pose. Dissimilarity between this synthesized projection and the ground truth view serves as
+the training signal.
+
+The issue of representation is central to deep learning with volumetric data. The most commonly
+used structure is a voxel grid - a direct 3D counterpart of a 2D pixelated image [5, 23]. This similarity
+allows for simple transfer of convolutional network architectures from 2D to 3D. However, on the
+downside, the voxel grid representation leads to memory- and computation-hungry architectures. This
+motivates the search for alternative options. Existing solutions include octrees [17], meshes [8, 26],
+part-based representations [19, 10], multi-view depth maps [15], object skeletons [24], and point
+clouds [6, 11]. We choose to use point clouds in this work, since they are less overcomplete than
+voxel grids and allow for effective networks architectures, but at the same time are more ﬂexible than
+mesh-based or skeleton-based representations.
+
+3 Single-view Shape and Pose Estimation
+
+We address the task of predicting the three-dimensional shape of an object and the camera pose from
+a single view of the object. Assume we are given a dataset D of views of K objects, with mi views
+(cid:11)
+available for the i-th object: D =
+j – the
+}
+projection of some modality (silhouette, depth map of a color image) from the same view. Each view
+may be accompanied with the corresponding camera pose ci
+j, but the more interesting case is when
+the camera poses are not known. We focus on this more difﬁcult scenario in the remainder of this
+section.
+
+j denotes a color image and pi
+
+mi
+j=1. Here xi
+
+K
+i=1{
+
+j, pi
+j
+
+(cid:10)xi
+
+∪
+
+An overview of the model is shown in Figure 1. Assume we are given two images x1 and x2 of the
+same object. We use parametric function approximators to predict a 3D shape (represented by a point
+cloud) from one of them ˆP1 = FP (x1, θP ), and the camera pose from the other one: ˆc2 = Fc(x2, θc).
+In our case, FP and Fc are convolutional networks that share most of their parameters. Both the
+shape and the pose are predicted as ﬁxed-length vectors using fully connected layers.
+Given the predictions, we render the predicted shape from the predicted view: ˆp1,2 = π( ˆP1, ˆc2),
+where π denotes the differentiable point cloud renderer described in Section 4. The loss function is
+then the discrepancy between this predicted projection and the ground truth. We use standard MSE in
+this work both for all modalities, summed over the whole dataset:
+
+(θP , θc) =
+
+L
+
+N
+(cid:88)
+
+mi(cid:88)
+
+i=1
+
+j1,j2=1
+
+(cid:13)
+(cid:13)ˆpi
+
+j1,j2 −
+
+pi
+j2
+
+(cid:13)
+2
+(cid:13)
+
+.
+
+(1)
+
+Intuitively, this training procedure requires that for all pairs of views of the same object, the renderings
+of the predicted point cloud match the provided ground truth views.
+
+Estimating pose with a distilled ensemble. We found that the basic implementation described
+above fails to predict accurate poses. This is caused by local minima: the pose predictor converges to
+either estimating all objects as viewed from the back, or all viewed from the front. Indeed, based on
+silhouettes, it is difﬁcult to distinguish between certain views even for a human, see Figure 2 (a).
+
+3
+
+(a) Pose ambiguity
+
+(b) Training an ensemble of pose regressors
+
+Figure 2: (a) Pose ambiguity: segmentation masks, which we use for supervision, look very similar
+from different camera views. (b) The proposed ensemble of pose regressors designed to resolve this
+K
+ck
+ambiguity. The network predicts a diverse set
+k=1 of pose candidates, each of which is used to
+}
+{
+compute a projection of the predicted point cloud P . The weight update (backward pass shown in
+dashed red) is only performed for the pose candidate yielding the projection that best matches the
+ground truth.
+
+To alleviate this issue, instead of a single pose regressor Fc(
+pose regressors F k
+c (
+
+c ) (see Figure 2 (b)) and train the system with the “hindsight” loss [7, 4]:
+
+, θc), we introduce an ensemble of K
+·
+
+, θk
+·
+
+h(θP , θ1
+
+c , . . . , θK
+
+c ) = min
+
+(θP , θk
+
+c ).
+
+k∈[1,K] L
+
+L
+
+(2)
+
+The idea is that each of the predictors learns to specialize on a subset of poses and together they cover
+the whole range of possible values. No special measures are needed to ensure this specialization: it
+emerges naturally as a result of random weight initialization if the network architecture is appropriate.
+Namely, the different pose predictors need to have several (at least 3, in our experience) non-shared
+layers.
+
+In parallel with training the ensemble, we distill it to a single regressor by using the best model from
+the ensemble as the teacher. This best model is selected based on the loss, as in Eq. (2). At test
+time we discard the ensemble and use the distilled regressor to estimate the camera pose. The loss
+for training the student is computed as an angular difference between two rotations represented by
+(cid:13)
+2 / (cid:13)
+quaternions: L(q1, q2) = 1
+(cid:13)), where Re denotes the real part of the quaternion.
+We found that standard MSE loss performs poorly when regressing rotation.
+
+Re(q1q−1
+
+(cid:13)q1q−1
+2
+
+−
+
+Network architecture. We implement the shape and pose predictor with a convolutional network
+with two branches. The network starts with a convolutional encoder with a total of 7 layers, 4 of
+which have stride 2. These are followed by 2 shared fully connected layers, after which the network
+splits into two branches for shape and pose prediction. The shape branch is an MLP with one hidden
+layer. The point cloud of N points is predicted as a vector with dimensionality 3N (point positions)
+or 6N (positions and RGB values). The pose branch is an MLP with one shared hidden layer and
+two more hidden layers for each of the pose predictors. The camera pose is predicted as a quaternion.
+In the ensemble model we use K = 4 pose predictors. The “student” model is another branch with
+the same architecture.
+
+4 Differentiable Point Clouds
+
+A key component of our model is the differentiable point cloud renderer π. Given a point cloud P
+and a camera pose c, it generates a view p = π(P, c). The point cloud may have a signal, such as
+color, associated with it, in which case the signal can be projected to the view.
+
+The high-level idea of the method is to smooth the point cloud by representing the points with
+N
+density functions. Formally, we assume the point cloud is a set of N tuples P =
+i=1,
+each including the point position xi = (xi,1, xi,2, xi,3), the size parameter si, and the associated
+signal yi (for instance, an RGB color). In most of our experiments the size parameter is a two-
+dimensional vector including the covariance of an isotropic Gaussian and a scaling factor. However,
+in general si can represent an arbitrary parametric distribution: for instance, in the supplement we
+show experiments with Gaussians with a full covariance matrix. The size parameters can be either
+speciﬁed manually or learned jointly with the point positions.
+
+xi, si, yi
+
+{(cid:104)
+
+(cid:105)}
+
+4
+
+Figure 3: Differentiable rendering of a point cloud. We show 2D-to-1D projection for illustration
+purposes, but in practice we perform 3D-to-2D projection. The points are transformed according to
+the camera parameters, smoothed, and discretized. We perform occlusion reasoning via a form of ray
+tracing, and ﬁnally project the result orthogonally.
+
+The overall differentiable rendering pipeline is illustrated in Figure 3. For illustration purposes we
+show 2D-to-1D projection in the ﬁgure, but in practice we perform 3D-to-2D projection. We start by
+transforming the positions of points to the standard coordinate frame by the projective transformation
+Tc corresponding to the camera pose c of interest: x(cid:48)
+i = Tcxi. The transform Tc accounts for both
+extrinsic and intrinsic camera parameters. We also compute the transformed size parameters s(cid:48) (the
+exact transformation rule depends on the distribution used). We set up the camera transformation
+matrix such that after the transform, the projection amounts to orthogonal projection along the third
+axis.
+
+To allow for the gradient ﬂow, we represent each point
+). In this
+·
+work we set fi to scaled Gaussian densities. The occupancy function of the point cloud is a clipped
+sum of the individual per-point functions:
+
+by a smooth function fi(
+
+xi, si
+(cid:104)
+
+(cid:105)
+
+o(x) = clip(
+
+fi(x), [0, 1]),
+
+fi(x) = ci exp
+
+(cid:18)
+
+1
+2
+
+−
+
+(x
+
+−
+
+i)T Σ−1
+x(cid:48)
+i
+
+(x
+
+(cid:19)
+
+x(cid:48)
+i)
+
+,
+
+−
+
+(3)
+
+N
+(cid:88)
+
+i=1
+
+ci, Σi
+(cid:104)
+D2
+
+where
+D1
+closest to the camera and D3 – the furthest from the camera.
+
+= si are the size parameters. We discretize the resulting function to a grid of resolution
+D3. Note that the third index corresponds to the projection axis, with index 1 being the
+
+×
+
+×
+
+(cid:105)
+
+Before projecting the resulting volume to a plane, we need to ensure that the signal from the
+occluded points does not interfere with the foreground points. To this end, we perform occlusion
+reasoning using a differentiable ray tracing formulation, similar to Tulsiani et al. [20]. We convert the
+occupancies o to ray termination probabilities r as follows:
+
+rk1,k2,k3 = ok1,k2,k3
+
+ok1,k2,u) if k3 (cid:54) D3,
+
+rk1,k2,D3+1 =
+
+(1
+
+ok1,k2,u).
+
+(4)
+
+k3−1
+(cid:89)
+
+u=1
+
+(1
+
+−
+
+D3(cid:89)
+
+u=1
+
+−
+
+Intuitively, a cell has high termination probability rk1,k2,k3 if its occupancy value ok1,k2,k3 is high and
+u<k3 are low. The additional background cell rk1,k2,D3+1
+all previous occupancy values
+}
+serves to ensure that the termination probabilities sum to 1.
+
+ok1,k2,u
+
+{
+
+Finally, we project the volume to the plane:
+
+pk1,k2 =
+
+rk1,k2,k3yk1,k2,k3 .
+
+(5)
+
+Here y is the signal being projected, which deﬁnes the modality of the result. To obtain a silhouette,
+δk3,D3+1. For a depth map, we set yk1,k2,k3 = k3/D3. Finally, to project
+we set yk1,k2,k3 = 1
+−
+a signal y associated with the point cloud, such as color, we set y to a discretized version of the
+i=1 yifi(x)/ (cid:80)N
+normalized signal distribution: y(x) = (cid:80)N
+
+i=1 fi(x).
+
+4.1
+
+Implementation details
+
+Technically, the most complex part of the algorithm is the conversion of a point cloud to a volume.
+We have experimented with two implementations of this step: one that is simple and ﬂexible (we
+refer to it as basic) and another version that is less ﬂexible, but much more efﬁcient (we refer to it
+
+D3+1
+(cid:88)
+
+k3=1
+
+5
+
+as fast). We implemented both versions using standard Tensorﬂow [1] operations. At a high level,
+in the basic implementation each function fi is computed on an individual volumetric grid, and
+the results are summed. This allows for ﬂexibility in the choice of the function class, but leads to
+both computational and memory requirements growing linearly with both the number of points N
+and the volume of the grid V , resulting in the complexity O(N V ). The fast version scales more
+gracefully, as O(N + V ). This comes at the cost of using the same kernel for all functions fi. The
+fast implementation performs the operation in two steps: ﬁrst putting all points on the grid with
+trilinear interpolation, then applying a convolution with the kernel. Further details are provided in
+Appendix A.2.
+
+5 Experiments
+
+5.1 Experimental setup
+
+Datasets. We conduct the experiments on 3D models from the ShapeNet [3] dataset. We focus on 3
+categories typically used in related work: chairs, cars, and airplanes. We follow the train/test protocol
+and the data generation procedure of Tulsiani et al. [20]: split the models into training, validation and
+test sets and render 5 random views of each model with random light source positions and random
+camera azimuth and elevation, sampled uniformly from [0◦, 360◦) and [
+
+20◦, 40◦] respectively.
+
+Evaluation metrics. We use the Chamfer distance as our main evaluation metric, since it has been
+shown to be well correlated with human judgment of shape similarity [16]. Given a ground truth point
+cloud P gt =
+
+and a predicted point cloud P pr =
+
+, the distance is deﬁned as follows:
+
+xpr
+n }
+{
+
+xgt
+n }
+
+{
+
+dChamf (P gt, P pred) =
+
+(cid:88)
+
+1
+P pr
+
+|
+
+xpr∈P pr
+
+|
+
+min
+x∈P gt (cid:107)
+
+xpr
+
+x
+
+(cid:107)2 +
+
+−
+
+1
+P gt
+|
+
+|
+
+(cid:88)
+
+xgt∈P gt
+
+(cid:13)
+(cid:13)xgt
+
+min
+x∈P pr
+
+−
+
+x(cid:13)
+(cid:13)2 . (6)
+
+−
+
+The two sums in Eq. (6) have clear intuitive meanings. The ﬁrst sum evaluates the precision of the
+predicted point cloud by computing how far on average is the closest ground truth point from a
+predicted point. The second sum measures the coverage of the ground truth by the predicted point
+cloud: how far is on average the closest predicted point from a ground truth point.
+
+For measuring the pose error, we use the same metrics as Tulsiani et al. [21]: accuracy (the percentage
+of samples for which the predicted pose is within 30◦ of the ground truth) and the median error (in
+degrees). Before starting the pose and shape evaluation, we align the canonical pose learned by the
+network with the canonical pose in the dataset, using Iterative Closest Point (ICP) algorithm on the
+ﬁrst 20 models in the validation set. Further details are provided in Appendix A.3.
+
+Training details. We trained the networks using the Adam optimizer [9], for 600,000 mini-batch
+iterations. We used mini-batches of 16 samples (4 views of 4 objects). We used a ﬁxed learning
+rate of 0.0001 and the standard momentum parameters. We used the fast projection in most
+experiments, unless mentioned otherwise. We varied both the number of points in the point cloud
+and the resolution of the volume used in the projection operation depending on the resolution of the
+ground truth projections used for supervision. We used the volume with the same side as the training
+samples (e.g., 643 volume for 642 projections), and we used 2000 points for 322 projections, 8000
+points for 642 projections, and 16,000 points for 1282 projections.
+
+When predicting dense point clouds, we have found it useful to apply dropout to the predictions of the
+network to ensure even distribution of points on the shape. Dropout effects in selecting only a subset
+of all predicted points for projection and loss computation. In experiments reported in Sections 5.2
+and 5.3 we started with a very high 90% dropout and linearly reduced it to 0 towards the end of
+training. We also implemented a schedule for the point size parameters, linearly decreasing from
+5% of the projection volume size to 0.3% over the course of training. The scaling coefﬁcient of the
+points was learned in all experiments. An ablation study is shown in Appendix B.1.
+
+Computational efﬁciency. A practical advantage of a point-cloud-based method is that it does not
+require using a 3D convolutional decoder as required by voxel-based methods. This improves the
+efﬁciency and allows the method to better scale to higher resolution. For resolution 32 the training
+times of the methods are roughly on par. For 64 the training time of our method is roughly 1 day in
+contrast with 2.5 days for its voxel-based counterpart. For 128 the training time of our method is 3
+days, while the voxel-based method does not ﬁt into 12Gb of GPU memory with our batch size.
+
+6
+
+DRC [20]
+
+Resolution 32
+PTN [25] Ours-V Ours
+
+Resolution 64
+Ours-V Ours
+
+Resolution 128
+EPCG [11] Ours
+
+Airplane
+Car
+Chair
+
+Mean
+
+8.35
+4.35
+8.01
+
+6.90
+
+3.79
+3.94
+5.10
+
+4.27
+
+5.57
+3.88
+5.57
+
+5.01
+
+4.52
+4.22
+5.10
+
+4.61
+
+4.94
+3.41
+4.80
+
+4.39
+
+3.50
+2.98
+4.15
+
+3.55
+
+4.03
+3.69
+5.62
+
+4.45
+
+2.84
+2.42
+3.62
+
+2.96
+
+Table 1: Quantitative results on shape prediction with known camera pose. We report the Cham-
+fer distance between normalized point clouds, multiplied by 100. Our point-cloud-based method
+(Ours) outperforms its voxel-based counterpart (Ours-V) and beneﬁts from higher resolution training
+samples.
+
+Input
+
+View 1
+
+View 2
+
+Input
+
+View 1
+
+View 2
+
+Input
+
+View 1
+
+View 2
+
+Figure 4: Learning colored point clouds. Best viewed on screen. We show the input image, as well
+as two renderings of the predicted point cloud from other views. The general color is preserved well,
+but the ﬁne details may be lost.
+
+5.2 Estimating shape with known pose
+
+Comparison with baselines. We start by benchmarking the proposed formulation against existing
+methods in the simple setup with known ground truth camera poses and silhouette-based training.
+We compare to Perspective Transformer Networks (PTN) of Yan et al. [25], Differentiable Ray
+Consistency (DRC) of Tulsiani et al. [20], Efﬁcient Point Cloud Generation (EPCG) of Lin et al. [11],
+and to the voxel-based counterpart of our method. PTN and DRC are only available for 323 output
+voxel grid resolution. EPCG uses the point cloud representation, same as our method. However, in
+the original work EPCG has only been evaluated in the unrealistic setup of having 100 random views
+per object and pre-training from 8 ﬁxed views (corners of a cube). We re-train this method in the
+more realistic setting used in this work – 5 random views per object.
+
+The quantitative results are shown in Table 1. Our point-cloud-based formulation (Ours) outperforms
+its voxel-based counterpart (Ours-V) in all cases. It improves when provided with high resolution
+training signal, and beneﬁts from it more than the voxel-based method. Overall, our best model
+(at 128 resolution) decreases the mean error by 30% compared to the best baseline. An interesting
+observation is that at low resolution, PTN performs remarkably well, closely followed by our point-
+cloud-based formulation. Note, however, that the PTN formulation only applies to learning from
+silhouettes and cannot be easily generalized to other modalities.
+
+Our model achieves 50% improvement over the point cloud method EPCG, despite it being trained
+from depth maps, which is a stronger supervision compared to silhouettes used for our models.
+When trained with silhouette supervision only, EPCG achieves an average error of 8.20, 2.7 times
+worse than our model. We believe our model is more successful because our rendering procedure is
+differentiable w.r.t. all three coordinates of points, while the method of Lin et al. – only w.r.t. the
+depth.
+
+Colored point clouds. Our formulation supports training with other supervision than silhouettes, for
+instance, color. In Figure 4 we demonstrate qualitative results of learning colored point clouds with
+our method. Despite challenges presented by the variation in lighting and shading between different
+views, the method is able to learn correctly colored point clouds. For objects with complex textures
+the predicted colors get blurred (last example).
+
+Learnable covariance. In the experiments reported above we have learnt point clouds with all
+points having identical isotropic covariance matrices. We conducted additional experiments where
+covariance matrices are learnt jointly with point positions, allowing for more ﬂexible representation
+of shapes. Results are reported in Appendix B.3.
+
+7
+
+t
+u
+p
+n
+I
+
+h
+t
+u
+r
+t
+
+d
+n
+u
+o
+r
+G
+
+]
+1
+2
+[
+
+C
+V
+M
+
+e
+v
+i
+a
+n
+-
+s
+r
+u
+O
+
+s
+r
+u
+O
+
+Figure 5: Qualitative results of shape prediction. Best viewed on screen. Shapes predicted by our
+naive model with a single pose predictor (Ours-naive) are more detailed than those of MVC [21].
+The model with an ensemble of pose predictors (Ours) generates yet sharper shapes. The point cloud
+representation allows to preserve ﬁne details such as thin chair legs.
+
+Shape (DChamf )
+
+Pose (Accuracy & Median error)
+
+MVC [21] Ours-naive Ours
+
+GT pose [21]
+
+MVC [21]
+
+Ours-naive
+
+Ours
+
+Airplane
+Car
+Chair
+
+Mean
+
+4.43
+4.16
+6.51
+
+5.04
+
+7.22
+4.14
+4.79
+
+5.38
+
+3.91
+3.47
+4.30
+
+3.89
+
+0.79
+0.90
+0.85
+
+10.7
+7.4
+11.2
+
+0.69 14.3
+0.87
+5.2
+0.81 7.8
+
+0.20 100.2
+42.8
+0.49
+31.3
+0.50
+
+0.75 8.2
+0.86 5.0
+0.86 8.1
+
+0.85
+
+10.0
+
+0.79
+
+9.0
+
+0.40
+
+58.1
+
+0.82 7.1
+
+Table 2: Quantitative results of shape and pose prediction. Best results for each metric are highlighted
+in bold. The naive version of our method predicts the shape quite well, but fails to predict accurate
+pose. The full version predicts both shape and pose well.
+
+5.3 Estimating shape and pose
+
+We now drop the unrealistic assumption of having the ground truth camera pose during training
+and experiment with predicting both the shape and the camera pose. We use the ground truth at 64
+pixel resolution for our method in these experiments. We compare to the concurrent Multi-View
+Consistency (MVC) approach of Tulsiani et al. [21], using results reported by the authors for pose
+estimation and pre-trained models provided by the authors for shape evaluations.
+
+Quantitative results are provided in Table 2. Our naive model (Ours-naive) learns quite accurate
+shape (7% worse than MVC), despite not being able to predict the pose well. Our explanation is that
+predicting wrong pose for similarly looking projections does not signiﬁcantly hamper the training
+of the shape predictor. Shape predicted by the full model (Ours) is yet more precise: 28% more
+accurate than MVC and only 10% less accurate than with ground truth pose (as reported in Table 1).
+Pose prediction improves dramatically, thanks to the diverse ensemble formulation. As a result, our
+pose prediction results are on average slightly better than those of MVC [21] in both metrics, and
+even better in median error than the results of training with ground truth pose labels (as reported
+by Tulsiani et al. [21]).
+
+Figure 5 shows a qualitative comparison of shapes generated with different methods. Even the results
+of the naive model (Ours-naive) compare favorably to MVC [21]. Introducing the pose ensemble
+
+8
+
+Templates
+
+Figure 6: Discovered semantic correspondences. Points of the same color correspond to the same
+subset in the point cloud across different instances. The points were selected on two template
+instances (top left). Best viewed on screen.
+
+leads to learning more accurate pose and, as a consequence, more precise shapes. These results
+demonstrate the advantage of the point cloud representation over the voxel-based one. Point clouds
+are especially suitable for representing ﬁne details, such as thin legs of the chairs. (Note that for MVC
+we use the binarization threshold that led to the best quantitative results.) We also show typical failure
+cases of the proposed method. One of the airplanes is rotated by 180 degrees, since the network
+does not have a way to ﬁnd which orientation is considered correct. The shapes of two of the chairs
+somewhat differ from the true shapes. This is because of the complexity of the training problem and,
+possibly, overﬁtting. Yet, the shapes look detailed and realistic.
+
+5.4 Discovery of semantic correspondences
+
+Besides higher shape ﬁdelity, the “matter-centric” point cloud representation has another advantage
+over the “space-centric” voxel representation: there is a natural correspondence between points in
+different predicted point clouds. Since we predict points with a fully connected layer, the points
+generated by the same output unit in different shapes can be expected to carry similar semantic
+meaning. We empirically verify this hypothesis. We choose two instances from the validation set
+of the chair category as templates (shown in the top-left corner of Figure 6) and manually annotate
+3D keypoint locations corresponding to characteristic parts, such as corners of the seat, tips of the
+legs, etc. Then, for each keypoint we select all points in the predicted clouds within a small distance
+from the keypoint and compute the intersection of the points indices between the two templates.
+(Intersection of indices between two object instances is not strictly necessary, but we found it to
+slightly improve the quality of the resulting correspondences.) We then visualize points with these
+indices on several other object instances, highlighting each set of points with a different color. Results
+are shown in Figure 6. As hypothesized, selected points tend to represent the same object parts in
+different object instances. Note that no explicit supervision was imposed towards this goal: semantic
+correspondences emerge automatically. We attribute this to the implicit ability of the model to learn a
+regular, smooth representation of the output shape space, which is facilitated by reusing the same
+points for the same object parts.
+
+6 Conclusion
+
+We have proposed a method for learning pose and shape of 3D objects given only their 2D projections,
+using the point cloud representation. Extensive validation has shown that point clouds compare
+favorably with the voxel-based representation in terms of efﬁciency and accuracy. Our work opens
+up multiple avenues for future research. First, our projection method requires an explicit volume to
+perform occlusion reasoning. We believe this is just an implementation detail, which might be relaxed
+in the future with a custom rendering procedure. Second, since the method does not require accurate
+ground truth camera poses, it could be applied to learning from real-world data. Learning from color
+images or videos would be especially exciting, but it would require explicit reasoning about lighting
+and shading, as well as dealing with the background. Third, we used a very basic decoder architecture
+for generating point clouds, and we believe more advanced architectures [26] could improve both the
+efﬁciency and the accuracy of the method. Finally, the fact that the loss is explicitly computed on
+projections (in contrast with, e.g., Tulsiani et al. [20]), allows directly applying advanced techniques
+from the 2D domain, such as perceptual losses and GANs, to learning 3D representations.
+
+9
+
+Acknowledgements
+
+We would like to thank René Ranftl and Stephan Richter for valuable discussions and feedback. We
+would also like to thank Shubham Tulsiani for providing the models of the MVC method for testing.
+
+References
+
+machine learning. In OSDI, 2016.
+
+images. PAMI, 35, 2013.
+
+[1] M. Abadi, P. Barham, J. Chen, Z. Chen, A. Davis, J. Dean, et al. TensorFlow: A system for large-scale
+
+[2] T. J. Cashman and A. W. Fitzgibbon. What shape are dolphins? Building 3D morphable models from 2D
+
+[3] A. X. Chang, T. Funkhouser, L. Guibas, P. Hanrahan, Q. Huang, Z. Li, S. Savarese, M. Savva, S. Song,
+H. Su, J. Xiao, L. Yi, and F. Yu. ShapeNet: An information-rich 3D model repository. Technical Report
+arXiv:1512.03012, 2015.
+
+[4] Q. Chen and V. Koltun. Photographic image synthesis with cascaded reﬁnement networks. In ICCV, 2017.
+
+[5] C. B. Choy, D. Xu, J. Gwak, K. Chen, and S. Savarese. 3D-R2N2: A uniﬁed approach for single and
+
+multi-view 3D object reconstruction. In ECCV, 2016.
+
+[6] H. Fan, H. Su, and L. J. Guibas. A point set generation network for 3D object reconstruction from a single
+
+image. In CVPR, 2017.
+
+structured outputs. In NIPS. 2012.
+
+[7] A. Guzmán-rivera, D. Batra, and P. Kohli. Multiple choice learning: Learning to produce multiple
+
+[8] H. Kato, Y. Ushiku, and T. Harada. Neural 3D mesh renderer. In CVPR, 2018.
+
+[9] D. P. Kingma and J. Ba. Adam: A method for stochastic optimization. In ICLR, 2015.
+
+[10] J. Li, K. Xu, S. Chaudhuri, E. Yumer, H. Zhang, and L. Guibas. GRASS: Generative recursive autoencoders
+
+for shape structures. SIGGRAPH, 2017.
+
+[11] C.-H. Lin, C. Kong, and S. Lucey. Learning efﬁcient point cloud generation for dense 3D object recon-
+
+struction. In AAAI, 2018.
+
+[12] M. M. Loper and M. J. Black. OpenDR: An approximate differentiable renderer. In ECCV, 2014.
+
+[13] D. Rezende, S. M. A. Eslami, S. Mohamed, P. Battaglia, M. Jaderberg, and N. Heess. Unsupervised
+
+learning of 3D structure from images. In NIPS, 2016.
+
+[14] H. Rhodin, N. Robertini, C. Richardt, H.-P. Seidel, and C. Theobalt. A versatile scene model with
+
+differentiable visibility applied to generative pose estimation. In ICCV, 2015.
+
+[15] A. A. Soltani, H. Huang, J. Wu, T. D. Kulkarni, and J. B. Tenenbaum. Synthesizing 3D shapes via modeling
+
+multi-view depth maps and silhouettes with deep generative networks. In CVPR, 2017.
+
+[16] X. Sun, J. Wu, X. Zhang, Z. Zhang, C. Zhang, T. Xue, J. B. Tenenbaum, and W. T. Freeman. Pix3d:
+
+Dataset and methods for single-image 3D shape modeling. In CVPR, 2018.
+
+[17] M. Tatarchenko, A. Dosovitskiy, and T. Brox. Octree generating networks: Efﬁcient convolutional
+
+architectures for high-resolution 3D outputs. In ICCV, 2017.
+
+[18] S. Tulsiani, A. Kar, J. Carreira, and J. Malik. Learning category-speciﬁc deformable 3D models for object
+
+[19] S. Tulsiani, H. Su, L. J. Guibas, A. A. Efros, and J. Malik. Learning shape abstractions by assembling
+
+reconstruction. PAMI, 39, 2017.
+
+volumetric primitives. In CVPR, 2017.
+
+[20] S. Tulsiani, T. Zhou, A. A. Efros, and J. Malik. Multi-view supervision for single-view reconstruction via
+
+differentiable ray consistency. In CVPR, 2017.
+
+[21] S. Tulsiani, A. A. Efros, and J. Malik. Multi-view consistency as supervisory signal for learning shape and
+
+pose prediction. In CVPR, 2018.
+
+[22] S. Vicente, J. Carreira, L. Agapito, and J. Batista. Reconstructing PASCAL VOC. In CVPR, 2014.
+
+[23] J. Wu, C. Zhang, T. Xue, W. T. Freeman, and J. B. Tenenbaum. Learning a probabilistic latent space of
+
+object shapes via 3D generative-adversarial modeling. In NIPS, 2016.
+
+[24] J. Wu, T. Xue, J. J. Lim, Y. Tian, J. B. Tenenbaum, A. Torralba, and W. T. Freeman. 3D interpreter networks
+
+for viewer-centered wireframe modeling. IJCV, 2018.
+
+10
+
+[25] X. Yan, J. Yang, E. Yumer, Y. Guo, and H. Lee. Perspective transformer nets: Learning single-view 3D
+
+object reconstruction without 3D supervision. In NIPS, 2016.
+
+[26] Y. Yang, C. Feng, Y. Shen, and D. Tian. FoldingNet: Interpretable unsupervised learning on 3D point
+
+clouds. In CVPR, 2018.
+
+Appendices
+
+A Implementation details
+
+A.1 Network architecture
+
+×
+
+5 kernel with 16 channels and
+The convolutional encoder includes 7 layers. The ﬁrst one has a 5
+stride 2. The remaining layers all have 3 kernels and come in pairs. The ﬁrst layer in the pair has
+stride 2, the second one – stride 1. The number of channels grows by a factor of 2 after each strided
+layer. The convolutional encoder is followed by two fully connected layers with 1024 units. Then the
+network separates into two branches predicting shape and pose. The shape branch has one hidden
+layer with 1024 units and then predicts the point cloud. The pose branch has one shared hidden
+layer with 1024 units. In the naive variant of the method, pose is predicted directly from this hidden
+layer. In the full approach with an ensemble of pose predictors, this layer is followed by 2 separate
+hidden layers for each pose predictor in the ensemble, with 32 units each. We used leaky ReLU with
+the negative slope 0.2 after all layers except for the shape prediction layer where we used the tanh
+non-linearity to constrain the output coordinates.
+
+A.2 Differentiable point cloud projection
+
+Assume we are given a set of N points with coordinates and sizes
+desired spatial dimensions D1
+D2
+×
+indexing of all tensors is 0-based.
+
+N −1
+(xn, σn)
+n=0 , as well as the
+}
+{
+D3 of the volume to be used for projection. Here we assume
+
+×
+
+In the basic implementation, we start by creating a coordinate tensor M of dimensions N
+D3
+×
+Gaussian:
+
+3 with entries Mn,k1,k2,k3,i = ki/Di
+
+×
+0.5. Next, for each point we compute the corresponding
+
+D2
+
+D1
+
+×
+
+×
+
+−
+
+Gn,k1,k2,k3 = exp(
+
+Mn,k1,k2,k3 −
+Finally, we sum these to get the resulting volume: ok1,k2,k3 = (cid:80)N −1
+n=0 Gn,k1,k2,k3 . This implementa-
+tion is simple and allows for independently changing the sizes of points. However, on the downside,
+both memory and computation requirements scale linearly with the number of points.
+
+n (cid:107)
+
+xn
+
+(7)
+
+−
+
+0.5σ−2
+
+2).
+(cid:107)
+
+Since linear scaling with the number of points makes large-scale experiments impractical, we
+implemented the fast version of the method that has lower computation and memory requirements.
+We implement the conversion procedure as a composition of trilinear interpolation and a convolution.
+Efﬁciency comes at the cost of using the same kernel for all points. We implemented trilinear
+interpolation using the Tensorﬂow scatter_nd function. We used standard 3D convolutions for
+the second step. For improved efﬁciency, we factorized them into three 1D convolutions along the
+three axes.
+
+A.3 Quantitative evaluation
+
+To extract a point cloud from the ground truth meshes, we used the vertex densiﬁcation procedure
+of Lin et al. [11]. For the outputs of voxel-based methods, we extract the surface mesh with the
+marching cubes algorithm and sample roughly 10000 points from the computed surface. We tuned
+the threshold parameters of the marching cubes algorithm based on the Chamfer distance on the
+validation set.
+
+For pose evaluations, we computed the angular difference between two rotations represented with
+(cid:13)
+quaternions q1 and q2 as 2 acos (q1q−1
+(cid:13)).
+
+(cid:13)q1q−1
+2
+
+2 / (cid:13)
+
+11
+
+Full No drop.
+
+Fixed σ = 1.6
+
+Fixed scale
+
+4000 pts.
+
+2000 pts.
+
+1000 pts.
+
+Precision
+Coverage
+Chamfer
+
+2.05
+1.98
+4.03
+
+2.60
+1.99
+4.59
+
+2.06
+2.82
+4.89
+
+2.01
+2.26
+4.27
+
+2.10
+2.19
+4.28
+
+2.17
+2.54
+4.70
+
+2.11
+2.98
+5.10
+
+Table 3: Ablation study of our method for shape prediction. We report the Chamfer distance between
+normalized point clouds, multiplied by 100, as well as precision and coverage.
+
+B Additional experiments
+
+B.1 Ablation study
+
+We evaluate the effect of different components of the model on the shape prediction quality. We
+measure these by training with pose supervision on ShapeNet chairs, with 642 resolution of the
+training images. Results are presented in Table 3. The “Full” method is trained with 8000 point, point
+dropout, sigma schedule, and learned point scale. All our techniques are useful, but generally the
+method is not too sensitive to these.
+
+B.2 Additional qualitative results
+
+Additional qualitative results are shown in Figure 7.
+
+B.3 Towards part-based models
+
+In most experiments in the paper the shape parameters of the points were set by hand, and only the
+scaling factor was learned. However, our formulation allows learning the shape parameters jointly
+with the positions of the points. Here we explore this direction using the basic implementation,
+since it allows for learning a separate shape for each point in the point set. We explore two possibilities:
+isotropic Gaussians, parametrized by a single scalar and general covariance matrices, parametrized
+by 7 numbers: 3 diagonal values and a quaternion representing the rotation (this is an overcomplete
+representation). This resembles part-based models: now instead of composing the object of “atomic”
+points, a whole object part can be represented by a single Gaussian of appropriate shape (for instance,
+an elongated Gaussian can represent a leg of a chair).
+
+Figure 8 qualitatively demonstrates the advantage of the more ﬂexible model over the simpler
+alternative with isotropic Gaussians. One could imagine employing yet more general and ﬂexible
+per-point shape models, and we see this as an exciting direction of future work.
+
+Figure 9 shows the projection error of different approaches for varying number of points in the set.
+Learnable parameters perform better than hand-tuned and learned full covariance performs better than
+learned isotropic covariance. A caveat is that training with full covariance matrix is computationally
+more heavy in our implementation.
+
+B.4 Additional visualizations of semantic correspondences
+
+Additional visualizations of semantic correspondences are shown in Figure 10. We use the same two
+templates here as in the main paper.
+
+B.5 Interpolation of shapes in the latent space
+
+Fig. 11 shows results of linear interpolation between shapes in the latent space given by the ﬁrst
+(shared) fully connected layer. We can observe gradual transitions between shapes, which indicates
+that the model learns a smooth representation of the shape space. Failure cases, such as legs in the
+second row, can be attributed to the limited representation of the ofﬁce chairs with 5 legs in the
+dataset.
+
+12
+
+t
+u
+p
+n
+I
+
+h
+t
+u
+r
+t
+
+d
+n
+u
+o
+r
+G
+
+]
+1
+2
+[
+
+C
+V
+M
+
+s
+r
+u
+O
+
+t
+u
+p
+n
+I
+
+h
+t
+u
+r
+t
+
+d
+n
+u
+o
+r
+G
+
+]
+1
+2
+[
+
+C
+V
+M
+
+s
+r
+u
+O
+
+t
+u
+p
+n
+I
+
+h
+t
+u
+r
+t
+
+d
+n
+u
+o
+r
+G
+
+]
+1
+2
+[
+
+C
+V
+M
+
+s
+r
+u
+O
+
+Figure 7: Additional qualitative results of shape prediction. Best viewed on screen.
+
+13
+
+t
+u
+p
+n
+I
+
+c
+i
+p
+o
+r
+t
+o
+s
+I
+
+.
+
+v
+o
+c
+
+l
+l
+u
+F
+
+Figure 8: Silhouettes learned with full learned Gaussian covariance versus hand-tuned isotropic
+Gaussian, using 20 points.
+
+Figure 9: Projection error with different models and different number of points. More ﬂexible
+density distributions allow for reaching the same error with fewer points. In particular, full learn-
+able covariance can require roughly an order of magnitude fewer points than hand-tuned isotropic
+covariance to reach the same quality.
+
+14
+
+Figure 10: Additional visualizations of semantic correspondences.
+
+15
+
+Input A
+
+Prediction A
+
+Prediction B
+
+Input B
+
+Figure 11: Interpolation of shapes in the latent space.
+
+16
+

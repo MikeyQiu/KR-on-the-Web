@@ -1,0 +1,6787 @@
+8
+1
+0
+2
+ 
+t
+c
+O
+ 
+1
+3
+ 
+ 
+]
+
+G
+L
+.
+s
+c
+[
+ 
+ 
+2
+v
+8
+9
+0
+6
+0
+.
+9
+0
+8
+1
+:
+v
+i
+X
+r
+a
+
+Policy Optimization via Importance Sampling
+
+Alberto Maria Metelli
+Politecnico di Milano, Milan, Italy
+albertomaria.metelli@polimi.it
+
+Matteo Papini
+Politecnico di Milano, Milan, Italy
+matteo.papini@polimi.it
+
+Francesco Faccio
+Politecnico di Milano, Milan, Italy
+IDSIA, USI-SUPSI, Lugano, Switzerland
+francesco.faccio@mail.polimi.it
+
+Marcello Restelli
+Politecnico di Milano, Milan, Italy
+marcello.restelli@polimi.it
+
+Abstract
+
+Policy optimization is an effective reinforcement learning approach to solve contin-
+uous control tasks. Recent achievements have shown that alternating online and
+ofﬂine optimization is a successful choice for efﬁcient trajectory reuse. However,
+deciding when to stop optimizing and collect new trajectories is non-trivial, as it
+requires to account for the variance of the objective function estimate. In this paper,
+we propose a novel, model-free, policy search algorithm, POIS, applicable in both
+action-based and parameter-based settings. We ﬁrst derive a high-conﬁdence bound
+for importance sampling estimation; then we deﬁne a surrogate objective function,
+which is optimized ofﬂine whenever a new batch of trajectories is collected. Finally,
+the algorithm is tested on a selection of continuous control tasks, with both linear
+and deep policies, and compared with state-of-the-art policy optimization methods.
+
+1
+
+Introduction
+
+In recent years, policy search methods [9] have proved to be valuable Reinforcement Learning
+(RL) [49] approaches thanks to their successful achievements in continuous control tasks [e.g.,
+22, 41, 43, 42], robotic locomotion [e.g., 52, 19] and partially observable environments [e.g., 27].
+These algorithms can be roughly classiﬁed into two categories: action-based methods [50, 33] and
+parameter-based methods [44]. The former, usually known as policy gradient (PG) methods, perform
+a search in a parametric policy space by following the gradient of the utility function estimated
+by means of a batch of trajectories collected from the environment [49]. In contrast, in parameter-
+based methods, the search is carried out directly in the space of parameters by exploiting global
+optimizers [e.g., 40, 15, 47, 51] or following a proper gradient direction like in Policy Gradients
+with Parameter-based Exploration (PGPE) [44, 62, 45]. A major question in policy search methods
+is: how should we use a batch of trajectories in order to exploit its information in the most efﬁcient
+way? On one hand, on-policy methods leverage on the batch to perform a single gradient step, after
+which new trajectories are collected with the updated policy. Online PG methods are likely the most
+widespread policy search approaches: starting from the traditional algorithms based on stochastic
+policy gradient [50], like REINFORCE [63] and G(PO)MDP [3], moving toward more modern
+methods, such as Trust Region Policy Optimization (TRPO) [41]. These methods, however, rarely
+exploit the available trajectories in an efﬁcient way, since each batch is thrown away after just one
+gradient update. On the other hand, off-policy methods maintain a behavioral policy, used to explore
+the environment and to collect samples, and a target policy which is optimized. The concept of off-
+policy learning is rooted in value-based RL [61, 29, 26] and it was ﬁrst adapted to PG in [8], using an
+actor-critic architecture. The approach has been extended to Deterministic Policy Gradient (DPG) [46],
+which allows optimizing deterministic policies while keeping a stochastic policy for exploration.
+
+32nd Conference on Neural Information Processing Systems (NIPS 2018), Montréal, Canada.
+
+More recently, an efﬁcient version of DPG coupled with a deep neural network to represent the policy
+has been proposed, named Deep Deterministic Policy Gradient (DDPG) [22]. In the parameter-based
+framework, even though the original formulation [44] introduces an online algorithm, an extension has
+been proposed to efﬁciently reuse the trajectories in an ofﬂine scenario [66]. Furthermore, PGPE-like
+approaches allow overcoming several limitations of classical PG, like the need for a stochastic policy
+and the high variance of the gradient estimates.1
+
+While on-policy algorithms are, by nature, online, as they need to be fed with fresh samples whenever
+the policy is updated, off-policy methods can take advantage of mixing online and ofﬂine optimization.
+This can be done by alternately sampling trajectories and performing optimization epochs with the
+collected data. A prime example of this alternating procedure is Proximal Policy Optimization
+(PPO) [43], that has displayed remarkable performance on continuous control tasks. Off-line op-
+timization, however, introduces further sources of approximation, as the gradient w.r.t. the target
+policy needs to be estimated (off-policy) with samples collected with a behavioral policy. A common
+choice is to adopt an importance sampling (IS) [28, 16] estimator in which each sample is reweighted
+proportionally to the likelihood of being generated by the target policy. However, directly optimizing
+this utility function is impractical since it displays a wide variance most of the times [28]. Intuitively,
+the variance increases proportionally to the distance between the behavioral and the target policy;
+thus, the estimate is reliable as long as the two policies are close enough. Preventing uncontrolled
+updates in the space of policy parameters is at the core of the natural gradient approaches [1] applied
+effectively both on PG methods [17, 32, 62] and on PGPE methods [25]. More recently, this idea
+has been captured (albeit indirectly) by TRPO, which optimizes via (approximate) natural gradient a
+surrogate objective function, derived from safe RL [17, 34], subject to a constraint on the Kullback-
+Leibler divergence between the behavioral and target policy.2 Similarly, PPO performs a truncation
+of the importance weights to discourage the optimization process from going too far. Although TRPO
+and PPO, together with DDPG, represent the state-of-the-art policy optimization methods in RL for
+continuous control, they do not explicitly encode in their objective function the uncertainty injected
+by the importance sampling procedure. A more theoretically grounded analysis has been provided for
+policy selection [10], model-free [55] and model-based [53] policy evaluation (also accounting for
+samples collected with multiple behavioral policies), and combined with options [14]. Subsequently,
+in [54] these methods have been extended for policy improvement, deriving a suitable concentration
+inequality for the case of truncated importance weights. Unfortunately, these methods are hardly
+scalable to complex control tasks. A more detailed review of the state-of-the-art policy optimization
+algorithms is reported in Appendix A.
+
+In this paper, we propose a novel, model-free, actor-only, policy optimization algorithm, named
+Policy Optimization via Importance Sampling (POIS) that mixes online and ofﬂine optimization to
+efﬁciently exploit the information contained in the collected trajectories. POIS explicitly accounts for
+the uncertainty introduced by the importance sampling by optimizing a surrogate objective function.
+The latter captures the trade-off between the estimated performance improvement and the variance
+injected by the importance sampling. The main contributions of this paper are theoretical, algorithmic
+and experimental. After revising some notions about importance sampling (Section 3), we propose a
+concentration inequality, of independent interest, for high-conﬁdence “off-distribution” optimization
+of objective functions estimated via importance sampling (Section 4). Then we show how this bound
+can be customized into a surrogate objective function in order to either search in the space of policies
+(Action-based POIS) or to search in the space of parameters (Parameter-bases POIS). The resulting
+algorithm (in both the action-based and the parameter-based ﬂavor) collects, at each iteration, a set of
+trajectories. These are used to perform ofﬂine optimization of the surrogate objective via gradient
+ascent (Section 5), after which a new batch of trajectories is collected using the optimized policy.
+Finally, we provide an experimental evaluation with both linear policies and deep neural policies
+to illustrate the advantages and limitations of our approach compared to state-of-the-art algorithms
+(Section 6) on classical control tasks [11, 56]. The proofs for all Theorems and Lemmas are reported
+in Appendix B. The implementation of POIS can be found at https://github.com/T3p/pois.
+
+1Other solutions to these problems have been proposed in the action-based literature, like the aforementioned
+
+DPG algorithm, the gradient baselines [33] and the actor-critic architectures [20].
+
+2Note that this regularization term appears in the performance improvement bound, which contains exact
+
+quantities only. Thus, it does not really account for the uncertainty derived from the importance sampling.
+
+2
+
+2 Preliminaries
+
+A discrete-time Markov Decision Process (MDP) [36] is deﬁned as a tuple M = (S, A, P, R, γ, D)
+where S is the state space, A is the action space, P (·|s, a) is a Markovian transition model that
+assigns for each state-action pair (s, a) the probability of reaching the next state s(cid:48), γ ∈ [0, 1] is
+the discount factor, R(s, a) ∈ [−Rmax, Rmax] assigns the expected reward for performing action
+a in state s and D is the distribution of the initial state. The behavior of an agent is described by
+a policy π(·|s) that assigns for each state s the probability of performing action a. A trajectory
+τ ∈ T is a sequence of state-action pairs τ = (sτ,0, aτ,0, . . . , sτ,H−1, aτ,H−1, sτ,H ), where H is the
+actual trajectory horizon. The performance of an agent is evaluated in terms of the expected return,
+i.e., the expected discounted sum of the rewards collected along the trajectory: Eτ [R(τ )], where
+R(τ ) = (cid:80)H−1
+We focus our attention to the case in which the policy belongs to a parametric policy space ΠΘ =
+{πθ : θ ∈ Θ ⊆ Rp}. In parameter-based approaches, the agent is equipped with a hyperpolicy ν
+used to sample the policy parameters at the beginning of each episode. The hyperpolicy belongs itself
+to a parametric hyperpolicy space NP = {νρ : ρ ∈ P ⊆ Rr}. The expected return can be expressed,
+in the parameter-based case, as a double expectation: one over the policy parameter space Θ and one
+over the trajectory space T :
+
+t=0 γtR(sτ,t, aτ,t) is the trajectory return.
+
+JD(ρ) =
+
+νρ(θ)p(τ |θ)R(τ ) dτ dθ,
+
+(1)
+
+(cid:90)
+
+(cid:90)
+
+Θ
+
+T
+
+(cid:82)
+
+where p(τ |θ) = D(s0) (cid:81)H−1
+t=0 πθ(at|st)P (st+1|st, at) is the trajectory density function. The goal
+of a parameter-based learning agent is to determine the hyperparameters ρ∗ so as to maximize
+JD(ρ). If νρ is stochastic and differentiable, the hyperparameters can be learned according to
+the gradient ascent update: ρ(cid:48) = ρ + α∇ρJD(ρ), where α > 0 is the step size and ∇ρJD(ρ) =
+(cid:82)
+T νρ(θ)p(τ |θ)∇ρ log νρ(θ)R(τ ) dτ dθ. Since the stochasticity of the hyperpolicy is a sufﬁcient
+Θ
+source of exploration, deterministic action policies of the kind πθ(a|s) = δ(a − uθ(s)) are typically
+considered, where δ is the Dirac delta function and uθ is a deterministic mapping from S to A. In
+the action-based case, on the contrary, the hyperpolicy νρ is a deterministic distribution νρ(θ) =
+δ(θ − g(ρ)), where g(ρ) is a deterministic mapping from P to Θ. For this reason, the dependence on
+ρ is typically not represented and the expected return expression simpliﬁes into a single expectation
+over the trajectory space T :
+
+JD(θ) =
+
+p(τ |θ)R(τ ) dτ.
+
+(2)
+
+(cid:90)
+
+T
+
+An action-based learning agent aims to ﬁnd the policy parameters θ∗ that maximize JD(θ). In
+this case, we need to enforce exploration by means of the stochasticity of πθ. For stochastic and
+differentiable policies, learning can be performed via gradient ascent: θ(cid:48) = θ + α∇θJD(θ), where
+∇θJD(θ) = (cid:82)
+
+T p(τ |θ)∇θ log p(τ |θ)R(τ ) dτ .
+
+3 Evaluation via Importance Sampling
+
+In off-policy evaluation [55, 53], we aim to estimate the performance of a target policy πT (or
+hyperpolicy νT ) given samples collected with a behavioral policy πB (or hyperpolicy νB). More
+generally, we face the problem of estimating the expected value of a deterministic bounded function
+f ((cid:107)f (cid:107)∞ < +∞) of random variable x taking values in X under a target distribution P , after having
+collected samples from a behavioral distribution Q. The importance sampling estimator (IS) [6, 28]
+corrects the distribution with the importance weights (or Radon–Nikodym derivative or likelihood
+ratio) wP/Q(x) = p(x)/q(x):
+
+(cid:98)µP/Q =
+
+1
+N
+
+N
+(cid:88)
+
+i=1
+
+p(xi)
+q(xi)
+
+1
+N
+
+N
+(cid:88)
+
+i=1
+
+f (xi) =
+
+wP/Q(xi)f (xi),
+
+(3)
+
+where x = (x1, x2, . . . , xN )T is sampled from Q and we assume q(x) > 0 whenever f (x)p(x) (cid:54)= 0.
+This estimator is unbiased (Ex∼Q[(cid:98)µP/Q] = Ex∼P [f (x)]) but it may exhibit an undesirable behavior
+due to the variability of the importance weights, showing, in some cases, inﬁnite variance. Intuitively,
+the magnitude of the importance weights provides an indication of how much the probability measures
+P and Q are dissimilar. This notion can be formalized by the Rényi divergence [39, 58], an
+information-theoretic dissimilarity index between probability measures.
+
+3
+
+Rényi divergence Let P and Q be two probability measures on a measurable space (X , F) such
+that P (cid:28) Q (P is absolutely continuous w.r.t. Q) and Q is σ-ﬁnite. Let P and Q admit p and q as
+Lebesgue probability density functions (p.d.f.), respectively. The α-Rényi divergence is deﬁned as:
+
+Dα(P (cid:107)Q) =
+
+1
+α − 1
+
+(cid:90)
+
+log
+
+(cid:19)α
+
+(cid:18) dP
+dQ
+
+X
+
+dQ =
+
+log
+
+q(x)
+
+dx,
+
+(4)
+
+1
+α − 1
+
+(cid:90)
+
+X
+
+(cid:19)α
+
+(cid:18) p(x)
+q(x)
+
+where dP/ dQ is the Radon–Nikodym derivative of P w.r.t. Q and α ∈ [0, ∞]. Some remark-
+able cases are: α = 1 when D1(P (cid:107)Q) = DKL(P (cid:107)Q) and α = ∞ yielding D∞(P (cid:107)Q) =
+log ess supX dP/ dQ. Importing the notation from [7], we indicate the exponentiated α-Rényi
+divergence as dα(P (cid:107)Q) = exp (Dα(P (cid:107)Q)). With little abuse of notation, we will replace Dα(P (cid:107)Q)
+with Dα(p(cid:107)q) whenever possible within the context.
+The Rényi divergence provides a convenient expression for the moments of the importance
+(cid:2)wP/Q(x)(cid:3) = d2(P (cid:107)Q) − 1 and
+weights: Ex∼Q
+ess supx∼Q wP/Q(x) = d∞(P (cid:107)Q) [7]. To mitigate the variance problem of the IS estimator, we can
+resort to the self-normalized importance sampling estimator (SN) [6]:
+
+(cid:2)wP/Q(x)α(cid:3) = dα(P (cid:107)Q). Moreover, Varx∼Q
+
+(cid:101)µP/Q =
+
+(cid:80)N
+
+i=1 wP/Q(xi)f (xi)
+(cid:80)N
+i=1 wP/Q(xi)
+
+=
+
+N
+(cid:88)
+
+i=1
+
+(cid:101)wP/Q(xi)f (xi),
+
+(5)
+
+where (cid:101)wP/Q(x) = wP/Q(x)/ (cid:80)N
+i=1 wP/Q(xi) is the self-normalized importance weight. Differently
+from (cid:98)µP/Q, (cid:101)µP/Q is biased but consistent [28] and it typically displays a more desirable behavior
+because of its smaller variance.3 Given the realization x1, x2, . . . , xN we can interpret the SN
+estimator as the expected value of f under an approximation of the distribution P made by N deltas,
+i.e., (cid:101)p(x) = (cid:80)N
+i=1 (cid:101)wP/Q(x)δ(x − xi). The problem of assessing the quality of the SN estimator
+has been extensively studied by the simulation community, producing several diagnostic indexes to
+indicate when the weights might display problematic behavior [28]. The effective sample size (ESS)
+was introduced in [21] as the number of samples drawn from P so that the variance of the Monte
+Carlo estimator (cid:101)µP/P is approximately equal to the variance of the SN estimator (cid:101)µP/Q computed
+with N samples. Here we report the original deﬁnition and its most common estimate:
+
+ESS(P (cid:107)Q) =
+
+N
+
+Varx∼Q
+
+(cid:2)wP/Q(x)(cid:3) + 1
+
+=
+
+N
+d2(P (cid:107)Q)
+
+, (cid:100)ESS(P (cid:107)Q) =
+
+1
+i=1 (cid:101)wP/Q(xi)2
+
+.
+
+(cid:80)N
+
+(6)
+
+The ESS has an interesting interpretation: if d2(P (cid:107)Q) = 1, i.e., P = Q almost everywhere, then
+ESS = N since we are performing Monte Carlo estimation. Otherwise, the ESS decreases as the
+dissimilarity between the two distributions increases. In the literature, other ESS-like diagnostics
+have been proposed that also account for the nature of f [23].
+
+4 Optimization via Importance Sampling
+
+The off-policy optimization problem [54] can be formulated as ﬁnding the best target policy πT (or
+hyperpolicy νT ), i.e., the one maximizing the expected return, having access to a set of samples
+collected with a behavioral policy πB (or hyperpolicy νB). In a more abstract sense, we aim to
+determine the target distribution P that maximizes Ex∼P [f (x)] having samples collected from the
+ﬁxed behavioral distribution Q. In this section, we analyze the problem of deﬁning a proper objective
+function for this purpose. Directly optimizing the estimator (cid:98)µP/Q or (cid:101)µP/Q is, in most of the cases,
+unsuccessful. With enough freedom in choosing P , the optimal solution would assign as much
+probability mass as possible to the maximum value among f (xi). Clearly, in this scenario, the
+estimator is unreliable and displays a large variance. For this reason, we adopt a risk-averse approach
+and we decide to optimize a statistical lower bound of the expected value Ex∼P [f (x)] that holds with
+high conﬁdence. We start by analyzing the behavior of the IS estimator and we provide the following
+result that bounds the variance of (cid:98)µP/Q in terms of the Renyi divergence.
+Lemma 4.1. Let P and Q be two probability measures on the measurable space (X , F) such that
+P (cid:28) Q. Let x = (x1, x2, . . . , xN )T i.i.d. random variables sampled from Q and f : X → R be a
+
+3Note that (cid:12)
+
+(cid:12)(cid:101)µP/Q
+
+(cid:12)
+(cid:12) ≤ (cid:107)f (cid:107)∞. Therefore, its variance is always ﬁnite.
+
+4
+
+bounded function ((cid:107)f (cid:107)∞ < +∞). Then, for any N > 0, the variance of the IS estimator (cid:98)µP/Q can
+be upper bounded as:
+1
+N
+
+∞d2 (P (cid:107)Q) .
+
+(cid:2)
+(cid:98)µP/Q
+
+Var
+x∼Q
+
+(cid:107)f (cid:107)2
+
+(cid:3) ≤
+
+(7)
+
+(cid:2)
+
+(cid:3) ≤ 1
+
+(cid:98)µQ/Q
+
+(cid:2)
+(cid:98)µP/Q
+
+When P = Q almost everywhere, we get Varx∼Q
+∞, a well-known bound on the
+variance of a Monte Carlo estimator. Recalling the deﬁnition of ESS (6) we can rewrite the previous
+bound as: Varx∼Q
+ESS(P (cid:107)Q) , i.e., the variance scales with ESS instead of N . While
+(cid:98)µP/Q can have unbounded variance even if f is bounded, the SN estimator (cid:101)µP/Q is always bounded
+by (cid:107)f (cid:107)∞ and therefore it always has a ﬁnite variance. Since the normalization term makes all the
+samples (cid:101)wP/Q(xi)f (xi) interdependent, an exact analysis of its bias and variance is more challenging.
+Several works adopted approximate methods to provide an expression for the variance [16]. We
+propose an analysis of bias and variance of the SN estimator in Appendix D.
+
+(cid:3) ≤ (cid:107)f (cid:107)2
+
+N (cid:107)f (cid:107)2
+
+∞
+
+4.1 Concentration Inequality
+
+Finding a suitable concentration inequality for off-policy learning was studied in [55] for ofﬂine policy
+evaluation and subsequently in [54] for optimization. On one hand, fully empirical concentration
+inequalities, like Student-T, besides the asymptotic approximation, are not suitable in this case since
+the empirical variance needs to be estimated with importance sampling as well injecting further
+uncertainty [28]. On the other hand, several distribution-free inequalities like Hoeffding require
+knowing the maximum of the estimator, which might not exist (d∞(P (cid:107)Q) = ∞) for the IS estimator.
+Constraining d∞(P (cid:107)Q) to be ﬁnite often introduces unacceptable limitations. For instance, in the
+case of univariate Gaussian distributions, it prevents a step that selects a target variance larger than the
+behavioral one from being performed (see Appendix C).4 Even Bernstein inequalities [4], are hardly
+applicable since, for instance, in the case of univariate Gaussian distributions, the importance weights
+display a fat tail behavior (see Appendix C). We believe that a reasonable trade-off is to require the
+variance of the importance weights to be ﬁnite, that is equivalent to require d2(P (cid:107)Q) < ∞, i.e.,
+σP < 2σQ for univariate Gaussians. For this reason, we resort to Chebyshev-like inequalities and we
+propose the following concentration bound derived from Cantelli’s inequality and customized for the
+IS estimator.
+Theorem 4.1. Let P and Q be two probability measures on the measurable space (X , F) such that
+P (cid:28) Q and d2(P (cid:107)Q) < +∞. Let x1, x2, . . . , xN be i.i.d. random variables sampled from Q, and
+f : X → R be a bounded function ((cid:107)f (cid:107)∞ < +∞). Then, for any 0 < δ ≤ 1 and N > 0 with
+probability at least 1 − δ it holds that:
+
+E
+x∼P
+
+[f (x)] ≥
+
+1
+N
+
+N
+(cid:88)
+
+i=1
+
+wP/Q(xi)f (xi) − (cid:107)f (cid:107)∞
+
+(8)
+
+(cid:114)
+
+(1 − δ)d2(P (cid:107)Q)
+δN
+
+.
+
+The bound highlights the interesting trade-off between the estimated performance and the uncertainty
+introduced by changing the distribution. The latter enters in the bound as the 2-Rényi divergence
+between the target distribution P and the behavioral distribution Q. Intuitively, we should trust
+the estimator (cid:98)µP/Q as long as P is not too far from Q. For the SN estimator, accounting for the
+bias, we are able to obtain a bound (reported in Appendix D), with a similar dependence on P as
+in Theorem 4.1, albeit with different constants. Renaming all constants involved in the bound of
+(cid:112)(1 − δ)/δ, we get a surrogate objective function. The optimization can
+Theorem 4.1 as λ = (cid:107)f (cid:107)∞
+be carried out in different ways. The following section shows why using the natural gradient could be
+a successful choice in case P and Q can be expressed as parametric differentiable distributions.
+
+4.2
+
+Importance Sampling and Natural Gradient
+
+We can look at a parametric distribution Pω, having pω as a density function, as a point on a
+probability manifold with coordinates ω ∈ Ω. If pω is differentiable, the Fisher Information Matrix
+(FIM) [38, 2] is deﬁned as: F(ω) = (cid:82)
+X pω(x)∇ω log pω(x)∇ω log pω(x)T dx. This matrix is, up to
+4Although the variance tends to be reduced in the learning process, there might be cases in which it needs to
+be increased (e.g., suppose we start with a behavioral policy with small variance, it might be beneﬁcial increasing
+the variance to enforce exploration).
+
+5
+
+Algorithm 1 Action-based POIS
+
+Algorithm 2 Parameter-based POIS
+
+0 arbitrarily
+
+Initialize θ0
+for j = 0, 1, 2, ..., until convergence do
+Collect N trajectories with πθj
+for k = 0, 1, 2, ..., until convergence do
+k), ∇θj
+k + αkG(θj
+
+L(θj
+k/θj
+k)−1∇θj
+
+k
+
+0
+
+Compute G(θj
+θj
+k+1 = θj
+end for
+θj+1
+0 = θj
+end for
+
+k
+
+k
+
+0) and αk
+k/θj
+L(θj
+0)
+
+0 arbitrarily
+
+Initialize ρ0
+for j = 0, 1, 2, ..., until convergence do
+Sample N policy parameters θj
+Collect a trajectory with each πθj
+for k = 0, 1, 2, ..., until convergence do
+k), ∇ρj
+k + αkG(ρj
+
+L(ρj
+k/ρj
+k)−1∇ρj
+
+i from νρj
+
+k
+
+i
+
+0
+
+Compute G(ρj
+k+1 = ρj
+ρj
+end for
+ρj+1
+0 = ρj
+end for
+
+k
+
+0) and αk
+k/ρj
+L(ρj
+0)
+
+k
+
+a scale, an invariant metric [1] on parameter space Ω, i.e., κ(ω(cid:48) − ω)T F(ω)(ω(cid:48) − ω) is independent
+on the speciﬁc parameterization and provides a second order approximation of the distance between
+pω and pω(cid:48) on the probability manifold up to a scale factor κ ∈ R. Given a loss function L(ω), we
+deﬁne the natural gradient [1, 18] as (cid:101)∇ωL(ω) = F −1(ω)∇ωL(ω), which represents the steepest
+ascent direction in the probability manifold. Thanks to the invariance property, there is a tight
+connection between the geometry induced by the Rényi divergence and the Fisher information metric.
+
+Theorem 4.2. Let pω be a p.d.f. differentiable w.r.t. ω ∈ Ω. Then, it holds that, for the Rényi
+2 (ω(cid:48) − ω)T F(ω) (ω(cid:48) − ω)+o((cid:107)ω(cid:48)−ω(cid:107)2
+divergence: Dα(pω(cid:48)(cid:107)pω) = α
+2), and for the exponentiated
+2 (ω(cid:48) − ω)T F(ω) (ω(cid:48) − ω) + o((cid:107)ω(cid:48) − ω(cid:107)2
+Rényi divergence: dα(pω(cid:48)(cid:107)pω) = 1 + α
+2).
+
+This result provides an approximate expression for the variance of the importance weights, as
+2 (ω(cid:48) − ω)T F(ω) (ω(cid:48) − ω). It also justiﬁes the use
+Varx∼pω
+of natural gradients in off-distribution optimization, since a step in natural gradient direction has a
+controllable effect on the variance of the importance weights.
+
+(cid:2)wω(cid:48)/ω(x)(cid:3) = d2(pω(cid:48)(cid:107)pω) − 1 (cid:39) α
+
+5 Policy Optimization via Importance Sampling
+
+In this section, we discuss how to customize the bound provided in Theorem 4.1 for policy optimiza-
+tion, developing a novel model-free actor-only policy search algorithm, named Policy Optimization
+via Importance Sampling (POIS). We propose two versions of POIS: Action-based POIS (A-POIS),
+which is based on a policy gradient approach, and Parameter-based POIS (P-POIS), which adopts
+the PGPE framework. A more detailed description of the implementation aspects is reported in
+Appendix E.
+
+5.1 Action-based POIS
+
+In Action-based POIS (A-POIS) we search for a policy that maximizes the performance index JD(θ)
+within a parametric space ΠΘ = {πθ : θ ∈ Θ ⊆ Rp} of stochastic differentiable policies. In
+this context, the behavioral (resp. target) distribution Q (resp. P ) becomes the distribution over
+trajectories p(·|θ) (resp. p(·|θ(cid:48))) induced by the behavioral policy πθ (resp. target policy πθ(cid:48)) and f
+1−γH
+1−γ .5 The surrogate
+is the trajectory return R(τ ) which is uniformly bounded as |R(τ )| ≤ Rmax
+(cid:0)p(·|θ(cid:48))(cid:107)p(·|θ)(cid:1)
+loss function cannot be directly optimized via gradient ascent since computing dα
+requires the approximation of an integral over the trajectory space and, for stochastic environments,
+to know the transition model P , which is unknown in a model-free setting. Simple bounds to this
+(cid:0)p(·|θ(cid:48))(cid:107)p(·|θ)(cid:1) ≤ sups∈S dα (πθ(cid:48)(·|s)(cid:107)πθ(·|s))H , besides being hard to compute
+quantity, like dα
+due to the presence of the supremum, are extremely conservative since the Rényi divergence is
+raised to the horizon H. We suggest the replacement of the Rényi divergence with an estimate
+t=0 d2 (πθ(cid:48)(·|sτi,t)(cid:107)πθ(·|sτi,t)) deﬁned only in terms of the pol-
+(cid:98)d2
+icy Rényi divergence (see Appendix E.2 for details). Thus, we obtain the following surrogate
+
+(cid:0)p(·|θ(cid:48))(cid:107)p(·|θ)(cid:1) = 1
+
+(cid:81)H−1
+
+(cid:80)N
+
+i=1
+
+N
+
+5When γ → 1 the bound becomes HRmax.
+
+6
+
+objective:
+
+wθ(cid:48)/θ(τi)R(τi) − λ
+
+(9)
+
+(cid:115)
+
+(cid:98)d2
+
+(cid:0)p(·|θ(cid:48))(cid:107)p(·|θ)(cid:1)
+N
+
+,
+
+LA−POIS
+
+λ
+
+N
+(cid:88)
+
+(θ(cid:48)/θ) =
+
+1
+N
+p(τi|θ) = (cid:81)H−1
+
+t=0
+
+(aτi,t|sτi,t)
+
+i=1
+πθ(cid:48)
+where wθ(cid:48)/θ(τi) = p(τi|θ(cid:48))
+πθ (aτi,t|sτi,t) . We consider the case in which πθ(·|s) is a
+Gaussian distribution over actions whose mean depends on the state and whose covariance is state-
+independent and diagonal: N (uµ(s), diag(σ2)), where θ = (µ, σ). The learning process mixes
+online and ofﬂine optimization. At each online iteration j, a dataset of N trajectories is collected
+by executing in the environment the current policy πθj
+. These trajectories are used to optimize the
+surrogate loss function LA−POIS
+ascent: θj
+line search (see Appendix E.1) and G(θj
+for natural gradient)6. The pseudo-code of POIS is reported in Algorithm 1.
+
+. At each ofﬂine iteration k, the parameters are updated via gradient
+0), where αk > 0 is the step size which is chosen via
+k), the FIM,
+
+k) is a positive semi-deﬁnite matrix (e.g., F(θj
+
+k + αkG(θj
+
+k+1 = θj
+
+k)−1∇θj
+
+k/θj
+
+L(θj
+
+λ
+
+k
+
+0
+
+5.2 Parameter-based POIS
+
+In the Parameter-based POIS (P-POIS) we again consider a parametrized policy space ΠΘ =
+{πθ : θ ∈ Θ ⊆ Rp}, but πθ needs not be differentiable. The policy parameters θ are sampled
+at the beginning of each episode from a parametric hyperpolicy νρ selected in a parametric space
+NP = {νρ : ρ ∈ P ⊆ Rr}. The goal is to learn the hyperparameters ρ so as to maximize JD(ρ).
+In this setting, the distributions Q and P of Section 4 correspond to the behavioral νρ and target
+νρ(cid:48) hyperpolicies, while f remains the trajectory return R(τ ). The importance weights [66] must
+take into account all sources of randomness, derived from sampling a policy parameter θ and a
+trajectory τ : wρ(cid:48)/ρ(θ) = νρ(cid:48)
+νρ(θ) . In practice, a Gaussian hyperpolicy νρ with diagonal
+covariance matrix is often used, i.e., N (µ, diag(σ2)) with ρ = (µ, σ). The policy is assumed to
+be deterministic: πθ(a|s) = δ(a − uθ(s)), where uθ is a deterministic function of the state s [e.g.,
+45, 13]. A ﬁrst advantage over the action-based setting is that the distribution of the importance
+weights is entirely known, as it is the ratio of two Gaussians and the Rényi divergence d2(νρ(cid:48)(cid:107)νρ)
+can be computed exactly [5] (see Appendix C). This leads to the following surrogate objective:
+
+νρ(θ)p(τ |θ) = νρ(cid:48)
+
+(θ)p(τ |θ)
+
+(θ)
+
+LP−POIS
+
+(ρ(cid:48)/ρ) =
+
+λ
+
+wρ(cid:48)/ρ(θi)R(τi) − λ
+
+(10)
+
+(cid:114)
+
+d2 (νρ(cid:48)(cid:107)νρ)
+N
+
+,
+
+1
+N
+
+N
+(cid:88)
+
+i=1
+
+where each trajectory τi is obtained by running an episode with action policy πθi, and the cor-
+responding policy parameters θi are sampled independently from hyperpolicy νρ, at the be-
+ginning of each episode. The hyperpolicy parameters are then updated ofﬂine as ρj
+k+1 =
+ρj
+k + αkG(ρj
+0) (see Algorithm 2 for the complete pseudo-code). A further ad-
+vantage w.r.t. the action-based case is that the FIM F(ρ) can be computed exactly, and it is diagonal
+in the case of a Gaussian hyperpolicy with diagonal covariance matrix, turning a problematic inversion
+into a trivial division (the FIM is block-diagonal in the more general case of a Gaussian hyperpolicy,
+as observed in [25]). This makes natural gradient much more enticing for P-POIS.
+
+k)−1∇ρj
+
+k/ρj
+
+L(ρj
+
+k
+
+6 Experimental Evaluation
+
+In this section, we present the experimental evaluation of POIS in its two ﬂavors (action-based and
+parameter-based). We ﬁrst provide a set of empirical comparisons on classical continuous control
+tasks with linearly parametrized policies; we then show how POIS can be also adopted for learning
+deep neural policies. In all experiments, for the A-POIS we used the IS estimator, while for P-POIS
+we employed the SN estimator. All experimental details are provided in Appendix F.
+
+6.1 Linear Policies
+
+Linear parametrized Gaussian policies proved their ability to scale on complex control tasks [37]. In
+this section, we compare the learning performance of A-POIS and P-POIS against TRPO [41] and
+
+6The FIM needs to be estimated via importance sampling as well, as shown in Appendix E.3.
+
+7
+
+Task A-POIS P-POIS TRPO PPO
+
+(a)
+(b)
+(c)
+(d)
+(e)
+
+0.4
+0.1
+0.7
+0.9
+0.9
+
+0.4
+0.1
+0.2
+1
+0.8
+
+0.01
+1
+1
+1
+
+0.1
+0.1
+1
+0.01
+0.01 0.01
+
+(a) Cartpole
+
+(b) Inverted Double Pendulum
+
+(c) Acrobot
+
+(d) Mountain Car
+
+(e) Inverted Pendulum
+
+Figure 1: Average return as a function of the number of trajectories for A-POIS, P-POIS and TRPO
+with linear policy (20 runs, 95% c.i.). The table reports the best hyperparameters found (δ for POIS
+and the step size for TRPO and PPO).
+
+PPO [43] on classical continuous control benchmarks [11]. In Figure 1, we can see that both versions
+of POIS are able to signiﬁcantly outperform both TRPO and PPO in the Cartpole environments,
+especially the P-POIS. In the Inverted Double Pendulum environment the learning curve of P-POIS
+is remarkable while A-POIS displays a behavior comparable to PPO. In the Acrobot task, P-POIS
+displays a better performance w.r.t. TRPO and PPO, but A-POIS does not keep up. In Mountain Car,
+we see yet another behavior: the learning curves of TRPO, PPO and P-POIS are almost one-shot (even
+if PPO shows a small instability), while A-POIS fails to display such a fast convergence. Finally, in
+the Inverted Pendulum environment, TRPO and PPO outperform both versions of POIS. This example
+highlights a limitation of our approach. Since POIS performs an importance sampling procedure at
+trajectory level, it cannot assign credit to good actions in bad trajectories. On the contrary, weighting
+each sample, TRPO and PPO are able also to exploit good trajectory segments. In principle, this
+problem can be mitigated in POIS by resorting to per-decision importance sampling [35], in which
+the weight is assigned to individual rewards instead of trajectory returns. Overall, POIS displays
+a performance comparable with TRPO and PPO across the tasks. In particular, P-POIS displays a
+better performance w.r.t. A-POIS. However, this ordering is not maintained when moving to more
+complex policy architectures, as shown in the next section.
+
+In Figure 2 we show, for several metrics, the behavior of A-POIS when changing the δ parameter
+in the Cartpole environment. We can see that when δ is small (e.g., 0.2), the Effective Sample Size
+(ESS) remains large and, consequently, the variance of the importance weights (Var[w]) is small.
+This means that the penalization term in the objective function discourages the optimization process
+from selecting policies which are far from the behavioral policy. As a consequence, the displayed
+behavior is very conservative, preventing the policy from reaching the optimum. On the contrary,
+when δ approaches 1, the ESS is smaller and the variance of the weights tends to increase signiﬁcantly.
+Again, the performance remains suboptimal as the penalization term in the objective function is too
+light. The best behavior is obtained with an intermediate value of δ, speciﬁcally 0.4.
+
+6.2 Deep Neural Policies
+
+In this section, we adopt a deep neural network (3 layers: 100, 50, 25 neurons each) to represent
+the policy. The experiment setup is fully compatible with the classical benchmark [11]. While
+A-POIS can be directly applied to deep neural networks, P-POIS exhibits some critical issues. A
+highly dimensional hyperpolicy (like a Gaussian from which the weights of an MLP policy are
+
+8
+
+Figure 2: Average return, Effective Sample Size (ESS) and variance of the importance weights
+(Var[w]) as a function of the number of trajectories for A-POIS for different values of the parameter
+δ in the Cartpole environment (20 runs, 95% c.i.).
+
+Table 1: Performance of POIS compated with [11] on deep neural policies (5 runs, 95% c.i.). In bold,
+the performances that are not statistically signiﬁcantly different from the best algorithm in each task.
+
+Algorithm
+
+REINFORCE
+TRPO
+DDPG
+A-POIS
+CEM
+P-POIS
+
+Cart-Pole
+Balancing
+
+4693.7 ± 14.0
+4869.8 ± 37.6
+4634.4 ± 87.6
+4842.8 ± 13.0
+4815.4 ± 4.8
+4428.1 ± 138.6
+
+Mountain Car
+
+−67.1 ± 1.0
+−61.7 ± 0.9
+−288.4 ± 170.3
+−63.7 ± 0.5
+−66.0 ± 2.4
+−78.9 ± 2.5
+
+Double Inverted
+Pendulum
+
+4116.5 ± 65.2
+4412.4 ± 50.4
+2863.4 ± 154.0
+4232.1 ± 189.5
+2566.2 ± 178.9
+3161.4 ± 959.2
+
+Swimmer
+
+92.3 ± 0.1
+96.0 ± 0.2
+85.8 ± 1.8
+88.7 ± 0.55
+68.8 ± 2.4
+76.8 ± 1.6
+
+sampled) can make d2(νρ(cid:48)(cid:107)νρ) extremely sensitive to small parameter changes, leading to over-
+conservative updates.7 A ﬁrst practical variant comes from the insight that d2(νρ(cid:48)(cid:107)νρ)/N is the
+inverse of the effective sample size, as reported in Equation 6. We can obtain a less conservative
+(although approximate) surrogate function by replacing it with 1/ (cid:100)ESS(νρ(cid:48)(cid:107)νρ). Another trick is to
+model the hyperpolicy as a set of independent Gaussians, each deﬁned over a disjoint subspace of Θ
+(implementation details are provided in Appendix E.5). In Table 1, we augmented the results provided
+in [11] with the performance of POIS for the considered tasks. We can see that A-POIS is able
+to reach an overall behavior comparable with the best of the action-based algorithms, approaching
+TRPO and beating DDPG. Similarly, P-POIS exhibits a performance similar to CEM [51], the best
+performing among the parameter-based methods. The complete results are reported in Appendix F.
+
+7 Discussion and Conclusions
+
+In this paper, we presented a new actor-only policy optimization algorithm, POIS, which alternates
+online and ofﬂine optimization in order to efﬁciently exploit the collected trajectories, and can be
+used in combination with action-based and parameter-based exploration. In contrast to the state-of-
+the-art algorithms, POIS has a strong theoretical grounding, since its surrogate objective function
+derives from a statistical bound on the estimated performance, that is able to capture the uncertainty
+induced by importance sampling. The experimental evaluation showed that POIS, in both its versions
+(action-based and parameter-based), is able to achieve a performance comparable with TRPO, PPO
+and other classical algorithms on continuous control tasks. Natural extensions of POIS could focus
+on employing per-decision importance sampling, adaptive batch size, and trajectory reuse. Future
+work also includes scaling POIS to high-dimensional tasks and highly-stochastic environments. We
+believe that this work represents a valuable starting point for a deeper understanding of modern policy
+optimization and for the development of effective and scalable policy search methods.
+
+7This curse of dimensionality, related to dim(θ), has some similarities with the dependence of the Rényi
+
+divergence on the actual horizon H in the action-based case.
+
+9
+
+Acknowledgments
+
+References
+
+1998.
+
+Media, 2012.
+
+The study was partially funded by Lombardy Region (Announcement PORFESR 2014-2020).
+F.F. was partially funded through ERC Advanced Grant (no: 742870).
+
+[1] Shun-Ichi Amari. Natural gradient works efﬁciently in learning. Neural computation, 10(2):251–276,
+
+[2] Shun-ichi Amari. Differential-geometrical methods in statistics, volume 28. Springer Science & Business
+
+[3] Jonathan Baxter and Peter L Bartlett. Inﬁnite-horizon policy-gradient estimation. Journal of Artiﬁcial
+
+Intelligence Research, 15:319–350, 2001.
+
+[4] Bernard Bercu, Bernard Delyon, and Emmanuel Rio. Concentration inequalities for sums. In Concentration
+
+Inequalities for Sums and Martingales, pages 11–60. Springer, 2015.
+
+[5] Jacob Burbea. The convexity with respect to gaussian distributions of divergences of order α. Utilitas
+
+Mathematica, 26:171–192, 1984.
+
+[6] William G Cochran. Sampling techniques. John Wiley & Sons, 2007.
+
+[7] Corinna Cortes, Yishay Mansour, and Mehryar Mohri. Learning bounds for importance weighting. In
+
+Advances in neural information processing systems, pages 442–450, 2010.
+
+[8] Thomas Degris, Martha White, and Richard S Sutton. Off-policy actor-critic.
+
+arXiv preprint
+
+arXiv:1205.4839, 2012.
+
+[9] Marc Peter Deisenroth, Gerhard Neumann, Jan Peters, et al. A survey on policy search for robotics.
+
+Foundations and Trends in Robotics, 2(1–2):1–142, 2013.
+
+[10] Shayan Doroudi, Philip S Thomas, and Emma Brunskill. Importance sampling for fair policy selection.
+
+UAI, 2017.
+
+[11] Yan Duan, Xi Chen, Rein Houthooft, John Schulman, and Pieter Abbeel. Benchmarking deep reinforcement
+learning for continuous control. In International Conference on Machine Learning, pages 1329–1338,
+2016.
+
+[12] Xavier Glorot and Yoshua Bengio. Understanding the difﬁculty of training deep feedforward neural
+networks. In Proceedings of the thirteenth international conference on artiﬁcial intelligence and statistics,
+pages 249–256, 2010.
+
+[13] Mandy Grüttner, Frank Sehnke, Tom Schaul, and Jürgen Schmidhuber. Multi-dimensional deep memory
+
+go-player for parameter exploring policy gradients.
+
+[14] Zhaohan Guo, Philip S Thomas, and Emma Brunskill. Using options and covariance testing for long
+In Advances in Neural Information Processing Systems, pages
+
+horizon off-policy policy evaluation.
+2489–2498, 2017.
+
+[15] Nikolaus Hansen and Andreas Ostermeier. Completely derandomized self-adaptation in evolution strategies.
+
+Evolutionary computation, 9(2):159–195, 2001.
+
+[16] Timothy Classen Hesterberg. Advances in importance sampling. PhD thesis, Stanford University, 1988.
+
+[17] Sham Kakade and John Langford. Approximately optimal approximate reinforcement learning. In ICML,
+
+volume 2, pages 267–274, 2002.
+
+1531–1538, 2002.
+
+[18] Sham M Kakade. A natural policy gradient. In Advances in neural information processing systems, pages
+
+[19] Jens Kober, J Andrew Bagnell, and Jan Peters. Reinforcement learning in robotics: A survey. The
+
+International Journal of Robotics Research, 32(11):1238–1274, 2013.
+
+[20] Vijay R Konda and John N Tsitsiklis. Actor-critic algorithms. In Advances in neural information processing
+
+systems, pages 1008–1014, 2000.
+
+10
+
+[21] Augustine Kong. A note on importance sampling using standardized weights. University of Chicago, Dept.
+
+of Statistics, Tech. Rep, 348, 1992.
+
+[22] Timothy P Lillicrap, Jonathan J Hunt, Alexander Pritzel, Nicolas Heess, Tom Erez, Yuval Tassa, David
+Silver, and Daan Wierstra. Continuous control with deep reinforcement learning. arXiv preprint
+arXiv:1509.02971, 2015.
+
+[23] Luca Martino, Víctor Elvira, and Francisco Louzada. Effective sample size for importance sampling based
+
+on discrepancy measures. Signal Processing, 131:386–401, 2017.
+
+[24] Takamitsu Matsubara, Tetsuro Morimura, and Jun Morimoto. Adaptive step-size policy gradients with
+average reward metric. In Proceedings of 2nd Asian Conference on Machine Learning, pages 285–298,
+2010.
+
+[25] Atsushi Miyamae, Yuichi Nagata, Isao Ono, and Shigenobu Kobayashi. Natural policy gradient methods
+with parameter-based exploration for control tasks. In Advances in neural information processing systems,
+pages 1660–1668, 2010.
+
+[26] Rémi Munos, Tom Stepleton, Anna Harutyunyan, and Marc Bellemare. Safe and efﬁcient off-policy
+reinforcement learning. In Advances in Neural Information Processing Systems, pages 1054–1062, 2016.
+
+[27] Andrew Y Ng and Michael Jordan. Pegasus: A policy search method for large mdps and pomdps. In
+Proceedings of the Sixteenth conference on Uncertainty in artiﬁcial intelligence, pages 406–415. Morgan
+Kaufmann Publishers Inc., 2000.
+
+[28] Art B. Owen. Monte Carlo theory, methods and examples. 2013.
+
+[29] Jing Peng and Ronald J Williams. Incremental multi-step q-learning. In Machine Learning Proceedings
+
+1994, pages 226–232. Elsevier, 1994.
+
+[30] Jan Peters, Katharina Mülling, and Yasemin Altun. Relative entropy policy search. In AAAI, pages
+
+1607–1612. Atlanta, 2010.
+
+[31] Jan Peters and Stefan Schaal. Reinforcement learning by reward-weighted regression for operational space
+control. In Proceedings of the 24th international conference on Machine learning, pages 745–750. ACM,
+2007.
+
+[32] Jan Peters and Stefan Schaal. Natural actor-critic. Neurocomputing, 71(7-9):1180–1190, 2008.
+
+[33] Jan Peters and Stefan Schaal. Reinforcement learning of motor skills with policy gradients. Neural
+
+networks, 21(4):682–697, 2008.
+
+[34] Matteo Pirotta, Marcello Restelli, Alessio Pecorino, and Daniele Calandriello. Safe policy iteration. In
+
+International Conference on Machine Learning, pages 307–315, 2013.
+
+[35] Doina Precup, Richard S Sutton, and Satinder P Singh. Eligibility traces for off-policy policy evaluation.
+
+In ICML, pages 759–766. Citeseer, 2000.
+
+[36] Martin L Puterman. Markov decision processes: discrete stochastic dynamic programming. John Wiley &
+
+Sons, 2014.
+
+[37] Aravind Rajeswaran, Kendall Lowrey, Emanuel V Todorov, and Sham M Kakade. Towards generalization
+and simplicity in continuous control. In Advances in Neural Information Processing Systems, pages
+6553–6564, 2017.
+
+[38] C Radhakrishna Rao. Information and the accuracy attainable in the estimation of statistical parameters. In
+
+Breakthroughs in statistics, pages 235–247. Springer, 1992.
+
+[39] Alfréd Rényi. On measures of entropy and information. Technical report, HUNGARIAN ACADEMY OF
+
+SCIENCES Budapest Hungary, 1961.
+
+[40] Reuven Rubinstein. The cross-entropy method for combinatorial and continuous optimization. Methodology
+
+and computing in applied probability, 1(2):127–190, 1999.
+
+[41] John Schulman, Sergey Levine, Pieter Abbeel, Michael Jordan, and Philipp Moritz. Trust region policy
+
+optimization. In International Conference on Machine Learning, pages 1889–1897, 2015.
+
+[42] John Schulman, Philipp Moritz, Sergey Levine, Michael Jordan, and Pieter Abbeel. High-dimensional
+continuous control using generalized advantage estimation. arXiv preprint arXiv:1506.02438, 2015.
+
+11
+
+[43] John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov. Proximal policy
+
+optimization algorithms. arXiv preprint arXiv:1707.06347, 2017.
+
+[44] Frank Sehnke, Christian Osendorfer, Thomas Rückstieß, Alex Graves, Jan Peters, and Jürgen Schmidhuber.
+Policy gradients with parameter-based exploration for control. In International Conference on Artiﬁcial
+Neural Networks, pages 387–396. Springer, 2008.
+
+[45] Frank Sehnke, Christian Osendorfer, Thomas Rückstieß, Alex Graves, Jan Peters, and Jürgen Schmidhuber.
+
+Parameter-exploring policy gradients. Neural Networks, 23(4):551–559, 2010.
+
+[46] David Silver, Guy Lever, Nicolas Heess, Thomas Degris, Daan Wierstra, and Martin Riedmiller. Determin-
+
+istic policy gradient algorithms. In ICML, 2014.
+
+[47] Kenneth O Stanley and Risto Miikkulainen. Evolving neural networks through augmenting topologies.
+
+Evolutionary computation, 10(2):99–127, 2002.
+
+[48] Yi Sun, Daan Wierstra, Tom Schaul, and Juergen Schmidhuber. Efﬁcient natural evolution strategies. In
+Proceedings of the 11th Annual conference on Genetic and evolutionary computation, pages 539–546.
+ACM, 2009.
+
+[49] Richard S Sutton and Andrew G Barto. Reinforcement learning: An introduction, volume 1. MIT press
+
+Cambridge, 1998.
+
+[50] Richard S Sutton, David A McAllester, Satinder P Singh, and Yishay Mansour. Policy gradient methods
+for reinforcement learning with function approximation. In Advances in neural information processing
+systems, pages 1057–1063, 2000.
+
+[51] István Szita and András Lörincz. Learning tetris using the noisy cross-entropy method. Neural computation,
+
+18(12):2936–2941, 2006.
+
+[52] Russ Tedrake, Teresa Weirui Zhang, and H Sebastian Seung. Stochastic policy gradient reinforcement
+learning on a simple 3d biped. In Intelligent Robots and Systems, 2004.(IROS 2004). Proceedings. 2004
+IEEE/RSJ International Conference on, volume 3, pages 2849–2854. IEEE, 2004.
+
+[53] Philip Thomas and Emma Brunskill. Data-efﬁcient off-policy policy evaluation for reinforcement learning.
+
+In International Conference on Machine Learning, pages 2139–2148, 2016.
+
+[54] Philip Thomas, Georgios Theocharous, and Mohammad Ghavamzadeh. High conﬁdence policy improve-
+
+ment. In International Conference on Machine Learning, pages 2380–2388, 2015.
+
+[55] Philip S Thomas, Georgios Theocharous, and Mohammad Ghavamzadeh. High-conﬁdence off-policy
+
+evaluation. In AAAI, pages 3000–3006, 2015.
+
+[56] Emanuel Todorov, Tom Erez, and Yuval Tassa. Mujoco: A physics engine for model-based control. In
+Intelligent Robots and Systems (IROS), 2012 IEEE/RSJ International Conference on, pages 5026–5033.
+IEEE, 2012.
+
+[57] George Tucker, Surya Bhupatiraju, Shixiang Gu, Richard E Turner, Zoubin Ghahramani, and Sergey Levine.
+The mirage of action-dependent baselines in reinforcement learning. arXiv preprint arXiv:1802.10031,
+2018.
+
+[58] Tim Van Erven and Peter Harremos. Rényi divergence and kullback-leibler divergence. IEEE Transactions
+
+on Information Theory, 60(7):3797–3820, 2014.
+
+[59] Jay M Ver Hoef. Who invented the delta method? The American Statistician, 66(2):124–127, 2012.
+
+[60] Ziyu Wang, Victor Bapst, Nicolas Heess, Volodymyr Mnih, Remi Munos, Koray Kavukcuoglu, and Nando
+de Freitas. Sample efﬁcient actor-critic with experience replay. arXiv preprint arXiv:1611.01224, 2016.
+
+[61] Christopher JCH Watkins and Peter Dayan. Q-learning. Machine learning, 8(3-4):279–292, 1992.
+
+[62] Daan Wierstra, Tom Schaul, Jan Peters, and Juergen Schmidhuber. Natural evolution strategies.
+
+In
+Evolutionary Computation, 2008. CEC 2008.(IEEE World Congress on Computational Intelligence). IEEE
+Congress on, pages 3381–3387. IEEE, 2008.
+
+[63] Ronald J Williams. Simple statistical gradient-following algorithms for connectionist reinforcement
+
+learning. In Reinforcement Learning, pages 5–32. Springer, 1992.
+
+12
+
+[64] Cathy Wu, Aravind Rajeswaran, Yan Duan, Vikash Kumar, Alexandre M Bayen, Sham Kakade, Igor
+Mordatch, and Pieter Abbeel. Variance reduction for policy gradient with action-dependent factorized
+baselines. arXiv preprint arXiv:1803.07246, 2018.
+
+[65] Tingting Zhao, Hirotaka Hachiya, Gang Niu, and Masashi Sugiyama. Analysis and improvement of policy
+gradient estimation. In Advances in Neural Information Processing Systems, pages 262–270, 2011.
+
+[66] Tingting Zhao, Hirotaka Hachiya, Voot Tangkaratt, Jun Morimoto, and Masashi Sugiyama. Efﬁcient
+sample reuse in policy gradients with parameter-based exploration. Neural computation, 25(6):1512–1547,
+2013.
+
+13
+
+Index of the Appendix
+
+In the following, we brieﬂy recap the contents of the Appendix.
+
+– Appendix A shows a more detailed comparison of POIS with the policy-search algorithms. Table 2
+
+summarizes some features of the considered methods.
+
+– Appendix B reports all proofs and derivations.
+– Appendix C provides an analysis of the distribution of the importance weights in the case of
+
+univariate Gaussian behavioral and target distributions.
+
+– Appendix D shows some bounds on bias and variance for the self-normalized importance sampling
+
+estimator and provides a high conﬁdence bound.
+
+– Appendix E illustrates some implementation details of POIS, in particular line search algorithms,
+estimation of the Rényi divergence, computation of the FIM and practical versions of P-POIS.
+
+– Appendix F provides the hyperparameters used in the experiments and further results.
+
+A Related Works
+
+Policy optimization algorithms can be classiﬁed according to different dimensions (Table 2). It is by
+now established, in the policy-based RL community, that effective algorithms, either on-policy or
+off-policy, should account for the variance of the gradient estimate. Early attempts, in the class of
+action-based algorithms, are the usage of a baseline to reduce the estimated gradient variance without
+introducing bias [3, 33]. A similar rationale is at the basis of actor-critic architectures [20, 50, 32],
+in which an estimate of the value function is used to reduce uncertainty. Baselines are typically
+constant (REINFORCE), time-dependent (G(PO)MDP) or state-dependent (actor-critic), but these
+approaches have been recently extended to account for action-dependent baselines [57, 64]. Even
+though parameter-based algorithms are, by nature, affected by smaller variance w.r.t. action-based
+ones, similar baselines can be derived [65]. A ﬁrst dichotomy in the class of policy-based algorithms
+comes when considering the minimal unit used to compute the gradient. Episode-based (or episodic)
+approaches [e.g., 63, 3] perform the gradient estimation by averaging the gradients of each episode
+which need to have a ﬁnite horizon. On the contrary, step-based approaches [e.g., 41, 43, 22], derived
+from the Policy Gradient Theorem [50], can estimate the gradient by averaging over timesteps. The
+latter requires a function approximator (a critic) to estimate the Q-function, or directly the advantage
+function [42]. When coming to the on/off-policy dichotomy, the previous distinction has a relevant
+impact. Indeed, episode-based approaches need to perform importance sampling on trajectories, thus
+the importance weights are the products of policy ratios for all executed actions within a trajectory,
+whereas step-based algorithms need just to weight each sample with the corresponding policy ratio.
+The latter case helps to keep the value of the importance weights close to one, but the need to have
+a critic prevents from a complete analysis of the uncertainty since the bias/variance injected by the
+critic is hard to compute [20]. Moreover, in the off-policy scenario, it is necessary to control some
+notion of dissimilarity between the behavioral and target policy, as the variance increases when
+moving too far. This is the case of TRPO [41], where the regularization constraint based on the
+Kullback-Leibler divergence helps controlling the importance weights but originates from an exact
+bound on the performance improvement. Intuitively, the same rationale applies to the truncation of
+the importance weights, employed by PPO, that avoids performing too large steps in the policy space.
+Nevertheless, the step size in TRPO and the truncation range (cid:15) in PPO are just hyperparameters and
+have a limited statistical meaning. On the contrary, other actor-critic architectures have been proposed
+including also experience replay methods, like [60] in which the importance weights are truncated,
+but the method is able to account for the injected bias. The authors propose to keep a running mean
+of the best policies seen so far to avoid a hard constraint on the policy dissimilarity. Differently
+from these methods, POIS directly models the uncertainty due to the importance sampling procedure.
+The bound in Theorem 4.1 introduces the unique hyperparameter δ which has a precise statistical
+meaning as conﬁdence level. The optimal value of δ (like the step size in TRPO and (cid:15) in PPO) is
+task-dependent and might vary during the learning procedure. Furthermore, POIS is an episode-based
+approach in which the importance weights account for the whole trajectory at once; this might prevent
+from assigning credit to valuable subtrajectories (like in the case of Inverted Pendulum, see Figure 1).
+A possible solution is to resort to per-decision importance sampling [35].
+
+14
+
+r
+o
+F
+
+.
+
+)
+t
+s
+|
+t
+a
+(
+
+(cid:48)
+
+θ
+π
+
+)
+t
+s
+|
+t
+a
+(
+θ
+π
+
+l
+a
+c
+i
+r
+i
+p
+m
+e
+
+e
+h
+t
+
+s
+i
+
+=
+)
+t
+s
+|
+t
+a
+(
+θ
+/
+(cid:48)
+θ
+w
+h
+t
+i
+
+t
+
+θ
+∼
+(cid:98)E
+s
+m
+h
+t
+i
+r
+o
+g
+l
+a
+
+θ
+∼
+τ
+,
+ρ
+∼
+θ
+(cid:98)E
+h
+t
+i
+
+d
+e
+l
+p
+m
+a
+s
+
+θ
+r
+e
+t
+e
+m
+a
+r
+a
+p
+y
+c
+i
+l
+o
+p
+.
+t
+.
+r
+.
+
+w
+n
+e
+k
+a
+t
+n
+o
+i
+t
+a
+t
+c
+e
+p
+x
+e
+
+l
+a
+c
+i
+r
+i
+p
+m
+e
+
+e
+h
+t
+
+w
+e
+t
+a
+c
+i
+d
+n
+i
+
+e
+w
+s
+m
+h
+t
+i
+r
+o
+g
+l
+a
+d
+e
+s
+a
+b
+-
+r
+e
+t
+e
+m
+a
+r
+a
+p
+r
+o
+F
+
+.
+θ
+π
+h
+t
+i
+
+w
+s
+e
+l
+p
+m
+a
+s
+g
+n
+i
+t
+c
+e
+l
+l
+o
+c
+
+e
+g
+a
+r
+e
+v
+a
+
+d
+e
+s
+a
+b
+-
+p
+e
+t
+s
+
+r
+o
+F
+
+.
+θ
+π
+h
+t
+i
+
+w
+d
+e
+t
+c
+e
+l
+l
+o
+c
+
+s
+e
+i
+r
+o
+t
+c
+e
+j
+a
+r
+t
+
+r
+e
+v
+o
+
+e
+g
+a
+r
+e
+v
+a
+
+l
+a
+c
+i
+r
+i
+p
+m
+e
+
+e
+h
+t
+
+w
+e
+t
+a
+c
+i
+d
+n
+i
+
+l
+l
+i
+
+w
+e
+w
+s
+m
+h
+t
+i
+r
+o
+g
+l
+a
+
+d
+e
+s
+a
+b
+-
+e
+d
+o
+s
+i
+p
+e
+
+θ
+∼
+τ
+(cid:98)E
+h
+t
+i
+
+.
+
+n
+o
+i
+t
+c
+n
+u
+f
+
+e
+g
+a
+t
+n
+a
+v
+d
+a
+
+d
+n
+a
+
+n
+o
+i
+t
+c
+n
+u
+f
+-
+
+Q
+d
+e
+t
+a
+m
+
+i
+t
+s
+e
+
+e
+h
+t
+
+e
+r
+a
+(cid:98)A
+d
+n
+a
+(cid:98)Q
+
+,
+s
+e
+r
+u
+t
+c
+e
+t
+i
+h
+c
+r
+a
+
+c
+i
+t
+i
+r
+c
+-
+r
+o
+t
+c
+a
+
+e
+h
+t
+
+r
+o
+F
+
+.
+θ
+π
+h
+t
+i
+
+w
+d
+e
+t
+c
+e
+l
+l
+o
+c
+
+τ
+
+y
+r
+o
+t
+c
+e
+j
+a
+r
+t
+d
+n
+a
+
+ρ
+ν
+y
+c
+i
+l
+o
+p
+r
+e
+p
+y
+h
+
+e
+h
+t
+
+m
+o
+r
+f
+
+w
+e
+t
+a
+c
+i
+d
+n
+i
+
+l
+l
+i
+
+w
+e
+w
+
+,
+y
+t
+i
+v
+e
+r
+b
+r
+o
+F
+
+.
+s
+n
+o
+i
+s
+n
+e
+m
+i
+d
+t
+n
+e
+r
+e
+f
+f
+i
+d
+o
+t
+g
+n
+i
+d
+r
+o
+c
+c
+a
+
+s
+m
+h
+t
+i
+r
+o
+g
+l
+a
+n
+o
+i
+t
+a
+z
+i
+m
+
+i
+t
+p
+o
+y
+c
+i
+l
+o
+p
+e
+m
+o
+s
+
+f
+o
+n
+o
+s
+i
+r
+a
+p
+m
+o
+C
+
+:
+2
+e
+l
+b
+a
+T
+
+y
+r
+o
+t
+c
+e
+j
+a
+r
+T
+/
+p
+e
+t
+s
+e
+m
+T
+
+i
+
+d
+e
+s
+a
+b
+
+c
+i
+t
+i
+r
+
+C
+
+m
+e
+l
+b
+o
+r
+p
+
+n
+o
+i
+t
+a
+z
+i
+m
+
+i
+t
+p
+O
+
+y
+c
+i
+l
+o
+p
+f
+f
+
+O
+/
+n
+O
+
+m
+h
+t
+i
+r
+o
+g
+l
+A
+
+r
+e
+t
+e
+m
+a
+r
+a
+P
+
+/
+n
+o
+i
+t
+c
+A
+
+d
+e
+s
+a
+b
+
+d
+e
+s
+a
+b
+-
+e
+d
+o
+s
+i
+p
+e
+
+d
+e
+s
+a
+b
+-
+p
+e
+t
+s
+
+d
+e
+s
+a
+b
+-
+p
+e
+t
+s
+
+d
+e
+s
+a
+b
+-
+p
+e
+t
+s
+
+d
+e
+s
+a
+b
+-
+p
+e
+t
+s
+
+d
+e
+s
+a
+b
+-
+p
+e
+t
+s
+
+d
+e
+s
+a
+b
+-
+e
+d
+o
+s
+i
+p
+e
+
+d
+e
+s
+a
+b
+-
+e
+d
+o
+s
+i
+p
+e
+
+d
+e
+s
+a
+b
+-
+e
+d
+o
+s
+i
+p
+e
+
+d
+e
+s
+a
+b
+-
+e
+d
+o
+s
+i
+p
+e
+
+o
+N
+
+s
+e
+Y
+
+s
+e
+Y
+
+s
+e
+Y
+
+s
+e
+Y
+
+o
+N
+
+o
+N
+
+o
+N
+
+o
+N
+
+o
+N
+
+(cid:105)
+(cid:111)
+
+)
+t
+a
+,
+t
+s
+(
+(cid:98)A
+(cid:1)
+
+(cid:15)
++
+1
+,
+(cid:15)
+−
+1
+,
+)
+t
+s
+|
+t
+a
+(
+θ
+/
+(cid:48)
+θ
+w
+
+(cid:0)
+
+p
+i
+l
+c
+
+(cid:105)
+
+)
+t
+a
+,
+t
+s
+(
+(cid:98)Q
+
+)
+t
+s
+|
+t
+a
+(
+
+(cid:48)
+θ
+π
+
+t
+
+θ
+∼
+(cid:98)E
+x
+a
+m
+
+δ
+≤
+
+(cid:3)
+
+)
+)
+t
+a
+,
+t
+s
+(
+θ
+µ
+π
+d
+(cid:107)
+)
+t
+a
+,
+t
+s
+(
+(cid:48)
+
+]
+)
+t
+a
+,
+t
+s
+(
+R
+
+[
+
+θ
+π
+
+µ
+d
+(
+L
+K
+D
+(cid:2)
+
+t
+
+θ
+∼
+(cid:98)E
+x
+a
+m
+
+θ
+∼
+(cid:98)E
+
+t
+
+.
+t
+.
+s
+
+,
+)
+t
+a
+,
+t
+s
+(
+(cid:98)A
+
+)
+t
+s
+|
+t
+a
+(
+θ
+/
+(cid:48)
+θ
+w
+
+δ
+≤
+
+]
+)
+)
+t
+s
+|
+·
+(
+θ
+π
+(cid:107)
+)
+t
+s
+|
+·
+(
+
+(cid:110)
+
+(cid:48)
+θ
+π
+(
+L
+K
+D
+
+[
+
+θ
+∼
+(cid:98)E
+
+t
+
+.
+t
+.
+s
+
+n
+i
+m
+
+t
+
+θ
+∼
+(cid:98)E
+x
+a
+m
+
+(cid:105)
+
+)
+t
+a
+,
+t
+s
+(
+(cid:98)A
+
+)
+t
+s
+|
+t
+a
+(
+θ
+/
+(cid:48)
+θ
+w
+
+t
+
+θ
+∼
+(cid:98)E
+x
+a
+m
+
+(cid:104)
+
+(cid:104)
+
+(cid:104)
+
+N
+/
+)
+)
+θ
+
+|
+·
+(
+p
+(cid:107)
+)
+(cid:48)
+
+θ
+
+|
+·
+(
+p
+(
+2
+(cid:98)d
+
+(cid:113)
+
+λ
+−
+
+(cid:3)
+
+)
+τ
+(
+R
+)
+τ
+(
+θ
+/
+(cid:48)
+θ
+w
+
+(cid:2)
+
+θ
+∼
+τ
+(cid:98)E
+x
+a
+m
+
+]
+)
+)
+t
+a
+,
+t
+s
+(
+R
+β
+−
+(
+p
+x
+e
+β
+
+[
+
+t
+
+θ
+∼
+(cid:98)E
+x
+a
+m
+
+y
+c
+i
+l
+o
+p
+-
+f
+f
+o
+/
+n
+o
+
+d
+e
+s
+a
+b
+-
+n
+o
+i
+t
+c
+a
+
+y
+c
+i
+l
+o
+p
+-
+n
+o
+
+d
+e
+s
+a
+b
+-
+n
+o
+i
+t
+c
+a
+
+]
+)
+τ
+(
+R
+
+[
+
+θ
+∼
+τ
+,
+ρ
+∼
+θ
+(cid:98)E
+x
+a
+m
+
+y
+c
+i
+l
+o
+p
+-
+n
+o
+
+d
+e
+s
+a
+b
+-
+r
+e
+t
+e
+m
+a
+r
+a
+p
+
+N
+/
+)
+ρ
+ν
+(cid:107)
+
+(cid:48)
+ρ
+ν
+(
+2
+d
+(cid:112)
+λ
+−
+
+)
+τ
+(
+R
+)
+θ
+(
+ρ
+/
+(cid:48)
+ρ
+w
+
+θ
+∼
+τ
+,
+ρ
+∼
+θ
+(cid:98)E
+x
+a
+m
+
+(cid:3)
+
+(cid:3)
+
+(cid:2)
+
+(cid:2)
+
+)
+τ
+(
+R
+)
+θ
+(
+ρ
+/
+(cid:48)
+ρ
+w
+
+θ
+∼
+τ
+,
+ρ
+∼
+θ
+(cid:98)E
+x
+a
+m
+
+y
+c
+i
+l
+o
+p
+-
+f
+f
+o
+/
+n
+o
+
+d
+e
+s
+a
+b
+-
+r
+e
+t
+e
+m
+a
+r
+a
+p
+
+]
+6
+6
+[
+E
+P
+G
+P
+-
+W
+
+I
+
+y
+c
+i
+l
+o
+p
+-
+f
+f
+o
+/
+n
+o
+
+d
+e
+s
+a
+b
+-
+r
+e
+t
+e
+m
+a
+r
+a
+p
+
+S
+I
+O
+P
+-
+P
+
+y
+c
+i
+l
+o
+p
+-
+f
+f
+o
+
+d
+e
+s
+a
+b
+-
+n
+o
+i
+t
+c
+a
+
+y
+c
+i
+l
+o
+p
+-
+n
+o
+
+d
+e
+s
+a
+b
+-
+n
+o
+i
+t
+c
+a
+
+y
+c
+i
+l
+o
+p
+-
+f
+f
+o
+/
+n
+o
+
+d
+e
+s
+a
+b
+-
+n
+o
+i
+t
+c
+a
+
+]
+3
+4
+[
+
+O
+P
+P
+
+]
+2
+2
+[
+
+G
+P
+D
+D
+
+8
+]
+0
+3
+[
+S
+P
+E
+R
+
+]
+1
+3
+[
+
+R
+W
+R
+
+S
+I
+O
+P
+-
+A
+
+]
+4
+4
+[
+E
+P
+G
+P
+
+15
+
+]
+)
+τ
+(
+R
+
+[
+
+θ
+∼
+τ
+(cid:98)E
+x
+a
+m
+
+y
+c
+i
+l
+o
+p
+-
+n
+o
+
+d
+e
+s
+a
+b
+-
+n
+o
+i
+t
+c
+a
+
+]
+3
+,
+3
+6
+[
+P
+D
+M
+O
+P
+(
+G
+
+)
+
+/
+
+E
+C
+R
+O
+F
+N
+I
+E
+R
+
+y
+c
+i
+l
+o
+p
+-
+n
+o
+
+d
+e
+s
+a
+b
+-
+n
+o
+i
+t
+c
+a
+
+]
+1
+4
+[
+
+O
+P
+R
+T
+
+.
+]
+0
+5
+[
+
+y
+c
+n
+a
+p
+u
+c
+c
+o
+n
+o
+i
+t
+c
+a
+-
+e
+t
+a
+t
+s
+
+e
+h
+t
+
+)
+t
+a
+,
+t
+s
+(
+θ
+µ
+π
+d
+h
+t
+i
+
+w
+e
+t
+a
+c
+i
+d
+n
+i
+
+e
+
+W
+
+8
+
+B Proofs and Derivations
+
+Lemma 4.1. Let P and Q be two probability measures on the measurable space (X , F) such that
+P (cid:28) Q. Let x = (x1, x2, . . . , xN )T i.i.d. random variables sampled from Q and f : X → R be a
+bounded function ((cid:107)f (cid:107)∞ < +∞). Then, for any N > 0, the variance of the IS estimator (cid:98)µP/Q can
+be upper bounded as:
+1
+N
+
+∞d2 (P (cid:107)Q) .
+
+(cid:2)
+(cid:98)µP/Q
+
+Var
+x∼Q
+
+(cid:107)f (cid:107)2
+
+(cid:3) ≤
+
+(7)
+
+Proof. From the fact that xi are i.i.d. we can write:
+(cid:20) p(x1)
+q(x1)
+
+Var
+x1∼Q
+
+(cid:98)µP/Q
+
+Var
+x∼Q
+
+(cid:3) ≤
+
+1
+N
+
+(cid:2)
+
+(cid:21)
+
+f (x1)
+
+(cid:34)(cid:18) p(x1)
+q(x1)
+
+E
+x1∼Q
+
+(cid:19)2(cid:35)
+
+f (x1)
+
+≤
+
+1
+N
+(cid:19)2(cid:35)
+
+≤
+
+1
+N
+
+(cid:107)f (cid:107)2
+
+∞ E
+
+x1∼Q
+
+(cid:34)(cid:18) p(x1)
+q(x1)
+
+=
+
+1
+N
+
+(cid:107)f (cid:107)2
+
+∞d2 (P (cid:107)Q) .
+
+(8)
+
+(11)
+
+(12)
+
+Theorem 4.1. Let P and Q be two probability measures on the measurable space (X , F) such that
+P (cid:28) Q and d2(P (cid:107)Q) < +∞. Let x1, x2, . . . , xN be i.i.d. random variables sampled from Q, and
+f : X → R be a bounded function ((cid:107)f (cid:107)∞ < +∞). Then, for any 0 < δ ≤ 1 and N > 0 with
+probability at least 1 − δ it holds that:
+
+E
+x∼P
+
+[f (x)] ≥
+
+1
+N
+
+N
+(cid:88)
+
+i=1
+
+wP/Q(xi)f (xi) − (cid:107)f (cid:107)∞
+
+(cid:114)
+
+(1 − δ)d2(P (cid:107)Q)
+δN
+
+.
+
+Proof. We start from Cantelli’s inequality applied on the random variable (cid:98)µP/Q = 1
+
+N
+
+(cid:80)N
+
+i=1 wP/Q(xi)f (xi):
+
+(cid:16)
+
+Pr
+
+(cid:98)µP/Q − E
+
+x∼P
+
+[f (x)] ≥ λ
+
+≤
+
+(cid:17)
+
+1
+
+1 +
+
+Varx
+
+λ2
+Q[(cid:98)µP /Q]
+
+.
+
+∼
+and considering the complementary event, we get that with probability at least
+
+By calling δ =
+
+1 − δ we have:
+
+1
+λ2
+Q[ (cid:98)µP /Q]
+
+1+
+
+Varx
+
+∼
+
+(cid:98)µP/Q
+By replacing the variance with the bound in Theorem 4.1 we get the result.
+
+[f (x)] ≥ (cid:98)µP/Q −
+
+E
+x∼P
+
+(cid:114) 1 − δ
+δ
+
+(cid:2)
+
+Var
+x∼Q
+
+(cid:3).
+
+Theorem 4.2. Let pω be a p.d.f. differentiable w.r.t. ω ∈ Ω. Then, it holds that, for the Rényi
+2 (ω(cid:48) − ω)T F(ω) (ω(cid:48) − ω)+o((cid:107)ω(cid:48)−ω(cid:107)2
+divergence: Dα(pω(cid:48)(cid:107)pω) = α
+2), and for the exponentiated
+2 (ω(cid:48) − ω)T F(ω) (ω(cid:48) − ω) + o((cid:107)ω(cid:48) − ω(cid:107)2
+Rényi divergence: dα(pω(cid:48)(cid:107)pω) = 1 + α
+2).
+
+Proof. We need to compute the second-order Taylor expansion of the α-Rényi divergence. We start considering
+the term:
+
+pω(x) dx =
+
+(x)αpω(x)1−α dx.
+
+(13)
+
+I(ω(cid:48)) =
+
+(cid:19)α
+
+(cid:90)
+
+X
+
+(cid:18) pω(cid:48)
+
+(x)
+pω(x)
+
+The gradient is given by:
+(cid:90)
+
+∇ω(cid:48)
+
+I(ω(cid:48)) =
+
+∇ω(cid:48)
+
+pω(cid:48)
+
+X
+
+Thus, ∇ω(cid:48)
+
+I(ω(cid:48))|ω(cid:48)=ω = 0. We now compute the Hessian:
+
+(x)αpω(x)1−α dx = α
+
+pω(cid:48)
+
+(x)α−1pω(x)1−α∇ω(cid:48)
+
+pω(cid:48)
+
+(x) dx.
+
+(cid:90)
+
+pω(cid:48)
+
+X
+
+(cid:90)
+
+X
+
+∇T
+ω(cid:48)
+
+I(ω(cid:48)) = α∇ω(cid:48)
+
+pω(cid:48)
+
+(x)α−1pω(x)1−α∇T
+ω(cid:48)
+
+pω(cid:48)
+
+(x) dx
+
+= α
+
+(α − 1)pω(cid:48)
+
+(x)α−2pω(x)1−α∇ω(cid:48)
+
+pω(cid:48)
+
+(x)∇T
+ω(cid:48)
+
+pω(cid:48)
+
+(x) + pω(cid:48)
+
+(x)α−1pω(x)1−αHω(cid:48)
+
+pω(cid:48)
+
+(x)
+
+(cid:17)
+
+dx.
+
+Hω(cid:48)
+
+I(ω(cid:48)) = ∇ω(cid:48)
+(cid:90)
+
+(cid:16)
+
+X
+
+Evaluating the Hessian in ω we have:
+
+Hω(cid:48)
+
+I(ω(cid:48))|ω(cid:48)=ω = α(α − 1)
+
+pω(x)−1∇ωpω(x)∇T
+
+ωpω(x) dx
+
+(cid:90)
+
+X
+
+(cid:90)
+
+X
+
+16
+
+= α(α − 1)
+
+pω(x)∇ω log pω(x)∇T
+
+ω log pω(x) dx = α(α − 1)F(ω).
+
+(cid:90)
+
+X
+
+1
+α − 1
+1
+α − 1
+
+=
+
+Hω(cid:48)
+
+Now, Dα(pω(cid:48)
+
+(cid:107)pω) = 1
+
+α−1 log I(ω(cid:48)). Thus:
+
+∇ω(cid:48)
+
+Dα(pω(cid:48)
+
+(cid:107)pω)|ω(cid:48)=ω =
+
+1
+α − 1
+
+∇ω(cid:48)
+
+I(ω(cid:48))
+
+I(ω(cid:48))
+
+= 0,
+
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)ω(cid:48)=ω
+I(ω(cid:48))∇T
+ω(cid:48)
+
+Hω(cid:48)
+
+Dα(pω(cid:48)
+
+(cid:107)pω)|ω(cid:48)=ω =
+
+I(ω(cid:48))Hω(cid:48)
+
+I(ω(cid:48)) + ∇ω(cid:48)
+(I(ω(cid:48)))2
+
+I(ω(cid:48))
+
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)ω(cid:48)=ω
+
+having observed that I(ω) = 1. For what concerns the dα(pω(cid:48)
+exp (Dα(pω(cid:48)
+
+(cid:107)pω)|ω(cid:48)=ω = ∇ω(cid:48)
+
+dα(pω(cid:48)
+
+∇ω(cid:48)
+
+I(ω(cid:48))|ω(cid:48)=ω = αF(ω),
+(cid:107)pω), we have:
+(cid:107)pω))|ω(cid:48)=ω
+
+Hω(cid:48)
+
+(cid:107)pω)|ω(cid:48)=ω = Hω(cid:48)
+(cid:16)
+
+dα(pω(cid:48)
+= exp (Dα(pω(cid:48)
+= αF(ω).
+
+(cid:107)pω))
+
+Hω(cid:48)
+
+(cid:107)pω)) ∇ω(cid:48)
+
+Dα(pω(cid:48)
+
+(cid:107)pω)|ω(cid:48)=ω = 0,
+
+= exp (Dα(pω(cid:48)
+exp (Dα(pω(cid:48)
+Dα(pω(cid:48)
+
+(cid:107)pω))|ω(cid:48)=ω
+
+(cid:107)pω) + ∇ω(cid:48)
+
+Dα(pω(cid:48)
+
+(cid:107)pω)∇T
+ω(cid:48)
+
+Dα(pω(cid:48)
+
+(cid:107)pω)
+
+(cid:17)
+|ω(cid:48)=ω
+
+C Analysis of the IS estimator
+
+In this Appendix, we analyze the behavior of the importance weights when the behavioral and target
+distributions are Gaussians. We start providing a closed-form expression for the Rényi divergence
+between multivariate Gaussian distributions [5]. Let P ∼ N (µP , ΣP ) and Q ∼ N (µQ, ΣQ) and
+α ∈ [0, ∞]:
+
+Dα(P (cid:107)Q) =
+
+(µP − µQ)T Σ−1
+
+α (µP − µQ) −
+
+α
+2
+
+1
+2(α − 1)
+
+log
+
+det(Σα)
+det(ΣP )1−α det(ΣQ)α
+
+,
+
+(14)
+
+where Σα = αΣQ + (1 − α)ΣP under the assumption that Σα is positive-deﬁnite.
+From now on, we will focus on univariate Gaussian distributions and we provide a closed-form
+expression for the importance weights and their probability density function fw. We consider
+Q ∼ N (µQ, σ2
+P ) as target distribution. We assume
+Q, σ2
+that σ2
+P > 0 and we consider the two cases: unequal variances and equal variances. For brevity,
+we will indicate with w(x) the weight wP/Q(x).
+
+Q) as behavioral distribution and P ∼ N (µP , σ2
+
+C.1 Unequal variances
+
+When σ2
+
+Q (cid:54)= σ2
+
+P , the expression of the importance weights is given by:
+
+w(x) =
+
+exp
+
+σQ
+σP
+
+(cid:32)
+
+1
+2
+
+(µP − µQ)2
+Q − σ2
+σ2
+P
+
+(cid:33)
+
+
+
+exp
+
+−
+
+1
+2
+
+Q − σ2
+σ2
+P
+Qσ2
+σ2
+P
+
+(cid:32)
+
+x −
+
+QµP − σ2
+σ2
+Q − σ2
+σ2
+P
+
+P µQ
+
+(cid:33)2
+,
+
+(15)
+
+exp
+
+(cid:16) 1
+2
+
+for x ∼ Q. Let us ﬁrst notice two distinct situations: if σ2
+bounded by A = σQ
+Q − σ2
+σP
+a minimum of value A. Let us investigate the probability density function.
+Proposition C.1. Let Q ∼ N (µQ, σ2
+target distribution, with σ2
+by:
+
+(µP −µQ)2
+σ2
+Q−σ2
+P
+
+, whereas if σ2
+
+Q (cid:54)= σ2
+
+(cid:17)
+
+Q) be the behavioral distribution and P ∼ N (µP , σ2
+
+P ) be the
+P . The probability density function of w(x) = p(x)/q(x) is given
+
+Q − σ2
+P > 0 the weight w(x) is upper
+P < 0, w(x) is unbounded but it admits
+
+
+
+
+σ
+
+(cid:113)
+
+y
+
+π log A
+y
+
+exp (cid:0)− 1
+
+A
+
+2 µ2(cid:1) (cid:0) y
+2 µ2(cid:1) (cid:16) A
+
+fw(y) =
+
+√
+
+
+where µ = σQ
+
+y
+
+Q−σ2
+σ2
+P
+
+(cid:17)σ2
+
+exp (cid:0)− 1
+
+σ
+π log y
+A
+(µP − µQ) and σ2 = σ2
+
+y
+
+P
+P |
+Q−σ2
+
+|σ2
+
+.
+
+(cid:1)σ2
+
+(cid:16)
+
+(cid:113)
+
+cosh
+
+µσ
+
+2 log A
+y
+
+(cid:17)
+
+,
+
+if σ2
+
+Q > σ2
+
+P , y ∈ [0, A],
+
+cosh (cid:0)µσ(cid:112)2 log y
+
+(cid:1) ,
+
+A
+
+if σ2
+
+Q < σ2
+
+P , y ∈ [A, ∞),
+
+17
+
+Proof. We look at w(x) as a function of random variable x ∼ Q. We introduce the following symbols:
+
+m =
+
+σ2
+QµP − σ2
+σ2
+Q − σ2
+P
+
+P µQ
+
+,
+
+τ =
+
+σ2
+Q − σ2
+P
+σ2
+Qσ2
+P
+
+.
+
+Let us start computing the c.d.f.:
+
+Fw(y) = Pr (w(x) ≤ y) = Pr
+
+A exp
+
+−
+
+τ (x − m)2
+
+≤ y
+
+= Pr
+
+τ (x − m)2 ≥ −2 log
+
+(cid:18)
+
+(cid:18)
+
+(cid:19)
+
+(cid:19)
+
+(cid:16)
+
+1
+2
+
+(cid:17)
+
+.
+
+y
+A
+
+We distinguish the two cases according to the sign of τ and we observe that x = µQ + σQz where z ∼ N (0, 1):
+
+τ > 0:
+
+Fw(y) = Pr
+
+(x − m)2 ≥
+
+log
+
+(cid:18)
+
+(cid:18)
+
+(cid:32)
+
+2
+τ
+(cid:114) 2
+τ
+
+(cid:19)
+
+A
+y
+
+(cid:19)
+
+log
+
+A
+y
+(cid:115)
+
+= Pr
+
+x ≤ m −
+
++ Pr
+
+x ≥ m +
+
+log
+
+(cid:114) 2
+τ
+
+(cid:19)
+
+A
+y
+
+= Pr
+
+z ≤
+
+m − µQ
+σQ
+
+−
+
+2
+τ σ2
+Q
+
+(cid:33)
+
+(cid:32)
+
+log
+
++ Pr
+
+z ≥
+
+m − µQ
+σQ
+
++
+
+(cid:115)
+
+2
+τ σ2
+Q
+
+log
+
+(cid:33)
+
+.
+
+A
+y
+
+We call µ = m−µQ
+
+σQ
+
+= σQ
+σ2
+Q
+
+−σ2
+P
+
+(µP − µQ) and σ2 = 1
+τ σ2
+Q
+(cid:19)
+
+(cid:114)
+
+(cid:18)
+
+= σ2
+σ2
+Q
+
+P
+−σ2
+P
+
+, thus we have:
+
+(cid:18)
+
+(cid:114)
+
+Fw(y) = Pr
+
+z ≤ µ −
+
+2σ2 log
+
++ Pr
+
+z ≥ µ +
+
+2σ2 log
+
+(cid:19)
+
+A
+y
+
+(cid:18)
+
+(cid:114)
+
+(cid:18)
+
+(cid:114)
+
+= Φ
+
+µ −
+
+2σ2 log
+
++ 1 − Φ
+
+µ +
+
+2σ2 log
+
+(cid:19)
+
+A
+y
+
+(cid:19)
+
+,
+
+A
+y
+
+where Φ is the c.d.f. of a normal standard distribution. By taking the derivative w.r.t. y we get the p.d.f.:
+(cid:19)(cid:19)
+(cid:18)
+
+(cid:114)
+
+(cid:114)
+
+(cid:19)
+
+(cid:18)
+
+(cid:18)
+
+√
+
+φ
+
+µ −
+
+2σ2 log
+
++ φ
+
+µ +
+
+2σ2 log
+
+fw(y) =
+
+= −
+
+2σ2
+
+∂Fw(y)
+∂y
+
+1
+
+(cid:113)
+
+2
+
+log A
+y
+
+y
+A
+
+−A
+y2
+
+=
+
+=
+
+=
+
+=
+
+2y
+
+log A
+y
+
+√
+
+(cid:113)
+
+√
+
+(cid:113)
+
+2σ
+
+2σ
+
+2y
+
+log A
+y
+
+σ
+
+σ
+
+(cid:113)
+
+y
+
+π log A
+y
+
+(cid:113)
+
+y
+
+π log A
+y
+
+(cid:18)
+
+(cid:18)
+
+(cid:114)
+
+(cid:18)
+
+(cid:114)
+
+(cid:19)(cid:19)
+
+φ
+
+µ −
+
+2σ2 log
+
++ φ
+
+µ +
+
+2σ2 log
+
+(cid:19)
+
+A
+y
+
+(cid:32)
+
+(cid:32)
+
+(cid:18)
+
+(cid:114)
+
+(cid:19)2(cid:33)
+
+(cid:32)
+
+(cid:18)
+
+(cid:114)
+
+(cid:19)2(cid:33)(cid:33)
+
+exp
+
+−
+
+µ −
+
+2σ2 log
+
++ exp
+
+−
+
+µ +
+
+2σ2 log
+
+1
+√
+2π
+
+1
+2
+
+A
+y
+
+(cid:16)
+
+(cid:113)
+
+(cid:19) exp
+
+µσ
+
+2 log A
+y
+
+(cid:16)
+
+(cid:113)
+
++ exp
+
+−µσ
+
+(cid:17)
+
+2 log A
+y
+
+(cid:19)
+
+(cid:18)
+
+exp
+
+−
+
+µ2
+
+exp
+
+−σ2 log
+
+A
+y
+
+(cid:18)
+
+(cid:18)
+
+1
+2
+
+1
+2
+
+exp
+
+−
+
+µ2
+
+(cid:17)σ2
+
+(cid:19) (cid:16) y
+A
+
+(cid:18)
+
+(cid:114)
+
+cosh
+
+µσ
+
+2 log
+
+(cid:19)
+
+,
+
+A
+y
+
+A
+y
+
+A
+y
+
+1
+2
+
+(cid:17)
+
+2
+
+A
+y
+
+A
+y
+
+where φ is the p.d.f. of a normal standard distribution.
+
+τ < 0: The derivation takes similar steps, all it takes is to call σ2 = − 1
+τ σ2
+Q
+becomes:
+
+= σ2
+σ2
+P
+
+P
+−σ2
+Q
+
+, then the c.d.f.
+
+(cid:18)
+
+(cid:114)
+
+(cid:18)
+
+(cid:114)
+
+Fw(y) = Φ
+
+µ +
+
+2σ2 log
+
+− Φ
+
+µ −
+
+2σ2 log
+
+(cid:19)
+
+y
+A
+
+(cid:19)
+
+,
+
+y
+A
+
+and the p.d.f. is:
+
+σ
+y(cid:112)π log y
+To unify the two cases we set σ2 = σ2
+
+fw(x) =
+
+A
+
+.
+
+P
+P |
+−σ2
+
+|σ2
+Q
+
+(cid:18)
+
+exp
+
+−
+
+µ2
+
+1
+2
+
+(cid:19) (cid:18) A
+y
+
+(cid:19)σ2
+
+(cid:18)
+
+(cid:114)
+
+cosh
+
+µσ
+
+2 log
+
+(cid:19)
+
+.
+
+y
+A
+
+It is interesting to investigate the properties of the tail of the distribution when w is unbounded.
+Indeed, we discover that the distribution displays a fat-tail behavior.
+
+(cid:18)
+
+A
+y
+
+A
+y
+
+18
+
+Proposition C.2. If σ2
+fw can be lower bounded as fw(y) ≥ cy−1−σ2(log y)− 1
+2 .
+
+P > σ2
+
+Q then there exists c > 0 and y0 > 0 such that for any y ≥ y0, the p.d.f.
+
+Proof. Let us call z = y/A and let a > 0 be a constant, then it holds that for sufﬁciently large y we have:
+
+fw(y) ≥ az−1−σ2
+
+(log z)−1/2 exp
+
+(cid:16)(cid:112)log z
+
+(cid:17)
+
+√
+
+2µσ
+
+.
+
+(16)
+
+To get the result, we observe that for z > 1 we have exp (cid:0)√
+need to change the constant a into c > 0.
+
+log z(cid:1) ≥ 1. Now, by replacing z with y/A we just
+
+P
+P −σ2
+σ2
+Q
+
+As a consequence, the α-th moment of w(x) does not exist for α − 1 − σ2 ≥ −1 =⇒ α ≥
+σ2 = σ2
+, this prevents from using Bernstein-like inequalities for bounding in probability the
+importance weights. The non-existence of ﬁnite moments is conﬁrmed by the α-Rényi divergence.
+Indeed, the α-Rényi divergence is deﬁned when σ2
+
+P > 0, i.e., α < σ2
+
+Q + (1 − α)σ2
+
+α = ασ2
+
+.
+
+P
+P −σ2
+σ2
+Q
+
+C.2 Equal variances
+
+If σ2
+
+Q = σ2
+
+P = σ2, the importance weights have the following expression:
+
+w(x) = exp
+
+(cid:18)
+
+(cid:18) µP − µQ
+σ2
+
+x −
+
+µP + µQ
+2
+
+(cid:19)(cid:19)
+
+,
+
+for x ∼ Q. The weight w(x) is clearly unbounded and has 0 as inﬁmum value. Let us investigate its
+probability density function.
+Proposition C.3. Let Q ∼ N (µQ, σ2) be the behavioral distribution and P ∼ N (µP , σ2) be the
+target distribution. The probability density function of w(x) = q(x)/p(x) is given by:
+
+fw(y) =
+
+√
+
+|(cid:101)σ|
+2πy 3
+
+2
+
+(cid:18)
+
+exp
+
+−
+
+1
+2
+
+(cid:16)
+
+(cid:101)µ2 + (cid:101)σ2 (log y)2(cid:17)(cid:19)
+
+,
+
+(17)
+
+(18)
+
+where (cid:101)µ = µP −µQ
+
+2σ
+
+and (cid:101)σ = σ
+
+µP −µQ
+
+.
+
+Proof. We start computing the c.d.f.:
+
+Fw(y) = Pr
+
+exp
+
+(cid:16)
+
+(cid:110) µP − µQ
+σ2
+
+(cid:16)
+
+x −
+
+µP + µQ
+2
+
+(cid:17)(cid:111)
+
+(cid:17)
+
+≤ y
+
+= Pr
+
+(cid:16) µP − µQ
+σ2
+
+(cid:16)
+
+x −
+
+(cid:17)
+
+µP + µQ
+2
+
+(cid:17)
+
+≤ log y
+
+.
+
+First, we consider the case µP − µQ > 0 and observe that x = µQ + σz, where z ∼ N (0, 1):
+
+(cid:18)
+
+Fw(y) = Pr
+
+x ≤
+
+µP + µQ
+2
+
++
+
+σ2
+µP − µQ
+
+(cid:19)
+
+(cid:18)
+
+log y
+
+= Pr
+
+z ≤
+
+µP − µQ
+2σ
+
++
+
+σ
+µP − µQ
+
+(cid:19)
+
+log y
+
+.
+
+We call (cid:101)µ = µP −µQ
+
+2σ
+
+and (cid:101)σ =
+
+σ
+µP −µQ
+
+and we have:
+
+We take the derivative in order to get the density function:
+
+Fw(y) = Pr (z ≤ (cid:101)µ + (cid:101)σ log y) = Φ ((cid:101)µ + (cid:101)σ log y) .
+
+fw(y) =
+
+∂Fw(y)
+∂y
+
+= (cid:101)σ
+y
+
+1
+√
+2π
+
+(cid:18)
+
+exp
+
+−
+
+1
+2
+
+(cid:19)
+
+((cid:101)µ + (cid:101)σ log y)2
+
+=
+
+√
+
+(cid:101)σ
+2πy (cid:101)µ(cid:101)σ+1
+
+(cid:18)
+
+exp
+
+−
+
+1
+2
+
+(cid:19)
+(cid:101)µ2 + (cid:101)σ2 (log y)2(cid:1)
+(cid:0)
+
+.
+
+For the case µP − µQ < 0 the derivation is symmetric and the p.d.f. differs only by a minus sign. We account
+for this fact by considering |(cid:101)σ| in the ﬁnal formula.
+
+In the case of equal variances, the tail behavior is different.
+Proposition C.4. If σ2
+y ≥ y0, the p.d.f. can be upper bounded as fw(y) ≤ cy−α.
+
+P = σ2
+
+Q then for any α > 0 there exist c > 0 and y0 > 0 such that for any
+
+19
+
+(a) equal variance
+
+(b) equal mean
+
+Figure 3: Probability density function of the importance weights when the behavioral distribution
+is N (0, 1) and the mean is changed keeping the variance equal to 1 (a) or the variance is changed
+keeping the target mean equal to 1 (b).
+
+Proof. Condensing all the constants in c, the p.d.f. can be written as:
+
+fw(y) = cy−3/2 exp (cid:0)(log y)2(cid:1)− (cid:101)σ2
+2 .
+
+For any α > 0, let us solve the following inequality:
+
+y3/2 exp (cid:0)(log y)2(cid:1) (cid:101)σ2
+
+2 ≥ yα
+
+=⇒ y ≥ exp
+
+(cid:18) 2
+(cid:101)σ2
+
+(cid:18)
+
+α −
+
+(cid:19)(cid:19)
+
+.
+
+3
+2
+
+Thus, for y ≥ exp (cid:0) 2
+(cid:101)σ2
+
+(cid:0)α − 3
+
+(cid:1)(cid:1) we have that fw(y) ≤ cy−α.
+
+2
+
+(19)
+
+(20)
+
+This is sufﬁcient to ensure the existence of the moments of any order, indeed the corresponding
+Rényi divergence is: α(µP −µQ)2
+. By the way, the distribution of w(x) remains subexponential, as
+
+2σ2
+
+(cid:16)
+
+(log y)2(cid:17)− (cid:101)σ2
+
+exp
+
+2 ≥ e−ηy for sufﬁciently large y.
+
+Figure 3 reports the p.d.f. of the importance weights for different values of mean and variance of the
+target distribution.
+
+D Analysis of the SN Estimator
+
+In this Appendix, we provide some results regarding bias and variance of the self-normalized
+importance sampling estimator. Let us start with the following result, derived from [7], that bounds
+the expected squared difference between non-self-normalized weight w(x) and self-normalized
+weight (cid:101)w(x).
+Lemma D.1. Let P and Q be two probability measures on the measurable space (X , F) such that
+P (cid:28) Q and d2(P (cid:107)Q) < +∞. Let x1, x2, . . . , xN i.i.d. random variables sampled from Q. Then,
+for N > 0 and for any i = 1, 2, . . . , N it holds that:
+
+(cid:34)(cid:18)
+
+E
+x∼Q
+
+(cid:101)wP/Q(xi) −
+
+(cid:19)2(cid:35)
+
+wP/Q(xi)
+N
+
+≤
+
+d2(P (cid:107)Q) − 1
+N
+
+.
+
+(21)
+
+Proof. The result derives from simple algebraic manipulations and from the fact that Varx∼Q
+d2(P (cid:107)Q) − 1.
+
+(cid:2)wP/Q(x)(cid:3) =
+
+(cid:34)(cid:18)
+
+E
+x∼Q
+
+(cid:101)wP/Q(xi) −
+
+wP/Q(xi)
+N
+
+(cid:19)2(cid:35)
+
+
+
+(cid:32)
+
+= E
+x∼Q
+
+
+
+wP/Q(xi)
+j=1 wP/Q(xj)
+
+(cid:80)N
+
+(cid:33)2 (cid:32)
+
+(cid:80)N
+
+1 −
+
+j=1 wP/Q(xj)
+N
+
+(cid:33)2
+
+
+
+
+(cid:32)
+
+≤ E
+x∼Q
+
+
+
+1 −
+
+(cid:80)N
+
+j=1 wP/Q(xj)
+N
+
+ = Var
+
+x∼Q
+
+(cid:34) (cid:80)N
+
+(cid:35)
+
+j=1 wP/Q(xj)
+N
+
+(cid:33)2
+
+20
+
+=
+
+1
+N
+
+Var
+x1∼Q
+
+(cid:2)wP/Q(x1)(cid:3) =
+
+d2(P (cid:107)Q) − 1
+N
+
+.
+
+A similar argument can be used to derive a bound on the bias of the SN estimator.
+Proposition D.1. Let P and Q be two probability measures on the measurable space (X , F) such
+that P (cid:28) Q and d2(P (cid:107)Q) < +∞. Let x1, x2, . . . , xN i.i.d. random variables sampled from Q and
+f : X → R be a bounded function ((cid:107)f (cid:107)∞ < ∞). Then, the bias of the SN estimator can be bounded
+as:
+
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+
+(cid:104)
+
+E
+x∼Q
+
+(cid:101)µP/Q − E
+
+x∼P
+
+(cid:105)(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+
+[f (x)]
+
+≤ (cid:107)f (cid:107)∞ min
+
+2,
+
+(cid:40)
+
+(cid:114)
+
+d2(P (cid:107)Q) − 1
+N
+
+(cid:41)
+
+.
+
+(22)
+
+Proof. Since it holds that |(cid:101)µP/Q| ≤ (cid:107)f (cid:107)∞ the bias cannot be larger than 2(cid:107)f (cid:107)∞. We now derive a bound for
+(cid:3) =
+the bias that vanishes as N → ∞. We exploit the fact that the IS estimator is unbiased, i.e., Ex∼Q
+Ex∼P [f (x)].
+
+(cid:2)
+(cid:98)µP/Q
+
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+
+E
+x∼Q
+
+(cid:20)
+
+E
+x∼Q
+
+(cid:101)µP/Q − E
+
+x∼Q
+
+(cid:2)
+(cid:98)µP/Q
+
+(cid:3)
+
+(cid:21)(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+
+=
+
+(cid:12)
+(cid:12)
+E
+(cid:12)
+(cid:12)
+x∼Q
+
+(cid:2)
+
+(cid:101)µP/Q − (cid:98)µP/Q
+
+(cid:3)
+
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+
+=
+
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:3) =
+
+(cid:12)
+(cid:12)
+
+(cid:104)
+
+x∼P
+
+[f (x)]
+
+(cid:105) (cid:12)
+(cid:12)
+(cid:101)µP/Q − E
+(cid:12)
+(cid:12)
+(cid:2)(cid:12)
+≤ E
+(cid:12)(cid:101)µP/Q − (cid:98)µP/Q
+x∼Q
+(cid:34)(cid:12)
+(cid:80)N
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:34)(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:34)(cid:32) (cid:80)N
+
+= E
+x∼Q
+
+= E
+x∼Q
+
+(cid:80)N
+
+i=1 wP/Q(xi)f (xi)
+(cid:80)N
+i=1 wP/Q(xi)
+
+i=1 wP/Q(xi)f (xi)
+(cid:80)N
+i=1 wP/Q(xi)
+
+d2(P (cid:107)Q) − 1
+N
+
+,
+
+≤ E
+x∼Q
+
+(cid:114)
+
+≤ (cid:107)f (cid:107)∞
+
+i=1 wP/Q(xi)f (xi)
+(cid:80)N
+i=1 wP/Q(xi)
+
+−
+
+(cid:80)N
+
+i=1 wP/Q(xi)f (xi)
+N
+
+(cid:35)
+
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+
+(cid:80)N
+
+i=1 wP/Q(xi)
+N
+
+(cid:35)
+
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+
+(cid:12)
+(cid:12)
+(cid:12)
+1 −
+(cid:12)
+(cid:12)
+(cid:33)2(cid:35) 1
+
+2
+
+(cid:34)(cid:32)
+
+(cid:80)N
+
+1 −
+
+i=1 wP/Q(xi)
+N
+
+E
+x∼Q
+
+(cid:33)2(cid:35) 1
+
+2
+
+(23)
+
+(24)
+
+(25)
+
+where (24) follows from (23) by applying Cauchy-Schwartz inequality and (25) is obtained by observing that
+(cid:18) (cid:80)N
+
+(cid:19)2
+
+i=1 wP /Q(xi)f (xi)
+(cid:80)N
+
+wP /Q(xi)
+
+i=1
+
+≤ (cid:107)f (cid:107)2
+
+∞.
+
+Bounding the variance of the SN estimator is non-trivial since the the normalization term makes
+all the samples interdependent. Exploiting the boundedness of (cid:101)µP/Q we can derive trivial bounds
+like: Varx∼Q
+∞. However, this bound does not shrink with the number of samples N .
+Several approximations of the variance have been proposed, like the following derived using the delta
+method [59, 28]:
+
+(cid:3) ≤ (cid:107)f (cid:107)2
+
+(cid:2)
+(cid:101)µP/Q
+
+Var
+x∼Q
+
+(cid:2)
+(cid:101)µP/Q
+
+(cid:3) =
+
+1
+N
+
+E
+x1∼Q
+
+(cid:20)
+w2
+
+(cid:16)
+
+P/Q(x1)
+
+f (x1) − E
+x∼P
+
+(cid:17)2(cid:21)
+
+[f (x)]
+
++ o(N −2).
+
+(26)
+
+We will not use the approximate expression for the variance, but we will directly bound the Mean
+Squared Error (MSE) of the SN estimator, which is the sum of the variance and the bias squared.
+Proposition D.2. Let P and Q be two probability measures on the measurable space (X , F) such
+that P (cid:28) Q and d2(P (cid:107)Q) < +∞. Let x1, x2, . . . , xN i.i.d. random variables sampled from Q
+and f : X → R be a bounded function ((cid:107)f (cid:107)∞ < +∞). Then, the MSE of the SN estimator can be
+bounded as:
+
+MSEx∼Q
+
+(cid:2)
+(cid:101)µP/Q
+
+(cid:3) ≤ 2(cid:107)f (cid:107)2
+
+∞ min
+
+2,
+
+(cid:26)
+
+2d2(P (cid:107)Q) − 1
+N
+
+(cid:27)
+
+.
+
+(27)
+
+Proof. First, recall that (cid:101)µP/Q is bounded by (cid:107)f (cid:107)∞ thus its MSE cannot be larger than 4(cid:107)f (cid:107)2
+proof is to sum and subtract the IS estimator (cid:98)µP/Q:
+
+∞. The idea of the
+
+MSEx∼Q
+
+(cid:2)
+
+(cid:101)µP/Q
+
+(cid:3) = E
+
+x∼Q
+
+(cid:101)µP/Q − E
+
+x∼P
+
+[f (x)]
+
+(cid:20)(cid:16)
+
+(cid:17)2(cid:21)
+
+21
+
+(cid:20)(cid:16)
+
+= E
+x∼Q
+
+≤ 2 E
+x∼Q
+
+≤ 2 E
+x∼Q
+
+[f (x)] ± (cid:98)µP/Q
+
+(cid:101)µP/Q − E
+(cid:104)(cid:0)
+
+x∼P
+
+(cid:101)µP/Q − (cid:98)µP/Q
+
+(cid:1)2(cid:105)
+
+(cid:17)2(cid:21)
+
+(cid:20)(cid:16)
+
++ 2 E
+x∼Q
+
+(cid:98)µP/Q − E
+
+x∼P
+
+[f (x)]
+
+(cid:17)2(cid:21)
+
+(cid:34)(cid:32) (cid:80)N
+
+i=1 wP/Q(xi)f (xi)
+(cid:80)N
+i=1 wP/Q(xi)
+
+(cid:33)2 (cid:32)
+
+1 −
+
+(cid:80)N
+
+i=1 wP/Q(xi)
+N
+
+(cid:33)2(cid:35)
+
++ 2 Var
+x∼Q
+
+(cid:2)
+
+(cid:98)µP/Q
+
+(cid:3)
+
+≤ 2(cid:107)f (cid:107)2
+
+∞ E
+x∼Q
+
+(cid:34)(cid:32)
+
+(cid:80)N
+
+1 −
+
+i=1 wP/Q(xi)
+N
+
+(cid:33)2(cid:35)
+
++ 2 Var
+x∼Q
+
+(cid:2)
+
+(cid:98)µP/Q
+
+(cid:3)
+
+≤ 2(cid:107)f (cid:107)2
+
+∞ Var
+x∼Q
+
+(cid:34) (cid:80)N
+
+(cid:35)
+
+i=1 wP/Q(xi)
+N
+
++ 2 Var
+x∼Q
+
+(cid:2)
+
+(cid:98)µP/Q
+
+(cid:3)
+
+≤ 2(cid:107)f (cid:107)2
+∞
+
+d2(P (cid:107)Q) − 1
+N
+
++ 2(cid:107)f (cid:107)2
+∞
+
+d2(P (cid:107)Q)
+N
+
+= 2(cid:107)f (cid:107)2
+∞
+
+2d2(P (cid:107)Q) − 1
+N
+
+,
+
+(28)
+
+(29)
+
+(30)
+
+(31)
+
+(32)
+
+(33)
+
+where line (29) follows from line (28) by applying the inequality (a + b)2 ≤ 2(a2 + b2), (31) follows from (30)
+
+by observing that
+
+(cid:18) (cid:80)N
+
+i=1 wP /Q(xi)f (xi)
+(cid:80)N
+
+wP /Q(xi)
+
+i=1
+
+(cid:19)2
+
+≤ (cid:107)f (cid:107)2
+
+∞.
+
+We can use this result to provide a high conﬁdence bound for the SN estimator.
+Proposition D.3. Let P and Q be two probability measures on the measurable space (X , F) such
+that P (cid:28) Q and d2(P (cid:107)Q) < +∞. Let x1, x2, . . . , xN i.i.d. random variables sampled from Q
+and f : X → R be a bounded function ((cid:107)f (cid:107)∞ < +∞). Then, for any 0 < δ ≤ 1 and N > 0 with
+probability at least 1 − δ:
+
+E
+x∼P
+
+[f (x)] ≥
+
+1
+N
+
+N
+(cid:88)
+
+i=1
+
+(cid:101)wP/Q(xi)f (xi) − 2(cid:107)f (cid:107)∞ min
+
+1,
+
+(cid:40)
+
+(cid:114)
+
+d2(P (cid:107)Q)(4 − 3δ)
+δN
+
+(cid:41)
+
+.
+
+Proof. The result is obtained by applying Cantelli’s inequality and accounting for the bias. Consider the random
+variable (cid:101)µP/Q = 1
+(cid:16)
+(cid:101)µP/Q − E
+
+i=1 (cid:101)wP/Q(xi)f (xi) and let (cid:101)λ = λ − (cid:12)
+(cid:16)
+(cid:2)
+[f (x)] ≥ λ
+
+(cid:12)Ex∼P [f (x)] − Ex∼P
+(cid:3) ≥ λ + E
+
+(cid:101)µP/Q
+
+= Pr
+
+(cid:80)N
+
+(cid:3)(cid:12)
+(cid:12):
+
+(cid:3)(cid:17)
+
+Pr
+
+(cid:17)
+
+N
+
+(cid:2)
+
+(cid:2)
+
+x∼P
+
+(cid:101)µP/Q
+[f (x)] − E
+x∼P
+[f (x)] − E
+x∼P
+
+x∼P
+(cid:12)
+E
+(cid:12)
+(cid:12)
+x∼P
+
+(cid:101)µP/Q
+(cid:2)
+
+(cid:101)µP/Q
+
+(cid:17)
+
+(cid:3)(cid:12)
+(cid:12)
+(cid:12)
+
+x∼P
+
+(cid:16)
+
+(cid:101)µP/Q − E
+(cid:101)µP/Q − E
+(cid:16)
+(cid:101)µP/Q − E
+
+x∼P
+
+x∼P
+
+≤ Pr
+
+= Pr
+
+(cid:2)
+
+(cid:2)
+
+(cid:101)µP/Q
+
+(cid:101)µP/Q
+
+(cid:3) ≥ λ −
+(cid:17)
+(cid:3) ≥ (cid:101)λ
+
+.
+
+Now we apply Cantelli’s inequality:
+
+(cid:16)
+
+Pr
+
+(cid:101)µP/Q − E
+
+x∼P
+
+[f (x)] ≥ λ
+
+≤ Pr
+
+(cid:17)
+
+(cid:16)
+(cid:101)µP/Q − E
+
+x∼P
+
+(cid:2)
+
+(cid:101)µP/Q
+
+(cid:17)
+(cid:3) ≥ (cid:101)λ
+
+≤
+
+1
+
+=
+
+(λ−|Ex
+
+1 +
+
+1
+
+∼
+
+P [f (x)]−Ex
+Varx
+
+Q[(cid:101)µP /Q]
+
+∼
+
+∼
+
+P [(cid:101)µP /Q]|)2
+
+.
+
+1 +
+
+(cid:101)λ2
+Q[(cid:101)µP /Q]
+
+Varx
+
+∼
+
+(34)
+
+and considering the complementary event, we get that with
+
+By calling δ =
+
+1
+
+(λ
+
+−|E
+
+x
+
+1+
+
+∼
+
+E
+
+P [f (x)]
+Varx
+
+x
+−
+∼
+Q[ (cid:101)µP /Q]
+
+∼
+
+P [ (cid:101)µP /Q]|)2
+
+probability at least 1 − δ we have:
+
+E
+x∼P
+
+[f (x)] ≥ (cid:101)µP/Q −
+
+E
+x∼P
+
+[f (x)] − E
+x∼P
+
+(cid:12)
+(cid:12)
+(cid:12)
+
+(cid:2)
+
+(cid:3)(cid:12)
+(cid:12)
+(cid:12) −
+
+(cid:114) 1 − δ
+δ
+
+(cid:101)µP/Q
+(cid:3)(cid:12)
+(cid:12) with equation (22) and the variance term with the
+
+(cid:101)µP/Q
+
+(35)
+
+Var
+x∼Q
+
+(cid:2)
+
+(cid:3)
+
+Then we bound the bias term (cid:12)
+MSE in equation (27). With some simple algebraic manipulation we have:
+
+(cid:12)Ex∼P [f (x)] − Ex∼P
+
+(cid:101)µP/Q
+
+(cid:2)
+
+E
+x∼P
+
+[f (x)] ≥ (cid:101)µP/Q − (cid:107)f (cid:107)∞
+
+d2(P (cid:107)Q) − 1
+N
+
+(cid:114)
+
+(cid:114)
+
+(cid:114)
+
+− (cid:107)f (cid:107)∞
+
+(cid:114)
+
+1 − δ
+δ
+
+2(2d2(P (cid:107)Q) − 1)
+N
+
+≥ (cid:101)µP/Q − (cid:107)f (cid:107)∞
+
+d2(P (cid:107)Q)
+N
+
+− (cid:107)f (cid:107)∞
+
+1 − δ
+δ
+
+4d2(P (cid:107)Q)
+N
+
+22
+
+= (cid:101)µP/Q − (cid:107)f (cid:107)∞
+
+(cid:114)
+
+d2(P (cid:107)Q)
+N
+
+(cid:32)
+
+(cid:114)
+
+1 + 2
+
+(cid:33)
+
+1 − δ
+δ
+
+≥ (cid:101)µP/Q − 2(cid:107)f (cid:107)∞
+
+≥ (cid:101)µP/Q − 2(cid:107)f (cid:107)∞
+
+(cid:114)
+
+d2(P (cid:107)Q)
+N
+
+1 +
+
+4(1 − δ)
+δ
+
+(cid:114)
+
+(cid:114)
+
+d2(P (cid:107)Q)(4 − 3δ)
+δN
+
+,
+
+√
+
+√
+
+√
+
+where the last line follows from the fact that
+range of the SN estimator is 2(cid:107)f (cid:107)∞ we get the result.
+
+a +
+
+b ≤ 2
+
+a + b for any a, b ≥ 0. Finally, recalling that the
+
+It is worth noting that, apart for the constants, the bound has the same dependence on d2 as in
+Theorem 4.1. Thus, by suitably redeﬁning the hyperparameter λ we can optimize the same surrogate
+objective function for both IS and SN estimators.
+
+E Implementation details
+
+E.1 Line Search
+
+In this Appendix, we provide some aspects about our implementation of POIS.
+
+k
+
+L(θj
+
+k/θj
+
+k)−1∇θj
+
+At each ofﬂine iteration k the parameter update is performed in the direction of
+G(θj
+0) with a step size αk determined in order to maximize the improvement.
+For brevity we will remove subscripts and dependence on θj
+0 from the involved quantities. The
+rationale behind our line search is the following. Suppose that our objective function L(θ), restricted
+to the gradient direction G−1(θ)∇θL(θ), represents a concave parabola in the Riemann manifold
+having G(θ) as Riemann metric tensor. Suppose we know a point θ0, the Riemann gradient in that
+point G(θ0)−1∇θL(θ0) and another point: θl = θ0 + αlG(θ0)−1∇θL(θ0). For both points we
+know the value of the loss function: L0 = L(θ0) and Ll = L(θl) and indicate with ∆Ll = Ll − L0
+the objective function improvement. Having this information we can compute the vertex of that
+parabola, which is its global maximum. Let us call l(α) = L (cid:0)θ0 + αG−1(θ0)∇θL(θ0)(cid:1) − L(θ0),
+being a parabola it can be expressed as l(α) = aα2 + bα + c. Clearly, c = 0 by deﬁnition of l(α); a
+and b can be determined by enforcing the conditions:
+
+b =
+
+∂l
+∂α
+
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)α=0
+
+=
+
+∂
+∂α
+
+L (cid:0)θ0 + αG−1(θ0)∇θL(θ0)(cid:1) − L(θ0)|α=0 =
+
+= ∇θL(θ0)T G−1(θ0)∇θL(θ0) =
+= (cid:107)∇θL(θ0)(cid:107)2
+
+1(θ0),
+
+G−
+
+l(αl) = aα2
+
+l + bαl = aα2
+
+1(θ0)αl = ∆Ll
+
+=⇒
+
+l + (cid:107)∇θL(θ0)(cid:107)2
+G−
+1(θ0)αl
+
+∆Ll − (cid:107)∇θL(θ0)(cid:107)2
+
+G−
+
+.
+
+α2
+l
+
+=⇒ a =
+
+Therefore, the parabola has the form:
+
+∆Ll − (cid:107)∇θL(θ0)(cid:107)2
+
+1(θ0)αl
+
+G−
+
+l(α) =
+
+α2
+l
+
+α2 + (cid:107)∇θL(θ0)(cid:107)2
+
+1(θ0)α.
+
+G−
+
+Clearly, the parabola is concave only if ∆Ll < (cid:107)∇θL(θ0)(cid:107)2
+
+1(θ0)αl. The vertex is located at:
+
+(cid:107)∇θL(θ0)(cid:107)2
+
+αl+1 =
+
+(cid:16)
+
+2
+
+(cid:107)∇θL(θ0)(cid:107)2
+
+G−
+
+G−
+1(θ0)α2
+G−
+1(θ0)αl − ∆Ll
+
+l
+
+(cid:17) .
+
+To simplify the expression, like in [24] we deﬁne αl = (cid:15)l/(cid:107)∇θL(θ0)(cid:107)2
+
+1(θ0). Thus, we get:
+
+G−
+
+(36)
+
+(37)
+
+(38)
+
+(cid:15)l+1 =
+
+(cid:15)2
+l
+2((cid:15)l − ∆Ll)
+
+.
+
+23
+
+G−
+
+Of course, we need also to manage the case in which the parabola is convex, i.e., ∆Ll ≥
+(cid:107)∇θL(θ0)(cid:107)2
+1(θ0)αl. Since our objective function is not really a parabola we reinterpret the
+two cases: i) ∆Ll > (cid:107)∇θL(θ0)(cid:107)2
+1(θ0)αl, the function is sublinear and in this case we use (38) to
+determine the new step size αl+1 = (cid:15)l+1/(cid:107)∇θL(θ0)(cid:107)2
+1(θ0)αl, the
+function is superlinear, in this case we increase the step size multiplying by η > 1, i.e., αl+1 = ηαl.
+Finally the update rule becomes:
+
+1(θ0); ii) ∆Ll ≥ (cid:107)∇θL(θ0)(cid:107)2
+G−
+
+G−
+
+G−
+
+(cid:40)η(cid:15)l
+
+(cid:15)l+1 =
+
+(cid:15)2
+l
+2((cid:15)l−∆Ll)
+
+if ∆Ll > (cid:15)l(2η−1)
+otherwise
+
+2η
+
+.
+
+(39)
+
+The procedure is iterated until a maximum number of attempts is reached (say 30) or the objective
+function improvement is too small (say 1e-4). The pseudocode of the line search is reported in
+Algorithm 3.
+
+Algorithm 3 Parabolic Line Search
+
+Input: tol∆L = 1e − 4, Mls = 30, L0
+Output : α∗
+
+α0 = 0
+(cid:15)1 = 1
+∆Lk−1 = −∞
+for l = 1, 2, . . . , Mls do
+αl = (cid:15)l/(cid:107)∇θL(θ0)(cid:107)2
+θl = αlG−1(θ0)∇θL(θ0)
+∆Ll = Ll − L0
+if ∆Ll < ∆Ll−1 + tol∆L then
+
+1(θ0)
+
+G−
+
+end if
+
+return αl−1
+(cid:40)η(cid:15)l
+
+(cid:15)l+1 =
+
+(cid:15)2
+l
+2((cid:15)l−∆Ll)
+
+end for
+
+if ∆Ll > (cid:15)l(1−2η)
+otherwise
+
+2η
+
+E.2 Estimation of the Rényi divergence
+
+In A-POIS, the Rényi divergence needs to be computed between the behavioral p(·|θ) and target
+p(·|θ(cid:48)) distributions on trajectories. This is likely impractical as it requires to integrate over the
+trajectory space. Moreover, for stochastic environments it cannot be computed unless we know the
+transition model P . The following result provides an exact, although loose, bound to this quantity in
+the case of ﬁnite-horizon tasks.
+Proposition E.1. Let p(·|θ) and p(·|θ(cid:48)) be the behavioral and target trajectory probability density
+functions. Let H < ∞ be the task-horizon. Then, it holds that:
+
+(cid:0)p(·|θ(cid:48))(cid:107)p(·|θ)(cid:1) ≤
+
+dα
+
+(cid:18)
+
+sup
+s∈S
+
+dα (πθ(cid:48)(·|s)(cid:107)πθ(·|s))
+
+.
+
+(cid:19)H
+
+Proof. We prove the proposition by induction on the horizon H. We deﬁne dα,H as the α-Rényi divergence at
+horizon H. For H = 1 we have:
+(cid:90)
+
+(cid:19)α (cid:90)
+
+(cid:90)
+
+dα,1
+
+(cid:0)p(·|θ(cid:48))(cid:107)p(·|θ)(cid:1) =
+
+D(s0)
+
+πθ(a0|s0)
+
+P (s1|s0, a0) ds1 da0 ds0
+
+(cid:18) πθ(cid:48)
+
+(cid:18) πθ(cid:48)
+
+(a0|s0)
+πθ(a0|s0)
+(a0|s0)
+πθ(a0|s0)
+(cid:18) πθ(cid:48)
+
+S
+
+(cid:19)α
+
+da0 ds0
+
+(a0|s)
+πθ(a0|s)
+
+(cid:19)α
+
+da0
+
+S
+
+(cid:90)
+
+S
+
+(cid:90)
+
+=
+
+≤
+
+S
+≤ sup
+s∈S
+
+A
+
+(cid:90)
+
+A
+
+D(s0)
+
+πθ(a0|s0)
+
+(cid:90)
+
+D(s0) ds0 sup
+s∈S
+
+A
+(·|s)(cid:107)πθ(·|s)) ,
+
+dα (πθ(cid:48)
+
+πθ(a0|s)
+
+24
+
+where the last but one passage follows from Holder’s inequality. Suppose that the proposition holds for any
+H (cid:48) < H, let us prove the proposition for H.
+
+(cid:16)
+
+dα,H
+
+p(·|θ(cid:48))(cid:107)p(·|θ)
+
+=
+
+(cid:17)
+
+(cid:90)
+
+S
+
+D(s0) · · ·
+
+πθ(aH−2|sH−2)
+
+P (sH−1|sH−2, aH−2)
+
+(cid:18) πθ(cid:48)
+
+(aH−2|sH−2)
+πθ(aH−2|sH−2)
+
+(cid:19)α (cid:90)
+
+S
+
+(cid:90)
+
+A
+
+(cid:18) πθ(cid:48)
+
+(aH−1|sH−1)
+πθ(aH−1|sH−1)
+
+(cid:19)α (cid:90)
+
+S
+
+πθ(aH−1|sH−1)
+
+P (sH |sH−1, aH−1) ds0 . . . dsH−1
+
+(cid:90)
+
+×
+
+A
+
+S
+(cid:90)
+
+×
+
+(cid:90)
+
+S
+
+A
+
+× daH−2 dsH−1 daH−1 dsH
+(cid:90)
+(cid:90)
+
+=
+
+D(s0) · · ·
+
+A
+
+πθ(aH−2|sH−2)
+(cid:18) πθ(cid:48)
+
+(aH−1|sH−1)
+πθ(aH−1|sH−1)
+
+πθ(aH−1|sH−1)
+
+(cid:19)α (cid:90)
+
+(cid:18) πθ(cid:48)
+
+(aH−2|sH−2)
+πθ(aH−2|sH−2)
+(cid:19)α
+
+P (sH−1|sH−2, aH−2)
+
+ds0 . . . dsH−1 daH−2 dsH−1 daH−1
+
+≤
+
+D(s0) · · ·
+
+πθ(aH−2|sH−2)
+
+P (sH−1|sH−2, aH−2)
+
+(cid:90)
+
+A
+
+(cid:18) πθ(cid:48)
+
+(aH−2|sH−2)
+πθ(aH−2|sH−2)
+
+(cid:19)α (cid:90)
+
+× ds0 . . . dsH−1 daH−2 dsH−1 × sup
+s∈S
+
+πθ(aH−1|s)
+
+≤ dα,H−1
+
+(cid:0)p(·|θ(cid:48))(cid:107)p(·|θ)(cid:1) sup
+
+dα (πθ(cid:48)
+
+(·|s)(cid:107)πθ(·|s))
+
+(cid:90)
+
+A
+
+(cid:18) πθ(cid:48)
+
+(aH−1|s)
+πθ(aH−1|s)
+
+(cid:19)α
+
+daH−1
+
+S
+
+S
+
+(cid:18)
+
+≤
+
+sup
+s∈S
+
+dα (πθ(cid:48)
+
+(·|s)(cid:107)πθ(·|s))
+
+s∈S
+
+(cid:19)H
+
+,
+
+where we applied Holder’s inequality again and the last passage is obtained for the inductive hypothesis.
+
+The proposed bound, however, is typically ultraconservative, thus we propose two alternative estima-
+tors of the α-Rényi divergence. The ﬁrst estimator is obtained by simply rephrasing the deﬁnition (4)
+into a sample-based version:
+
+(cid:98)dα (P (cid:107)Q) =
+
+1
+N
+
+N
+(cid:88)
+
+i=1
+
+(cid:18) p(xi)
+q(xi)
+
+(cid:19)α
+
+=
+
+1
+N
+
+N
+(cid:88)
+
+i=1
+
+wα
+
+P/Q(xi),
+
+(40)
+
+where xi ∼ Q. This estimator is clearly unbiased and applies to any pair of probability distributions.
+However, in A-POIS P and Q are distributions over trajectories, their densities are expressed as
+products, thus the α-Rényi divergence becomes:
+
+(cid:90)
+
+T
+(cid:90)
+
+T
+
+(cid:0)p(·|θ(cid:48))(cid:107)p(·|θ)(cid:1) =
+
+dα
+
+p(·|θ)(τ )
+
+(cid:19)α
+
+(cid:18) p(τ |θ(cid:48))
+p(τ |θ)
+
+dτ =
+
+=
+
+D(sτ,0)
+
+P (sτ,t+1|sτ,t, aτ,t)
+
+πθ(aτ,t|sτ,t)
+
+H−1
+(cid:89)
+
+t=0
+
+(cid:18) πθ(cid:48)(aτ,t|sτ,t)
+πθ(aτ,t|sτ,t)
+
+(cid:19)α
+
+dτ.
+
+H−1
+(cid:89)
+
+t=0
+
+Since both πθ and πθ(cid:48) are known we are able to compute exactly for each state dα (πθ(cid:48)(·|s)(cid:107)πθ(·|s))
+with no need to sample the action a. Therefore, we suggest to estimate the Rényi divergence between
+two trajectory distributions as:
+
+(cid:0)p(·|θ(cid:48))(cid:107)p(·|θ)(cid:1) =
+
+(cid:98)dα
+
+1
+N
+
+N
+(cid:88)
+
+H−1
+(cid:89)
+
+i=1
+
+t=0
+
+dα (πθ(cid:48)(·|sτi,t)(cid:107)πθ(·|sτi,t)) .
+
+(41)
+
+E.3 Computation of the Fisher Matrix
+
+In A-POIS the Fisher Information Matrix needs to be estimated off-policy from samples. We can use,
+for this purpose, the IS estimator:
+
+(cid:98)F(θ(cid:48)/θ) =
+
+1
+N
+
+N
+(cid:88)
+
+i=1
+
+(cid:32)H−1
+(cid:88)
+
+t=0
+
+(cid:33)T (cid:32)H−1
+(cid:88)
+
+t=0
+
+wθ(cid:48)/θ(τi)
+
+∇θ(cid:48) log πθ(cid:48)(aτi,t|sτi,t)
+
+∇θ(cid:48) log πθ(cid:48)(aτi,t|sτi,t)
+
+.
+
+(cid:33)
+
+The SN estimator is obtained by replacing wθ(cid:48)/θ(τi) with (cid:101)wθ(cid:48)/θ(τi). Those estimators become very
+unreliable when θ(cid:48) is far from θ, making them difﬁcult to use in practice. On the contrary, in P-POIS
+
+25
+
+in presence of Gaussian hyperpolicies the FIM can be computed exactly [48]. If the hyperpolicy has
+diagonal covariance matrix, i.e., νµ,σ = N (µ, diag(σ2)), the FIM is also diagonal:
+
+F(µ, σ) =
+
+(cid:18) diag(1/σ2)
+0
+
+(cid:19)
+
+,
+
+0
+2I
+
+where I is a properly-sized identity matrix.
+
+E.4 Practical surrogate objective functions
+
+In practice, the Rényi divergence term d2 in the surrogate objective functions presented so far,
+either exact in P-POIS or approximate in A-POIS, tends to be overly-conservative. To mitigate this
+problem, by observing that d2(P (cid:107)Q)/N = 1/ESS(P (cid:107)Q) from equation (6) we can replace the
+whole quantity with an estimator like (cid:100)ESS(P (cid:107)Q), as presented in equation (6). This leads to the
+following approximated surrogate objective functions:
+
+(cid:101)LA−POIS
+
+λ
+
+(θ(cid:48)/θ) =
+
+wθ(cid:48)/θ(τi)R(τi) −
+
+(cid:113)
+
+(cid:101)LP−POIS
+
+λ
+
+(ρ(cid:48)/ρ) =
+
+wρ(cid:48)/ρ(θi)R(τi) −
+
+(cid:113)
+
+1
+N
+
+N
+(cid:88)
+
+i=1
+
+1
+N
+
+N
+(cid:88)
+
+i=1
+
+λ
+(cid:100)ESS (cid:0)p(·|θ(cid:48))(cid:107)p(·|θ)(cid:1)
+
+,
+
+λ
+
+.
+
+(cid:100)ESS (νρ(cid:48)(cid:107)νρ)
+
+Moreover, in all the experiments, we use the empirical maximum reward in place of the true Rmax.
+
+E.5 Practical P-POIS for Deep Neural Policies (N-POIS)
+
+As mentioned in Section 6.2, P-POIS applied to deep neural policies suffers from a curse of dimen-
+sionality due to the high number of (scalar) parameters (which are ∼ 103 for the network used in
+the experiments). The corresponding hyperpolicy is a multi-variate Gaussian (diagonal covariance)
+with a very high dimensionality. As a result, the Rényi divergence, used as a penalty, is extremely
+sensitive even to small perturbations, causing an overly-conservative behavior. First, we give up
+the exact Rényi computation and use the practical surrogate objective function (cid:101)LP−POIS
+proposed
+in Appendix E.4. This, however, is not enough. The importance weights, being the products of
+thousands of probability densities, can easily become zero, preventing any learning. Hence, we
+decide to group the policy parameters in smaller blocks, and independently learn the corresponding
+hyperparameters. In general, we can deﬁne a family of M orthogonal policy-parameter subspaces
+{Θm ≤ Θ}M
+m=1, where V ≤ W reads “V is a subspace of W ”. For each Θm, we consider a multi-
+variate diagonal-covariance Gaussian with Θm as support, obtaining a corresponding hyperparameter
+subspace Pm ≤ P. Then, for each Pm, we compute a separate surrogate objective (where we employ
+self-normalized importance weights):
+
+λ
+
+(cid:101)LN−POIS
+
+λ
+
+(ρ(cid:48)
+
+m/ρm) =
+
+(cid:101)wρ(cid:48)m/ρm
+
+(θi
+
+m)R(τi) −
+
+(cid:113)
+
+1
+N
+
+N
+(cid:88)
+
+i=1
+
+λ
+(cid:100)ESS (cid:0)νρ(cid:48)m
+
+,
+
+(cid:1)
+
+(cid:107)νρm
+
+where ρm, ρ(cid:48)
+m ∈ Pm, θm ∈ Θm. Each objective is independently optimized via natural gradient
+ascent, where the step size is found via a line search as usual. It remains to deﬁne a meaningful
+grouping for the policy parameters, i.e., for the weights of the deep neural policy. We choose to
+group them by network unit, or neuron (counting output units but not input units). More precisely, let
+denote a network unit as a function:
+
+Ui(x|θm) = g(xT θm),
+where x is the vector of the inputs to the unit (including a 1 that multiplies the bias parameter) and
+g(·) is an activation function. To each unit Um we associate a block Θm such that θm ∈ Θm. In
+more connectivist-friendly terms, we group connections by the neuron they go into. For the network
+we used in the experiments, this reduces the order of the multivariate Gaussian hyperpolicies from
+∼ 103 to ∼ 102. We call this practical variant of our algorithm Neuron-Based POIS (N-POIS).
+Although some design choices seem rather arbitrary, and independently optimizing hyperparameter
+blocks clearly neglects some potentially meaningful interactions, the practical results of N-POIS
+are promising, as reported in Section 6.2. Figure 4 is an ablation study showing the performance of
+P-POIS variants on Cartpole. Only using both the tricks discussed in this section, we are able to solve
+the task (this experiment is on 50 iterations only).
+
+26
+
+Figure 4: Ablation study for N-POIS (5 runs, 95% c.i.).
+
+F Experiments Details
+
+In this Appendix, we report the hyperparameter values used in the experimental evaluation and some
+additional plots and experiments. We adopted different criteria to decide the batch size: for linear
+policies at each iteration 100 episodes are collected regardless of their length, whereas for deep neural
+policies, in order to be fully comparable with [11], 50000 timesteps are collected at each iteration
+regardless of the resulting number of episodes (the last episode is cut so that the number of timesteps
+sums up exactly to 50000). Clearly, this difference is relevant only for episodic tasks.
+
+F.1 Linear policies
+
+In the following we report the hyperparameters shared by all tasks and algorithms for the experiments
+with linear policies:
+
+• Policy architecture: Normal distribution N (uM(s), e2Ω), where the mean uM(s) = Ms is
+a linear function in the state variables with no bias, and the variance is state-independent
+and parametrized as e2Ω, with diagonal Ω.
+
+• seeds: 10, 109, 904, 160, 570, 662, 963, 100, 746, 236, 247, 689, 153, 947, 307, 42, 950,
+
+• Policy initialization: mean parameters sampled from N (0, 0.012), variance initialized to 1
+
+• Number of runs: 20 (95% c.i.)
+
+315, 545, 178
+
+• Task horizon: 500
+
+• Number of iterations: 500
+
+• Maximum number of line search attempts (POIS only): 30
+
+• Maximum number of ofﬂine iterations (POIS only): 10
+
+• Episodes per iteration: 100
+
+• Importance weight estimator (POIS only): IS for A-POIS, SN for P-POIS
+
+• Natural gradient (POIS only): No for A-POIS, Yes for P-POIS
+
+Table 3 reports the hyperparameters that have been tuned speciﬁcally for each task selecting the best
+combination based on the runs corresponding to the ﬁrst 5 seeds.
+
+27
+
+Table 3: Task-speciﬁc hyperparameters for the experiments with linear policy. δ is the signiﬁcance
+level for POIS while δ is the step-size for TRPO and PPO. In bold, the best hyperparameters found.
+
+Environment
+
+A-POIS (δ)
+
+P-POIS (δ)
+
+0.1, 0.2, 0.3, 0.4, 0.5
+Cart-Pole Balancing
+0.8, 0.9, 0.99, 1
+Inverted Pendulum
+0.8, 0.9, 0.99, 1
+Mountain Car
+0.1, 0.3, 0.5, 0.7, 0.9
+Acrobot
+Double Inverted Pendulum 0.1, 0.2, 0.3, 0.4, 0.5
+
+0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9 1
+0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9 1
+0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1
+0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9 1
+0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9 1
+
+Environment
+
+TRPO (δ)
+
+PPO (δ)
+
+0.001, 0.01, 0.1, 1
+Cart-Pole Balancing
+0.001, 0.01, 0.1, 1
+Inverted Pendulum
+0.001, 0.01, 0.1, 1
+Mountain Car
+0.001, 0.01, 0.1, 1
+Acrobot
+Double Inverted Pendulum 0.001, 0.01, 0.1, 1
+
+0.001, 0.01, 0.1 , 1
+0.001, 0.01, 0.1, 1
+0.001, 0.01, 0.1, 1
+0.001, 0.01, 0.1, 1
+0.001, 0.01, 0.1, 1
+
+F.2 Deep neural policies
+
+In the following we report the hyperparameters shared by all tasks and algorithms for the experiments
+with deep neural policies:
+
+• Policy architecture: Normal distribution N (uM(s), e2Ω), where the mean uM(s) is a 3-
+layers MLP (100, 50, 25) with bias (activation functions: tanh for hidden-layers, linear for
+output layer), the variance is state-independent and parametrized as e2Ω with diagonal Ω.
+
+• Number of runs: 5 (95% c.i.)
+• seeds: 10, 109, 904, 160, 570
+• Policy initialization: uniform Xavier initialization [12], variance initialized to 1
+• Task horizon: 500
+• Number of iterations: 500
+• Maximum number of line search attempts (POIS only): 30
+• Maximum number of ofﬂine iterations (POIS only): 20
+• Timesteps per iteration: 50000
+• Importance weight estimator (POIS only): IS for A-POIS, SN for P-POIS
+• Natural gradient (POIS only): No for A-POIS, Yes for P-POIS
+
+Table 4 reports the hyperparameters that have been tuned speciﬁcally for each task selecting the best
+combination based on the runs corresponding to the 5 seeds.
+
+Table 4: Task-speciﬁc hyperparameters for the experiments with deep neural policies. δ is the
+signiﬁcance level for POIS. In bold, the best hyperparameters found.
+
+Environment
+
+A-POIS (δ)
+
+P-POIS (δ)
+
+0.9, 0.99, 0.999
+Cart-Pole Balancing
+0.9, 0.99, 0.999
+Mountain Car
+Double Inverted Pendulum 0.9, 0.99, 0.999
+0.9, 0.99, 0.999
+Swimmer
+
+0.4, 0.5, 0.6, 0.7, 0.8
+0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8
+0.4, 0.5, 0.6, 0.7, 0.8
+0.4, 0.5, 0.6, 0.7, 0.8
+
+F.3 Full experimental results
+
+In this section, we report the complete set of results we obtained by testing the two versions of POIS.
+
+In Figure 5 we report additional plots w.r.t. Figure 2 for A-POIS when changing the δ parameter in the
+Cartpole environment. It is worth noting that the value of δ has also an effect on the speed with which
+
+28
+
+the variance of the policy approaches zero. Indeed, smaller policy variances induce a larger Rényi
+divergence and thus with a higher penalization (small δ) reducing the policy variance is discouraged.
+Moreover, we can see the values of the bound before and after the optimization. Clearly, the higher
+the value of δ, the higher the value of the bound after the optimization process, as the penalization
+term is weaker. It is interesting to notice that when δ = 1 the bound after the optimization reaches
+values that are impossible to reach for any policy and this is a consequence of the high uncertainty in
+the importance sampling estimator.
+
+Figure 5: Standard Deviation of the policy (σ), value of the bound before and after the optimization
+as a function of the number of trajectories for A-POIS in the Cartpole environment for different
+values of δ (5 runs, 95% c.i.).
+
+We report the comparative table taken from [11] containing all the benchmarked algorithms and the
+two versions of POIS (Table 5).
+
+Table 5: Cumulative return compared with [11] on deep neural policies (5 runs, 95% c.i.). In bold,
+the performances that are not statistically signiﬁcantly different from the best algorithm in each task.
+
+Algorithm
+
+Random
+REINFORCE
+TNPG
+RWR
+REPS
+TRPO
+DDPG
+A-POIS
+CEM
+CMA-ES
+P-POIS
+
+Cart-Pole
+Balancing
+
+Mountain Car
+
+Double Inverted
+Pendulum
+
+Swimmer
+
+77.1 ± 0.0
+4693.7 ± 14.0
+
+−415.4 ± 0.0
+−67.1 ± 1.0
+3986.4 ± 748.9 −66.5 ± 4.5
+4861.5 ± 12.3
+−79.4 ± 1.1
+565.6 ± 137.6 −275.6 ± 166.3
+4869.8 ± 37.6
+4634.4 ± 87.6 −288.4 ± 170.3
+4842.8 ± 13.0
+4815.4 ± 4.8
+2440.4 ± 568.3
+4428.1 ± 138.6
+
+−63.7 ± 0.5
+−66.0 ± 2.4
+−85.0 ± 7.7
+−78.9 ± 2.5
+
+−61.7 ± 0.9
+
+−1.7 ± 0.1
+149.7 ± 0.1
+92.3 ± 0.1
+4116.5 ± 65.2
+96.0 ± 0.2
+4455.4 ± 37.6
+60.7 ± 5.5
+3614.8 ± 368.1
+3.8 ± 3.3
+446.7 ± 114.8
+96.0 ± 0.2
+4412.4 ± 50.4
+85.8 ± 1.8
+2863.4 ± 154.0
+4232.1 ± 189.5 88.7 ± 0.55
+68.8 ± 2.4
+2566.2 ± 178.9
+64.9 ± 1.4
+1576.1 ± 51.3
+76.8 ± 1.6
+3161.4 ± 959.2
+
+In the following (Figure 6) we show the learning curves of POIS in its two versions for the experiments
+with deep neural policies.
+
+29
+
+(a) Inverted Double Pendulum
+
+(b) Cartpole
+
+(c) Mountain Car
+
+(d) Swimmer
+
+Figure 6: Average return as a function of the number of trajectories for A-POIS, P-POIS with deep
+neural policies (5 runs, 95% c.i.).
+
+30
+
