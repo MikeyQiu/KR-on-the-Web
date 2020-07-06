@@ -1,5 +1,5 @@
 # KR-on-the-Web
-This is a course project from Knowledge Representation on the Web, Vrije Universiteit Amsterdam.
+> This is a course project from Knowledge Representation on the Web, Vrije Universiteit Amsterdam.
 ## 1. Link to the project 
 https://github.com/MikeyQiu/KR-on-the-Web/
 ## 2. Project details: What is the project’s goal? Why is it important or interesting? 
@@ -14,16 +14,16 @@ This part is implemented by the scripts in Jasper's directory. Afterwards we sel
 ### 4.3 Contributionship Discovery
 We focused ourselves on 5 out of 14 contribution roles from the CRediT Methodology. 
 #### Software
-```
-* This part is impemented by [git_scraping.ipynb](https://github.com/MikeyQiu/KR-on-the-Web/blob/master/git_scraping.ipynb)
-* Based on the assumption that github user name and author name are likely to be same, we link author name with github repository contributors
-```
+
+- This part is impemented by [git_scraping.ipynb](https://github.com/MikeyQiu/KR-on-the-Web/blob/master/git_scraping.ipynb)
+- Based on the assumption that github user name and author name are likely to be same, we link author name with github repository contributors
+
 #### Supervision, etc.
-```
-* This part is impemented by [textmining_final-Copy1.ipynb](https://github.com/MikeyQiu/KR-on-the-Web/blob/master/textmining_final-Copy1.ipynb)
-* We derive author related information from the raw data of the PDF link, derive author contribution roles like Resource and Supervision comparing with the meta data from MAKG.
-```
-#### 4.4 Output
+
+- This part is impemented by [textmining_final-Copy1.ipynb](https://github.com/MikeyQiu/KR-on-the-Web/blob/master/textmining_final-Copy1.ipynb)
+- We derive author related information from the raw data of the PDF link, derive author contribution roles like Resource and Supervision comparing with the meta data from MAKG.
+
+### 4.4 Output
 After extraction, roles are serialized in turtle format and uploaded to linked database of [triply.com](https://triplydb.com/jasper-grannetia/KRW)
 
 ### 5 Evaluation
