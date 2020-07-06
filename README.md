@@ -8,13 +8,13 @@ Articles often have multiple authors, for which each name is mentioned at the be
 ## 3. Data Resource
 We obtained our data through the api of [Paper with Code](https://paperswithcode.com/), where both Github repository and Paper's PDF links are accessiable.
 ## 4. Impelementation
-### 4.0 Ontology Design 
+### 4.1 Ontology Design 
 You can find the ontology [here](https://github.com/MikeyQiu/KR-on-the-Web/blob/master/krw v0.7 (1).owl) and the visualization [here](https://github.com/MikeyQiu/KR-on-the-Web/blob/master/Pictures/ontology complete.png).
-### 4.1 Data
+### 4.2 Data
 We prepared our data in both relational sql database and rdf triples in turtle format, which are zipped in data directory.
-### 4.2 Preprocessing
+### 4.3 Preprocessing
 This part is implemented by the scripts in Jasper's directory. Afterwards we selected roughly 3000 papers and 7500 authors for evaluation.
-### 4.3 Contributionship Discovery
+### 4.4 Contributionship Discovery
 We focused ourselves on 5 out of 14 contribution roles from the CRediT Methodology, namely writing_draft, writing_editing, resource, supervision and software.
 #### Supervision, etc.
 
@@ -29,9 +29,9 @@ We focused ourselves on 5 out of 14 contribution roles from the CRediT Methodolo
 
 
 
-### 4.4 Output
+### 4.5 Output
 After extraction, roles are serialized in turtle format and uploaded to linked database of [triply.com](https://triplydb.com/jasper-grannetia/KRW)
 
-### 5 Evaluation
+## 5 Evaluation
 We made a number of SPARQL query to gain some insight from data. Also we used the GraphDB and highcharts.js for query visualization.
-<img src="https://github.com/MikeyQiu/KR-on-the-Web/blob/master/Pictures/visualization.jpg" title="KRoW" alt="KRoW"></a>
+<img src="https://github.com/MikeyQiu/KR-on-the-Web/blob/master/Pictures/Visualization.jpeg" title="visual" alt="visual"></a>
