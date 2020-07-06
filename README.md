@@ -23,7 +23,7 @@ We focused ourselves on 5 out of 14 contribution roles from the CRediT Methodolo
 * This part is impemented by [textmining_final-Copy1.ipynb](https://github.com/MikeyQiu/KR-on-the-Web/blob/master/textmining_final-Copy1.ipynb)
 * We derive author related information from the raw data of the PDF link, derive author contribution roles like Resource and Supervision comparing with the meta data from MAKG.
 ```
-### 4.4 Output
+#### 4.4 Output
 After extraction, roles are serialized in turtle format and uploaded to linked database of [triply.com](https://triplydb.com/jasper-grannetia/KRW)
 
 ### 5 Evaluation
