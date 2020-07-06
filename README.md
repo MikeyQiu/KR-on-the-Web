@@ -6,7 +6,9 @@ https://github.com/MikeyQiu/KR-on-the-Web/
 Articles often have multiple authors, for which each name is mentioned at the beginning of the article. However, the role of each other is rarely mentioned in articles, preventing researchers and readers to acknowledge each author's work. We aim to discover contributionship based on [CRediT](https://casrai.org/credit/) instead of authorship from papers, by meirging linked data from the Microsoft Academic Knowledge Graph(MAKG), meta data, commitmentss from Github and raw information from text.
 ## 3. Data Resource
 We obtained our data through the api of [Paper with Code](https://paperswithcode.com/), where both Github repository and Paper's PDF links are accessiable.
-## 4. Get Started
+## 4. Impelementation
+### 4.0 Ontology Design 
+You can find the ontology [Here] and the visualization of ontology [Here].
 ### 4.1 Data
 We prepared our data in both relational sql database and rdf triples in turtle format, which are located in data directory.
 ### 4.2 Preprocessing
