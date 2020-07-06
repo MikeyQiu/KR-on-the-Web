@@ -1,0 +1,1077 @@
+9
+1
+0
+2
+ 
+t
+c
+O
+ 
+7
+2
+ 
+ 
+]
+
+G
+L
+.
+s
+c
+[
+ 
+ 
+5
+v
+8
+0
+2
+4
+0
+.
+2
+0
+9
+1
+:
+v
+i
+X
+r
+a
+
+MaCow: Masked Convolutional Generative Flow
+
+Xuezhe Ma, Xiang Kong, Shanghang Zhang, Eduard Hovy
+Carnegie Mellon University
+Pittsburgh, PA, USA
+xuezhem,xiangk@cs.cmu.edu, shanghaz@andrew.cmu.edu, hovy@cmu.edu
+
+Abstract
+
+Flow-based generative models, conceptually attractive due to tractability of the
+exact log-likelihood computation and latent-variable inference as well as efﬁciency
+in training and sampling, has led to a number of impressive empirical successes
+and spawned many advanced variants and theoretical investigations. Despite com-
+putational efﬁciency, the density estimation performance of ﬂow-based generative
+models signiﬁcantly falls behind those of state-of-the-art autoregressive models.
+In this work, we introduce masked convolutional generative ﬂow (MACOW), a
+simple yet effective architecture for generative ﬂow using masked convolution. By
+restricting the local connectivity to a small kernel, MACOW features fast and stable
+training along with efﬁcient sampling while achieving signiﬁcant improvements
+over Glow for density estimation on standard image benchmarks, considerably
+narrowing the gap with autoregressive models.
+
+1
+
+Introduction
+
+Unsupervised learning of probabilistic models is a central yet challenging problem. Deep gen-
+erative models have shown promising results in modeling complex distributions such as natural
+images (Radford et al., 2015), audio (Van Den Oord et al., 2016) and text (Bowman et al., 2015).
+Multiple approaches emerged in recent years, including Variational Autoencoders (VAEs) (Kingma
+and Welling, 2014), Generative Adversarial Networks (GANs) (Goodfellow et al., 2014), autoregres-
+sive neural networks (Larochelle and Murray, 2011; Oord et al., 2016), and ﬂow-based generative
+models (Dinh et al., 2014, 2016; Kingma and Dhariwal, 2018). Among these, ﬂow-based genera-
+tive models gained popularity for this capability of estimating densities of complex distributions,
+efﬁciently generating high-ﬁdelity syntheses, and automatically learning useful latent spaces.
+
+Flow-based generative models typically warp a simple distribution into a complex one by mapping
+points from the simple distribution to the complex data distribution through a chain of invertible
+transformations with Jacobian determinants that are efﬁcient to compute. This design guarantees that
+the density of the transformed distribution can be analytically estimated, making maximum likelihood
+learning feasible. Flow-based generative models have spawned signiﬁcant interests for improving
+and analyzing its algorithms both theoretically and practically, and applying them to a wide range of
+tasks and domains.
+
+In their pioneering work, Dinh et al. (2014) ﬁrst proposed Non-linear Independent Component
+Estimation (NICE) to apply ﬂow-based models for modeling complex high-dimensional densities.
+RealNVP (Dinh et al., 2016) extended NICE with a more ﬂexible invertible transformation to
+experiment with natural images. However, these ﬂow-based generative models resulted in worse
+density estimation performance compared to state-of-the-art autoregressive models, and are incapable
+of realistic synthesis of large images compared to GANs (Karras et al., 2018; Brock et al., 2019).
+Recently, Kingma and Dhariwal (2018) proposed Glow as a generative ﬂow with invertible 1 × 1
+convolutions, which signiﬁcantly improved the density estimation performance on natural images.
+Importantly, they demonstrated that ﬂow-based generative models optimized towards the plain
+
+33rd Conference on Neural Information Processing Systems (NeurIPS 2019), Vancouver, Canada.
+
+likelihood-based objective are capable of generating realistic high-resolution natural images efﬁciently.
+Prenger et al. (2018) investigated applying ﬂow-based generative models to speech synthesis by
+combining Glow with WaveNet (Van Den Oord et al., 2016). Ziegler and Rush (2019) adopted
+variational inference to apply generative ﬂows to discrete sequential data. Unfortunately, the density
+estimation performance of Glow on natural images remains behind autoregressive models, such as
+PixelRNN/CNN (Oord et al., 2016; Salimans et al., 2017), Image Transformer (Parmar et al., 2018),
+PixelSNAIL (Chen et al., 2017) and SPN (Menick and Kalchbrenner, 2019). There is also some
+work (Rezende and Mohamed, 2015; Kingma et al., 2016; Zheng et al., 2017) trying to apply ﬂow to
+variational inference.
+
+In this paper, we propose a novel architecture of generative ﬂow, masked convolutional generative
+ﬂow (MACOW), which leverages masked convolutional neural networks (Oord et al., 2016). The
+bijective mapping between input and output variables is easily established while the computation of the
+determinant of the Jacobian remians efﬁcient. Compared to inverse autoregressive ﬂow (IAF) (Kingma
+et al., 2016), MACOW offers stable training and efﬁcient inference and synthesis by restricting the
+local connectivity in a small “masked” kernel as well as large receptive ﬁelds by stacking multiple
+layers of convolutional ﬂows and using rotational ordering masks (§3.1). We also propose a ﬁne-
+grained version of the multi-scale architecture adopted in previous ﬂow-based generative models to
+further improve the performance (§3.2). Experimenting with four benchmark datasets for images,
+CIFAR-10, ImageNet, LSUN, and CelebA-HQ, we demonstrate the effectiveness of MACOW as
+a density estimator by consistently achieving signiﬁcant improvements over Glow on all the three
+datasets. When equipped with the variational dequantization mechanism (Ho et al., 2019), MACOW
+considerably narrows the gap of the density estimation with autoregressive models (§4).
+
+2 Flow-based Generative Models
+
+In this section, we ﬁrst setup notations, describe ﬂow-based generative models, and review
+Glow (Kingma and Dhariwal, 2018) as it is the foundation for MACOW.
+
+2.1 Notations
+
+Throughout the paper, uppercase letters represent random variables and lowercase letters for realiza-
+tions of their corresponding random variables. Let X ∈ X be the random variables of the observed
+data, e.g., X is an image or a sentence for image and text generation, respectively.
+
+Let P denote the true distribution of the data, i.e., X ∼ P , and D = {x1, . . . , xN } be our training
+sample, where xi, i = 1, . . . , N, are usually i.i.d. samples of X. Let P = {Pθ : θ ∈ Θ} denote a
+parametric statistical model indexed by the parameter θ ∈ Θ, where Θ is the parameter space. p
+denotes the density of the corresponding distribution P . In the deep generative model literature, deep
+neural networks are the most widely used parametric models. The goal of generative models is to
+learn the parameter θ such that Pθ can best approximate the true distribution P . In the context of
+maximum likelihood estimation, we minimize the negative log-likelihood of the parameters with:
+
+min
+θ∈Θ
+
+1
+N
+
+N
+(cid:88)
+
+i=1
+
+− log pθ(xi) = min
+θ∈Θ
+
+(cid:101)P (X)[− log pθ(X)],
+E
+
+(1)
+
+where ˜P (X) is the empirical distribution derived from training data D.
+
+2.2 Flow-based Models
+
+In the framework of ﬂow-based generative models, a set of latent variables Z ∈ Z are introduced
+with a prior distribution pZ(z), which is typically a simple distribution like a multivariate Gaussian.
+For a bijection function f : X → Z (with g = f −1), the change of the variable formula deﬁnes the
+model distribution on X by
+
+pθ(x) = pZ (fθ(x))
+
+det
+
+(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+
+(cid:18) ∂fθ(x)
+∂x
+
+(cid:19)(cid:12)
+(cid:12)
+(cid:12)
+(cid:12)
+
+,
+
+(2)
+
+where ∂fθ(x)
+
+∂x
+
+is the Jacobian of fθ at x.
+
+2
+
+The generative process is deﬁned straightforwardly as the following:
+
+z ∼ pZ(z)
+x = gθ(z).
+Flow-based generative models focus on certain types of transformations fθ that allow the inverse
+functions gθ and Jacobian determinants to be tractable to compute. By stacking multiple such
+invertible transformations in a sequence, which is also called a (normalizing) ﬂow (Rezende and
+Mohamed, 2015), the ﬂow is then capable of warping a simple distribution (pZ(z)) into a complex
+one (p(x)) through:
+
+(3)
+
+X
+
+f1←→
+g1
+
+H1
+
+f2←→
+g2
+
+H2
+
+f3←→
+g3
+
+· · ·
+
+fK←→
+gK
+
+Z,
+
+where f = f1 ◦ f2 ◦ · · · ◦ fK is a ﬂow of K transformations. For brevity, we omit the parameter θ
+from fθ and gθ.
+
+2.3 Glow
+
+Recently, several types of invertible transformations emerged to enhance the expressiveness of ﬂows,
+among which Glow (Kingma and Dhariwal, 2018) has stood out for its simplicity and effectiveness
+on both density estimation and high-ﬁdelity synthesis. The following brieﬂy describes the three types
+of transformations that comprise Glow.
+
+Actnorm. Kingma and Dhariwal (2018) proposed an activation normalization layer (Actnorm) as
+an alternative for batch normalization (Ioffe and Szegedy, 2015) to alleviate the challenges in model
+training. Similar to batch normalization, Actnorm performs an afﬁne transformation of the activations
+using a scale and bias parameter per channel for 2D images, such that
+
+yi,j = s (cid:12) xi,j + b,
+where both x and y are tensors of shape [h × w × c] with spatial dimensions (h, w) and channel
+dimension c.
+
+Invertible 1 × 1 convolution. To incorporate a permutation along the channel dimension, Glow
+includes a trainable invertible 1 × 1 convolution layer to generalize the permutation operation as:
+
+where W is the weight matrix with shape c × c.
+
+yi,j = W xi,j,
+
+Afﬁne Coupling Layers. Following Dinh et al. (2016), Glow includes afﬁne coupling layers in its
+architecture of:
+
+xa, xb = split(x)
+ya = xa
+yb = s(xa) (cid:12) xb + b(xa)
+y = concat(ya, yb),
+where s(xa) and b(xa) are outputs of two neural networks with xa as input. The split() and concat()
+functions perform operations along the channel dimension.
+
+From this designed architecture of Glow, we see that interactions between spatial dimensions are
+incorporated only in the coupling layers. The coupling layer, however, is typically costly for memory
+resources, making it infeasible to stack a signiﬁcant number of coupling layers into a single model,
+especially when processing high-resolution images. The main goal of this work is to design a new
+type of transformation that simultaneously models the dependencies in both the spatial and channel
+dimensions while maintaining a relatively small memory footprint to improve the capacity of the
+generative ﬂow.
+
+3 Masked Convolutional Generative Flows
+
+In this section, we describe the architectural components of the masked convolutional generative
+ﬂow (MACOW). First, we introduce the proposed ﬂow transformation using masked convolutions in
+§3.1. Then, we present a ﬁne-grained version of the multi-scale architecture adopted by previous
+generative ﬂows (Dinh et al., 2016; Kingma and Dhariwal, 2018) in §3.2.
+
+3
+
+Figure 1: Visualization of the receptive ﬁeld of four masked convolutions with rotational ordering.
+
+3.1 Flow with Masked Convolutions
+
+Applying autoregressive models to normalizing ﬂows has been previously explored in studies (Kingma
+et al., 2016; Papamakarios et al., 2017), with idea of sequentially modeling the input random variables
+in an autoregressive order to ensure the model cannot read input variables behind the current one:
+
+yt = s(x<t) (cid:12) xt + b(x<t),
+
+(4)
+
+where x<t denotes the input variables in x positioned ahead of xt in the autoregressive order. s()
+and b() are two autoregressive neural networks typically implemented using spatial masks (Germain
+et al., 2015; Oord et al., 2016).
+
+Despite effectiveness in high-dimensional space, autoregressive ﬂows suffer from two crucial prob-
+lems: (1) The training procedure is unstable when stacking multiple layers to increase the ﬂow
+capacities for complex distributions. (2) Inference and synthesis are inefﬁcient, due to the non-
+parallelizable inverse function.
+
+We propose to use masked convolutions to restrict the local connectivity in a small “masked” kernel
+to address these two problems. The two autoregressive neural networks, s() and b(), are implemented
+with one-layer masked convolutional networks with small kernels (e.g. 2 × 5 in Figure 1) to ensure
+they only read contexts in a small neighborhood based on:
+
+s(x<t) = s(xt(cid:63)),
+
+b(x<t) = b(xt(cid:63)),
+
+(5)
+
+where xt(cid:63) denotes the input variables, restricted in a small kernel, on which xt depends. By using
+masks in rotational ordering and stacking multiple layers of ﬂows, the model captures a large receptive
+ﬁeld (see Figure 1), and models dependencies in both the spatial and channel dimensions.
+
+Efﬁcient Synthesis. As discussed above, synthesis from autoregressive ﬂows is inefﬁcient since
+the inverse must be computed by sequentially traversing through the autoregressive order. In the
+context of 2D images with shape [h × w × c], the time complexity of synthesis is quadratic, i.e.
+O(h × w × NN(h, w, c)), where NN(h, w, c) is the time of computing the outputs from the neural
+network s() and b() with input shape [h × w × c]. In our proposed ﬂow with masked convolutions,
+computation of xi,j begins as soon as all xt(cid:63) are available, contrary to the autoregressive requirement
+that all x<i,j must have been already computed. Moreover, at each step we only need to feed a slice
+of the image (with shape [h × kw × c] or [kh × w × c] depending on the direction of the mask) into s()
+and b(). Here [kh × kw × c] is the shape of the kernel in the convolution. Thus, the time complexity
+reduces signiﬁcantly from quadratic to linear, which is O(h×NN(kh, w , c)) or O(w ×NN(kw , h, c))
+for horizontal and vertical masks, respectively.
+
+Discussion The previous work closely related to MACOW is the Emerging Convolutions proposed
+in Hoogeboom et al. (2019). There are two main differences. i) the pattern of the mask is different.
+Emerging Convolutions use “causal masks” (Oord et al., 2016) whose inverse function falls into a
+complete autoregressive transformation. In contrast, MACOW achieves signiﬁcantly more efﬁcient
+inference and sampling (§4.3), due to the carefully designed masks (Figure 1). ii) the Emerging
+Convolutional Flow, proposed as an alternative to the invertible 1 × 1 convolution in Glow, is basically
+a linear transformation with masked convolutions, which does not introduce “nonlinearity” to the
+random variables. MACOW, however, introduces such nonlinearity similar to the coupling layers.
+
+4
+
+(a) One step of MACOW (b) Original multi-scale architecture
+
+(c) Fine-grained multi-scale architecture
+
+Figure 2: The architecture of the proposed MACOW model, where each step (a) consists of T units of
+ActNorm followed by two masked convolutions with rotational ordering, and a Glow step. This ﬂow
+is combined with either an original multi-scale (b) or a ﬁne-grained architecture (c).
+
+3.2 Fine-grained Multi-Scale Architecture
+
+Dinh et al. (2016) proposed a multi-scale architecture using a squeezing operation, which has been
+demonstrated to be helpful for training very deep ﬂows. In the original multi-scale architecture, the
+model factors out half of the dimensions at each scale to reduce computational and memory costs. In
+this paper, inspired by the size upscaling in subscale ordering (Menick and Kalchbrenner, 2019) that
+generates an image as a sequence of sub-images with equal size, we propose a ﬁne-grained multi-scale
+architecture to improve model performance further. In this ﬁne-grained multi-scale architecture, each
+scale consists of M/2 blocks, and after each block, the model splits out 1/M dimensions of the
+input1. Figure 2 illustrates the graphical speciﬁcation of the two architecture versions. Note that the
+ﬁne-grained architecture reduces the number of parameters compared with the original architecture
+with the same number of ﬂow layers. Experimental improvements demonstrate the effectiveness of
+the ﬁne-grained multi-scale architecture (§4).
+
+4 Experiments
+
+We evaluate our MACOW model on both low-resolution and high-resolution datasets. For a step of
+MACOW, we use T = 2 masked convolution units, and the Glow step is the same as that described
+in Kingma and Dhariwal (2018) where an ActNorm is followed by an Invertible 1 × 1 convolution,
+which is followed by a coupling layer. Each coupling layer includes three convolution layers where
+the ﬁrst and last convolutions are 3 × 3, while the center convolution is 1 × 1. For low-resolution
+images, we use afﬁne coupling layers with 512 hidden channels, while for high-resolution images
+we use additive layers with 256 hidden channels to reduce memory cost. ELU (Clevert et al., 2015)
+is used as the activation function throughout the ﬂow architecture. For variational dequantization,
+the dequantization noise distribution qφ(u|x) is modeled with a conditional MACOW with shallow
+architecture. Additional details on architectures, results, and analysis of the conducted experiments
+are provided in Appendix B.
+
+4.1 Low-Resolution Images
+
+We begin our experiments with an evaluation of the density estimation performance of MACOW on
+two low-resolution image datasets that are commonly used to evaluate the deep generative models:
+CIFAR-10 with images of size 32 × 32 (Krizhevsky and Hinton, 2009) and the 64 × 64 downsampled
+version of ImageNet (Oord et al., 2016).
+
+We perform experiments to dissect the effectiveness of each component of our MACOW model with
+ablation studies. The Org model utilizes the original multi-scale architecture, while the +ﬁne-grained
+model augments the original one with the ﬁne-grained multi-scale architecture proposed in §3.2. The
+
+1In our experiments, we set M = 4. Note that the original multi-scale architecture is a special case of the
+
+ﬁne-grained version with M = 2.
+
+5
+
+Table 1: Density estimation performance on CIFAR-10 32 × 32 and ImageNet 64 × 64. Results are
+reported in bits/dim.
+
+Model
+
+CIFAR-10
+
+ImageNet-64
+
+Autoregressive
+
+Flow-based
+
+IAF VAE (Kingma et al., 2016)
+Parallel Multiscale (Reed et al., 2017)
+PixelRNN (Oord et al., 2016)
+Gated PixelCNN (van den Oord et al., 2016)
+MAE (Ma et al., 2019)
+PixelCNN++ (Salimans et al., 2017)
+PixelSNAIL (Chen et al., 2017)
+SPN (Menick and Kalchbrenner, 2019)
+
+Real NVP (Dinh et al., 2016)
+Glow (Kingma and Dhariwal, 2018)
+Flow++: Unif (Ho et al., 2019)
+Flow++: Var (Ho et al., 2019)
+MACOW: Org
+MACOW: +ﬁne-grained
+MACOW: +var
+
+3.11
+–
+3.00
+3.03
+2.95
+2.92
+2.85
+–
+
+3.49
+3.35
+3.29
+3.09
+3.31
+3.28
+3.16
+
+–
+3.70
+3.63
+3.57
+–
+–
+3.52
+3.52
+
+3.98
+3.81
+–
+3.69
+3.78
+3.75
+3.69
+
+Table 2: Negative log-likelihood scores for 5-bit LSUN and CelebA-HQ datasets in bits/dim.
+
+Model
+Glow (Kingma and Dhariwal, 2018)
+SPN (Menick and Kalchbrenner, 2019)
+
+MACOW: Unif
+MACOW: Var
+
+LSUN
+CelebA-HQ bedroom tower
+
+1.03
+0.61
+
+0.95
+0.67
+
+1.20
+–
+
+1.16
+0.98
+
+–
+–
+
+1.22
+1.02
+
+church
+–
+–
+
+1.36
+1.09
+
++var model further implements the variational dequantization on the top of +ﬁne-grained to replace
+the uniform dequantization (see Appendix A for details). For each ablation, we slightly adjust the
+number of steps in each level so that all the models have a similar number of parameters.
+
+Table 1 provides the density estimation performance for different variations of our MACOW model
+along with the top-performing autoregressive models (ﬁrst section) and ﬂow-based generative models
+(second section). First, on both datasets, ﬁne-grained models outperform Org ones, demonstrating
+the effectiveness of the ﬁne-grained multi-scale architecture. Second, with the uniform dequan-
+tization, MACOW combined with the ﬁne-grained multi-scale architecture signiﬁcantly improves
+the performance over Glow on both datasets, and obtains slightly better results than Flow++ on
+CIFAR-10. In addition, with variational dequantization, MACOW achieves comparable result in
+bits/dim with Flow++ on ImageNet 64 × 64. On CIFAR-10, however, the performance of MaCow is
+around 0.07 bits/dim behind Flow++.
+
+Compared with the state-of-the-art autoregressive generative models PixelSNAIL (Chen et al., 2017)
+and SPN (Menick and Kalchbrenner, 2019), the performance of MACOW is approximately 0.31
+bits/dim worse on CIFAR-10 and 0.14 worse on ImageNet 64 × 64. Further improving the density
+estimation performance of MACOW on natural images is left to future work.
+
+4.2 High-Resolution Images
+
+We next demonstrate experimentally that our MACOW model is capable of high ﬁdelity samples at
+high-resolution. Following Kingma and Dhariwal (2018), we choose the CelebA-HQ dataset (Karras
+et al., 2018), which consists of 30,000 high-resolution images from the CelebA dataset (Liu et al.,
+2015), and the LSUN (Yu et al., 2015) datasets including categories bedroom, tower and church. We
+train our models on 5-bit images with the ﬁne-grained multi-scale architecture and both the uniform
+and variational dequantization. For each model, we adjust the number of steps in each level so that
+all the models have similar numbers of parameters with Glow for a fair comparison.
+
+6
+
+(a) CelebA-HQ
+
+(b) LSUN church
+
+(c) LSUN tower
+
+(d) LSUN bedroom
+
+Figure 3: (a) 5-bit 256 × 256 CelebA-HQ samples with temperature 0.7; (b)(c)(d) 5-bit 128 × 128
+LSUN church, tower and bedroom samples, with temperature 0.9, respectively.
+
+4.2.1 Density Estimation
+
+Table 2 illustrates the negative log-likelihood scores in bits/dim of two versions of MACOW on the
+5-bit 128 × 128 LSUN and 256 × 256 CelebA-HQ datasets. With uniform dequantization, MACOW
+improves the log-likelihood over Glow from 1.03 bits/dim to 0.95 bits/dim on CelebA-HQ dataset.
+Equipped with variational dequantization, MACOW obtains 0.67 bits/dim, which is 0.06 bits/dim
+behind the state-of-the-art autoregressive generative model SPN (Menick and Kalchbrenner, 2019)
+and signiﬁcantly narrows the gap. On the LSUN datasets, MACOW with uniform dequantization
+outperforms Glow with 0.4 bits/dim on the bedroom category. With variational dequantization, the
+model achieves further improvements on all the three categories of LSUN datasets,
+
+4.2.2 Image Generation
+
+Consistent with previous work on likelihood-based generative models (Parmar et al., 2018; Kingma
+and Dhariwal, 2018), we found that sampling from a reduced-temperature model often results in
+higher-quality samples. Figure 3 showcases some random samples for 5-bit CelebA-HQ 256 × 256
+with temperature 0.7 and LSUN 128 × 128 with temperature 0.9. The images are extremely high
+
+7
+
+Table 3: (a) Image synthesis speed on CIFAR10. Glow re-implemented in PyTorch is masked with
+†. ‡ denotes results shown in Hoogeboom et al. (2019). (b) Image synthesis speed of MACOW on
+datasets with different image sizes. The time is measured in milliseconds to sample a datapoint when
+computed in mini-batchs with size 100.
+
+(b)
+
+time (ms)
+
+Slow-down
+
+Dataset
+
+image size
+
+time (ms)
+
+32 × 32
+CIFAR10
+64 × 64
+ImageNet
+128 × 128
+LSUN
+CelebA-HQ 256 × 256
+
+38.7
+104.7
+267.9
+434.2
+
+CIFAR10
+Glow‡
+MAF ‡
+Emerging‡
+Glow†
+MACOW
+
+(a)
+
+5
+3000
+1800
+
+5.3
+38.7
+
+1.0
+600.0
+360.0
+
+1.0
+7.3
+
+quality for non-autoregressive likelihood models, despite that maximum likelihood is a principle that
+values diversity over sample quality in a limited capacity setting (Theis et al., 2016). More samples
+of images, including samples of low-resolution ones, are provided in Appendix C2.
+
+4.3 Comparison on Synthesis Speed
+
+In this section, we compare the synthesis speed of MACOW at test time with that of Glow (Kingma
+and Dhariwal, 2018), Masked Autoregressive Flows (MAF) (Papamakarios et al., 2017) and Emerging
+Convolutions (Hoogeboom et al., 2019). Following Hoogeboom et al. (2019), we measure the time
+to sample a datapoint when computed in mini-batchs with size 100. For fair comparison, we re-
+implemented Glow using PyTorch (Paszke et al., 2017), and all experiments are conducted on a single
+NVIDIA TITAN X GPU.
+
+Table 3a shows the sampling speed of MACOW on CIFAR-10, together with that of the baselines.
+MACOW is 7.3 times slower than Glow, much faster than Emerging Convolution and MAF, whose
+factors are 360 and 600 respectively. The sampling speed of MACOW on datasets with different
+image sizes is shown in Table 3b. We see that the time of synthesis increases approximately linearly
+with the increase of image resolution.
+
+5 Conclusion
+
+In this paper, we propose a new type of generative ﬂow, coined MACOW, which exploits masked
+convolutional neural networks. By restricting the local dependencies in a small masked kernel,
+MACOW boasts fast and stable training as well as efﬁcient sampling. Experiments on both low-
+and high-resolution benchmark datasets of images show the capability of MACOW on both density
+estimation and high-ﬁdelity generation, achieving state-of-the-art or comparable likelihood as well as
+its superior quality of samples compared to previous top-performing models3
+
+A potential direction for future work is to extend MACOW to other forms of data, in particular text,
+on which no attempt (to the best of our knowledge) has been made to apply ﬂow-based generative
+models. Another exciting direction is to combine MACOW with variational inference to automatically
+learn meaningful (low-dimensional) representations from raw data.
+
+References
+
+Samuel R Bowman, Luke Vilnis, Oriol Vinyals, Andrew M Dai, Rafal Jozefowicz, and Samy Bengio.
+
+Generating sentences from a continuous space. arXiv preprint arXiv:1511.06349, 2015.
+
+Andrew Brock, Jeff Donahue, and Karen Simonyan. Large scale gan training for high ﬁdelity natural
+
+image synthesis. In International Conference on Learning Representations (ICLR), 2019.
+
+2The reduced-temperature sampling is only applied to LSUN and CelebA-HQ 5-bits images, where MACOW
+adopts additive coupling layers. For CIFAR-10 and ImageNet 8-bits images, we sample with temperature 1.0.
+
+3https://github.com/XuezheMax/macow
+
+8
+
+Xi Chen, Nikhil Mishra, Mostafa Rohaninejad, and Pieter Abbeel. Pixelsnail: An improved autore-
+
+gressive generative model. arXiv preprint arXiv:1712.09763, 2017.
+
+Djork-Arné Clevert, Thomas Unterthiner, and Sepp Hochreiter. Fast and accurate deep network
+
+learning by exponential linear units (elus). arXiv preprint arXiv:1511.07289, 2015.
+
+Laurent Dinh, David Krueger, and Yoshua Bengio. Nice: Non-linear independent components
+
+estimation. arXiv preprint arXiv:1410.8516, 2014.
+
+Laurent Dinh, Jascha Sohl-Dickstein, and Samy Bengio. Density estimation using real nvp. arXiv
+
+preprint arXiv:1605.08803, 2016.
+
+Mathieu Germain, Karol Gregor, Iain Murray, and Hugo Larochelle. Made: Masked autoencoder for
+distribution estimation. In International Conference on Machine Learning, pages 881–889, 2015.
+
+Ian Goodfellow, Jean Pouget-Abadie, Mehdi Mirza, Bing Xu, David Warde-Farley, Sherjil Ozair,
+Aaron Courville, and Yoshua Bengio. Generative adversarial nets. In Advances in neural informa-
+tion processing systems (NIPS-2014), pages 2672–2680, 2014.
+
+Jonathan Ho, Xi Chen, Aravind Srinivas, Yan Duan, and Pieter Abbeel. Flow++: Improving ﬂow-
+based generative models with variational dequantization and architecture design. In International
+Conference on Machine Learning, pages 2722–2730, 2019.
+
+Emiel Hoogeboom, Rianne Van Den Berg, and Max Welling. Emerging convolutions for generative
+normalizing ﬂows. In International Conference on Machine Learning, pages 2771–2780, 2019.
+
+Sergey Ioffe and Christian Szegedy. Batch normalization: Accelerating deep network training
+by reducing internal covariate shift. In International Conference on Machine Learning, pages
+448–456, 2015.
+
+Tero Karras, Timo Aila, Samuli Laine, and Jaakko Lehtinen. Progressive growing of gans for
+improved quality, stability, and variation. In International Conference on Learning Representations
+(ICLR), 2018.
+
+Diederik P Kingma and Jimmy Ba. Adam: A method for stochastic optimization. arXiv preprint
+
+arXiv:1412.6980, 2014.
+
+Diederik P Kingma and Max Welling. Auto-encoding variational bayes. In Proceedings of the 2th
+International Conference on Learning Representations (ICLR-2014), Banff, Canada, April 2014.
+
+Diederik P Kingma, Tim Salimans, Rafal Jozefowicz, Xi Chen, Ilya Sutskever, and Max Welling.
+Improved variational inference with inverse autoregressive ﬂow. In Advances in Neural Information
+Processing Systems, pages 4743–4751, 2016.
+
+Durk P Kingma and Prafulla Dhariwal. Glow: Generative ﬂow with invertible 1x1 convolutions. In
+
+Advances in Neural Information Processing Systems, pages 10236–10245, 2018.
+
+Alex Krizhevsky and Geoffrey Hinton. Learning multiple layers of features from tiny images.
+
+Technical report, Citeseer, 2009.
+
+Hugo Larochelle and Iain Murray. The neural autoregressive distribution estimator. In Proceedings
+of the Fourteenth International Conference on Artiﬁcial Intelligence and Statistics (AISTATS-2011,
+pages 29–37, 2011.
+
+Ziwei Liu, Ping Luo, Xiaogang Wang, and Xiaoou Tang. Deep learning face attributes in the wild. In
+Proceedings of International Conference on Computer Vision (ICCV), pages 3730–3738, 2015.
+
+Xuezhe Ma, Chunting Zhou, and Eduard Hovy. MAE: Mutual posterior-divergence regularization for
+variational autoencoders. In International Conference on Learning Representations (ICLR), 2019.
+
+Jacob Menick and Nal Kalchbrenner. Generating high ﬁdelity images with subscale pixel networks
+
+and multidimensional upscaling, 2019.
+
+Aaron van den Oord, Nal Kalchbrenner, and Koray Kavukcuoglu. Pixel recurrent neural networks.
+
+In Proceedings of International Conference on Machine Learning (ICML-2016), 2016.
+
+9
+
+George Papamakarios, Theo Pavlakou, and Iain Murray. Masked autoregressive ﬂow for density
+estimation. In Advances in Neural Information Processing Systems, pages 2338–2347, 2017.
+
+Niki Parmar, Ashish Vaswani, Jakob Uszkoreit, Łukasz Kaiser, Noam Shazeer, and Alexander Ku.
+
+Image transformer. arXiv preprint arXiv:1802.05751, 2018.
+
+Adam Paszke, Sam Gross, Soumith Chintala, Gregory Chanan, Edward Yang, Zachary DeVito,
+Zeming Lin, Alban Desmaison, Luca Antiga, and Adam Lerer. Automatic differentiation in
+PyTorch. In NIPS Autodiff Workshop, 2017.
+
+Ryan Prenger, Rafael Valle, and Bryan Catanzaro. Waveglow: A ﬂow-based generative network for
+
+speech synthesis. arXiv preprint arXiv:1811.00002, 2018.
+
+Alec Radford, Luke Metz, and Soumith Chintala. Unsupervised representation learning with deep
+
+convolutional generative adversarial networks. arXiv preprint arXiv:1511.06434, 2015.
+
+Scott Reed, Aäron Oord, Nal Kalchbrenner, Sergio Gómez Colmenarejo, Ziyu Wang, Yutian Chen,
+Dan Belov, and Nando Freitas. Parallel multiscale autoregressive density estimation. In Interna-
+tional Conference on Machine Learning, pages 2912–2921, 2017.
+
+Danilo Jimenez Rezende and Shakir Mohamed. Variational inference with normalizing ﬂows. arXiv
+
+preprint arXiv:1505.05770, 2015.
+
+Tim Salimans, Andrej Karpathy, Xi Chen, Diederik P Kingma, and Yaroslav Bulatov. Pixelcnn++: A
+pixelcnn implementation with discretized logistic mixture likelihood and other modiﬁcations. In
+International Conference on Learning Representations (ICLR), 2017.
+
+L Theis, A van den Oord, and M Bethge. A note on the evaluation of generative models.
+
+In
+
+International Conference on Learning Representations (ICLR 2016), pages 1–10, 2016.
+
+Benigno Uria, Iain Murray, and Hugo Larochelle. Rnade: The real-valued neural autoregressive
+density-estimator. In Advances in Neural Information Processing Systems, pages 2175–2183, 2013.
+
+Aäron Van Den Oord, Sander Dieleman, Heiga Zen, Karen Simonyan, Oriol Vinyals, Alex Graves,
+Nal Kalchbrenner, Andrew Senior, and Koray Kavukcuoglu. Wavenet: A generative model for raw
+audio. 2016.
+
+Aaron van den Oord, Nal Kalchbrenner, Lasse Espeholt, Oriol Vinyals, Alex Graves, et al. Conditional
+image generation with pixelcnn decoders. In Advances in Neural Information Processing Systems,
+pages 4790–4798, 2016.
+
+Fisher Yu, Yinda Zhang, Shuran Song, Ari Seff, and Jianxiong Xiao. Lsun: Construction of a large-
+scale image dataset using deep learning with humans in the loop. arXiv preprint arXiv:1506.03365,
+2015.
+
+Guoqing Zheng, Yiming Yang, and Jaime G. Carbonell. Convolutional normalizing ﬂows. CoRR,
+
+abs/1711.02255, 2017.
+
+Zachary M Ziegler and Alexander M Rush. Latent normalizing ﬂows for discrete sequences. In
+
+Proceedings of International Conference on Machine Learning (ICML-2019), 2019.
+
+10
+
+Appendix: MaCow: Masked Convolutional Generative Flow
+
+A Dequantization
+
+As described in §2, generative ﬂows are deﬁned on continuous random variables. Many real-world
+datasets, however, are recordings of discrete representations of signals, and ﬁtting a continuous density
+model to discrete data produces a degenerate solution that places all probability mass on discrete
+datapoints (Uria et al., 2013; Ho et al., 2019). A common solution to this problem is “dequantization”
+that converts the discrete data distribution into a continuous one.
+
+Speciﬁcally, in the context of natural images, each dimension (pixel) of the discrete data x takes on
+values in {0, 1, . . . , 255}. The dequatization process adds continuous random noise u to x, resulting
+a continuous data point of:
+
+y = x + u,
+(1)
+where u ∈ [0, 1)d is continuous random noise taking values from interval [0, 1). By modeling the
+density of Y ∈ Y with pθ(y), the distribution of X is deﬁned as:
+
+Pθ(x) =
+
+pθ(y) dy =
+
+pθ(x + u) du.
+
+(2)
+
+(cid:90)
+
+Y
+
+(cid:90)
+
+[0,1)d
+
+By restricting the range of u in [0, 1), the mapping between y and a pair of x and u is bijective. Thus,
+we have pθ(y) = pθ(x + u) = pθ(x, u).
+
+By introducing a dequantization noise distribution q(u|x), the training objective in (1) can be
+re-written as:
+
+EP (X)
+
+(cid:104)
+
+(cid:105)
+− log Pθ(X)
+
+= EP (X)
+
+− log
+
+pθ(X, u) du
+
+(cid:90)
+
+[0,1)d
+
+(cid:20)
+
+(cid:35)
+
+(cid:21)
+
+(cid:34)
+
+(cid:34)
+
+(cid:34)
+
+= EP (X)
+
+Eq(u|X)
+
+− log
+
+pθ(X, u)
+q(u|X)
+
+− KL(cid:0)q(u|X)||pθ(u|X)(cid:1)
+
+≤ EP (X)
+
+Eq(u|X)
+
+(cid:104)
+
+(cid:105)
+− log pθ(X, u)
+
+(cid:104)
+
++ Eq(u|X)
+
+log q(u|X)
+
+(cid:35)
+
+(cid:35)
+(cid:105)
+
+= Ep(Y )
+
+(cid:104)
+
+(cid:105)
+− log pθ(Y )
+
++ EP (X)Eq(u|X)
+
+(cid:104)
+
+(cid:105)
+log q(u|X)
+
+,
+
+(3)
+
+where p(y) = P (x)q(u|x) is the distribution of the dequantized variable Y under the dequantization
+noise distribution q(u|X).
+
+Uniform Dequantization. The most common dequantization method in prior work is uniform
+dequantization where the noise u is sampled from the uniform distribution Unif(0, 1) such that
+
+From (3), we have
+
+as log q(u|x) = 0, ∀x ∈ X .
+
+q(u|x) ∼ Unif(0, 1), ∀x ∈ X .
+
+EP (X) [− log Pθ(X)] ≤ Ep(Y ) [− log pθ(Y )] ,
+
+Variational Dequantization. As discussed in Ho et al. (2019), uniform dequantization directs
+pθ(y) to assign uniform density to unit hypercubes [0, 1)d, which is difﬁcult for smooth distribution
+approximators. They proposed a parametric dequantization noise distribution qφ(u|x) with a training
+objective to optimize the evidence lower bound (ELBO) provided in (3):
+
+min
+θ,φ
+
+Epφ(Y ) [− log pθ(Y )] + EP (X)Eqφ(u|X) [log qφ(u|X)] ,
+
+(4)
+
+where pφ(y) = P (x)qφ(u|x). In this paper, we implemented both these two dequantization methods
+for our MACOW, as is detailed in §4).
+
+11
+
+B Experimental Details
+
+B.1 Model details
+
+Table 4: Hyper-parameters for MACOW in our experiments.
+
+DataSet
+
+Dequant Batch Size Levels
+
+Depths per Level
+
+# Param # Param Glow
+
+CIFAR-10
+
+ImageNet
+
+LSUN
+
+CelebA-HQ
+
+Unif
+Var
+
+Unif
+Var
+
+Unif
+Var
+
+Unif
+Var
+
+512
+512
+
+160
+160
+
+160
+160
+
+40
+40
+
+3
+3
+
+4
+4
+
+5
+5
+
+6
+6
+
+[[12, 12], [12, 12], 12]
+[[12, 12], [12, 12], 12]
+
+[[16, 16], [16, 16], [12, 12], 12]
+[[16, 16], [16, 16], [12, 12], 12]
+
+[[32, 32], [32, 32], [16, 16], [12, 12], 6]
+[[32, 32], [32, 32], [16, 16], [12, 12], 6]
+
+[[24, 24], [16, 16], [16, 16], [8, 8], [4, 4], 2]
+[[24, 24], [16, 16], [16, 16], [8, 8], [4, 4], 2]
+
+41.2M
+43.5M
+
+117.2M
+122.5M
+
+166.6M
+171.9M
+
+171.9M
+177.3M
+
+44.2M
+
+111.6M
+
+198.1M
+
+170.8M
+
+B.2 Optimization
+
+Parameter optimization is performed with the Adam optimizer (Kingma and Ba, 2014) with β =
+(0.9, 0.999) and (cid:15) = 1e − 8. Warmup training is applied to all the experiments: the learning rate
+linearly increases to for 500 updates to the initial learning rate 1e − 3. Then we use exponential decay
+to decrease the learning rate with decay rate is 0.999997.
+
+12
+
+C More samples from our experiments
+
+Figure 4: Samples from 5-bit, 128×128 LSUN bedrooms.
+
+13
+
+Figure 5: Samples from 5-bit, 128×128 LSUN church.
+
+14
+
+Figure 6: Samples from 5-bit, 128×128 LSUN towers.
+
+15
+
+Figure 7: Synthetic celebrities sampled from 5-bit 256×256 CelebA-HQ.
+
+16
+
+Figure 8: Samples from 8-bit imagenet 64×64 with uniform dequantization
+
+17
+
+Figure 9: Samples from 8-bit imagenet 64×64 with variational dequantization
+
+18
+
