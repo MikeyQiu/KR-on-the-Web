@@ -9,7 +9,7 @@ Articles often have multiple authors, for which each name is mentioned at the be
 We obtained our data through the api of [Paper with Code](https://paperswithcode.com/), where both Github repository and Paper's PDF links are accessiable.
 ## 4. Impelementation
 ### 4.1 Ontology Design 
-You can find the ontology [here](https://github.com/MikeyQiu/KR-on-the-Web/blob/master/krw v0.7 (1).owl) and the visualization [here](https://github.com/MikeyQiu/KR-on-the-Web/blob/master/Pictures/ontology complete.png).
+You can find the ontology [here](https://github.com/MikeyQiu/KR-on-the-Web/blob/master/krw_v1.0.owl) and the visualization [here](https://github.com/MikeyQiu/KR-on-the-Web/blob/master/Pictures/Ontology_Complete.png).
 ### 4.2 Data
 We prepared our data in both relational sql database and rdf triples in turtle format, which are zipped in data directory.
 ### 4.3 Preprocessing
@@ -18,7 +18,7 @@ This part is implemented by the scripts in Jasper's directory. Afterwards we sel
 We focused ourselves on 5 out of 14 contribution roles from the CRediT Methodology, namely writing_draft, writing_editing, resource, supervision and software.
 #### Supervision, etc.
 
-- This part is impemented by [textmining_final-Copy1.ipynb](https://github.com/MikeyQiu/KR-on-the-Web/blob/master/textmining_final-Copy1.ipynb)
+- This part is impemented by [textmining_final-Copy1.ipynb](https://github.com/MikeyQiu/KR-on-the-Web/blob/master/textmining_final.ipynb)
 - We derive author related information from the raw data of the PDF link, derive author contribution roles like Resource and Supervision comparing with the meta data from MAKG.
 
 
