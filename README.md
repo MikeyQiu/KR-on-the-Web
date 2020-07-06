@@ -1,3 +1,4 @@
+<img src="https://github.com/MikeyQiu/KR-on-the-Web/blob/master/Logo.png" title="KRoW" alt="KRoW"></a>
 # KR-on-the-Web
 > This is a course project from Knowledge Representation on the Web, Vrije Universiteit Amsterdam.
 ## 1. Link to the project 
