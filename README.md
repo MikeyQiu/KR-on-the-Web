@@ -2,7 +2,10 @@
 # KR-on-the-Web
 > This is a course project from Knowledge Representation on the Web, Vrije Universiteit Amsterdam.
 ## 1. Link to the project 
+### Repository
 https://github.com/MikeyQiu/KR-on-the-Web/
+### Article
+https://www.dropbox.com/s/599hpi1v7xt4ezg/KR_on_the_Web.pdf?dl=0
 ## 2. Project details: What is the project’s goal? 
 Articles often have multiple authors, for which each name is mentioned at the beginning of the article. However, the role of each other is rarely mentioned in articles, preventing researchers and readers to acknowledge each author's work. We aim to discover contributionship based on [CRediT](https://casrai.org/credit/) instead of authorship from papers, by meirging linked data from the Microsoft Academic Knowledge Graph(MAKG), meta data, commitmentss from Github and raw information from text.
 ## 3. Data Resource
